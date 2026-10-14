@@ -7,6 +7,7 @@ kepemilikan dan harga rata-rata. Tidak ada fungsi yang bisa mengirim order.
 from dataclasses import dataclass
 
 import indodax_api
+import portfolio_store
 
 # Koin yang dilacak -> pair Indodax.
 COIN_PAIRS = {
@@ -148,3 +149,38 @@ def compute_holdings(trades, balances, prices):
                            unrealized, basis_known))
     out.sort(key=lambda h: h.value_idr, reverse=True)
     return out
+
+
+def sync_trades(conn, pairs=None):
+    """Tarik riwayat transaksi dari Indodax -> `portfolio.db` (read-only).
+
+    Menyimpan beli dan jual (bukan reward — itu dicatat manual). Kegagalan
+    jaringan pada satu pair tidak menghentikan pair lain. Mengembalikan
+    jumlah baris baru.
+    """
+    if pairs is None:
+        pairs = list(COIN_PAIRS.values())
+    inserted = 0
+    for pair in pairs:
+        try:
+            trades = indodax_api.my_trades(pair)
+        except Exception:
+            continue
+        for t in trades:
+            side = (t.get("side") or "").lower()
+            if side not in ("buy", "sell"):
+                continue
+            trade = {
+                "pair": pair,
+                "side": side,
+                "price": t.get("price"),
+                "qty": t.get("qty"),
+                "quote": t.get("quote"),
+                "fee": 0,
+                "ts": t.get("time"),
+                "source": "api",
+                "external_id": f"{pair}:{t.get('id')}",
+            }
+            if portfolio_store.insert_trade(conn, trade):
+                inserted += 1
+    return inserted
