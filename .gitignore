@@ -6,3 +6,4 @@ deskflow.log*
 *.log
 .pytest_cache/
 .venv/
+dashboard_shared_state.json
