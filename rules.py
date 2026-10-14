@@ -108,3 +108,34 @@ def take_profit_actions(holdings, thresholds=((50, 25), (100, 25)),
             executable=amount >= min_order,
         ))
     return actions
+
+
+def rebalance_actions(holdings, target=None, band_pct=10.0,
+                      fee_pct=0.002, min_order=10000):
+    """Saran jual untuk aset yang menyimpang jauh di atas target.
+
+    Hanya menghasilkan `SELL`, dan hanya bila **dua-duanya** benar:
+    (1) bobot aset melebihi target lebih dari `band_pct` poin persen, dan
+    (2) aset memicu take-profit. **Tidak pernah** menghasilkan `BUY`, jadi
+    cadangan IDR tidak pernah dibelanjakan oleh rebalance (aliran DCA yang
+    menambah posisi; band hanya memangkas yang kelewat berat).
+    """
+    if target is None:
+        target = DEFAULT_TARGET
+    total = sum(h.value_idr for h in holdings)
+    if total <= 0:
+        return []
+
+    actions = []
+    for h in holdings:
+        target_share = target.get(h.pair, 0.0)
+        share = h.value_idr / total
+        if (share - target_share) * 100 > band_pct:
+            actions.extend(
+                take_profit_actions([h], fee_pct=fee_pct, min_order=min_order))
+    return actions
+
+
+def max_position_ok(amount_idr, total_idr, max_pct=0.25):
+    """True bila menambah `amount_idr` masih di bawah batas porsi `max_pct`."""
+    return amount_idr <= max_pct * total_idr
