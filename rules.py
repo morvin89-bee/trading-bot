@@ -143,3 +143,48 @@ def rebalance_actions(holdings, target=None, band_pct=10.0,
 def max_position_ok(amount_idr, total_idr, max_pct=0.25):
     """True bila menambah `amount_idr` masih di bawah batas porsi `max_pct`."""
     return amount_idr <= max_pct * total_idr
+
+
+def reserve_buy_actions(holdings, idr_reserve, target=None, monthly=500000,
+                        drop_pct=15.0, max_fraction=0.5, min_order=10000):
+    """Saran **BELI** memakai sebagian cadangan saat aset jatuh (spec 6.4).
+
+    Untuk tiap aset yang harga bid-nya turun minimal `drop_pct` persen dari
+    harga rata-rata, sarankan membeli satu jatah bulanan target aset itu
+    (`target[pair] * monthly`), diurutkan dari yang paling jatuh. Total
+    belanja dibatasi `max_fraction * idr_reserve`, jadi sebagian besar
+    cadangan tetap aman. Posisi tanpa harga rata-rata dilewati.
+    """
+    if target is None:
+        target = DEFAULT_TARGET
+    budget = max(0.0, idr_reserve) * max_fraction
+
+    cands = []
+    for h in holdings:
+        if not h.basis_known or not h.avg_cost or not h.price:
+            continue
+        drop = (h.avg_cost - h.price) / h.avg_cost * 100
+        if drop >= drop_pct:
+            cands.append((drop, h))
+    cands.sort(key=lambda x: x[0], reverse=True)
+
+    actions = []
+    for drop, h in cands:
+        if budget < min_order:
+            break
+        tranche = target.get(h.pair, 0.0) * monthly
+        amount = min(tranche, budget)
+        if amount < min_order:
+            continue
+        actions.append(Action(
+            kind="BUY",
+            pair=h.pair,
+            amount_idr=amount,
+            qty=amount / h.price,
+            price_ref=h.price,
+            reason=(f"Turun {drop:.1f}% dari harga rata-rata (ambang "
+                    f"-{drop_pct:.0f}%) -> beli pakai sebagian cadangan"),
+            executable=True,
+        ))
+        budget -= amount
+    return actions

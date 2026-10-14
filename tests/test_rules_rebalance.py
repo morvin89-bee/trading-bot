@@ -34,3 +34,20 @@ def test_no_sell_when_on_target_once_reserve_is_counted():
     h = [_h("btc", "btc_idr", 1_000_000, 1_600_000, 0.34375)]
     assert [a for a in rules.rebalance_actions(h, idr_reserve=450_000)
             if a.kind == "SELL"] == []
+
+
+def test_reserve_buy_suggested_when_asset_falls_15pct():
+    h = [_h("btc", "btc_idr", 1_000_000, 800_000, 1.0)]   # -20% dari rata-rata
+    acts = rules.reserve_buy_actions(h, idr_reserve=100000)
+    assert acts and acts[0].kind == "BUY" and acts[0].pair == "btc_idr"
+
+
+def test_no_reserve_buy_on_shallow_drop():
+    h = [_h("btc", "btc_idr", 1_000_000, 900_000, 1.0)]   # hanya -10%
+    assert rules.reserve_buy_actions(h, idr_reserve=100000) == []
+
+
+def test_reserve_buy_keeps_most_of_the_reserve():
+    h = [_h("btc", "btc_idr", 1_000_000, 700_000, 1.0)]
+    acts = rules.reserve_buy_actions(h, idr_reserve=100000, max_fraction=0.5)
+    assert acts[0].amount_idr <= 50000 + 1e-6

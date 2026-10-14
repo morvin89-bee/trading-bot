@@ -11,8 +11,14 @@ import argparse
 import os
 
 import alerts
+import indodax_api
 import portfolio
 import portfolio_store
+
+
+def _env(key):
+    """Ambil dari environment atau .env (kunci tidak perlu hardcode)."""
+    return os.getenv(key) or indodax_api._load_env().get(key, "")
 
 
 def _rp(x):
@@ -61,8 +67,8 @@ def main(argv=None):
         print(text)
 
         if args.telegram:
-            token = os.getenv("TELEGRAM_TOKEN")
-            chat = os.getenv("TELEGRAM_CHAT_ID")
+            token = _env("TELEGRAM_TOKEN")
+            chat = _env("TELEGRAM_CHAT_ID")
             if token and chat:
                 ok = alerts.send_telegram(token, chat, text)
                 print("Telegram terkirim." if ok else "Telegram gagal.")

@@ -18,3 +18,10 @@ def test_alert_amount_uses_indonesian_format():
                      "+59% dari rata-rata", True)
     out = alerts.build_alerts([], [a])
     assert "Rp 400.000" in out[0]
+
+
+def test_alert_for_reserve_buy_says_beli():
+    a = rules.Action("BUY", "btc_idr", 50000, 0.0000625, 8e8,
+                     "Turun 20% dari rata-rata", True)
+    out = alerts.build_alerts([], [a])
+    assert out[0].startswith("BELI") and "Rp 50.000" in out[0]

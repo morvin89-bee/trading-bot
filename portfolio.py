@@ -280,7 +280,8 @@ def refresh(conn, online=True):
     seen = set()
     actions = []
     for a in (rules.take_profit_actions(holdings)
-              + rules.rebalance_actions(holdings, idr_reserve=idr)):
+              + rules.rebalance_actions(holdings, idr_reserve=idr)
+              + rules.reserve_buy_actions(holdings, idr_reserve=idr)):
         key = (a.kind, a.pair)
         if key in seen:
             continue

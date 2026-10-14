@@ -30,6 +30,9 @@ def build_alerts(holdings: list, actions: "list[rules.Action]") -> list:
         if a.kind == "SELL":
             out.append(f"JUAL {a.pair}: {a.reason}. Perkiraan nilai "
                        f"{_rp(a.amount_idr)}{note}.")
+        elif a.kind == "BUY":
+            out.append(f"BELI {a.pair}: {a.reason}. Perkiraan nilai "
+                       f"{_rp(a.amount_idr)}{note}.")
         else:
             out.append(f"{a.kind} {a.pair}: {a.reason}{note}.")
     return out
