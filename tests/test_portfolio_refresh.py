@@ -33,3 +33,17 @@ def test_refresh_does_not_duplicate_sell_for_same_pair(tmp_conn, monkeypatch):
     sells = [a for a in out["actions"] if a.kind == "SELL"
              and a.pair == "btc_idr"]
     assert len(sells) == 1     # bukan 2 (take-profit + rebalance) = "jual 50%"
+
+
+def test_refresh_writes_at_most_one_snapshot_per_day(tmp_conn, monkeypatch):
+    monkeypatch.setattr(p, "fetch_balances", lambda: {"IDR": 100000})
+    monkeypatch.setattr(p, "fetch_price", lambda pair: None)
+    monkeypatch.setattr(p, "sync_trades", lambda conn, pairs=None: 0)
+    p.refresh(tmp_conn)
+    p.refresh(tmp_conn)
+    assert len(ps.list_snapshots(tmp_conn)) == 1   # buka dasbor berkali-kali aman
+
+
+def test_offline_refresh_does_not_write_snapshot(tmp_conn):
+    p.refresh(tmp_conn, online=False)              # hanya membaca cache
+    assert ps.list_snapshots(tmp_conn) == []

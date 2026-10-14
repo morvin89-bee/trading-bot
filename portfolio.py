@@ -219,12 +219,41 @@ def _latest_breakdown(conn):
         return []
 
 
+def _day(ts):
+    return time.strftime("%Y-%m-%d", time.localtime(ts))
+
+
+def _snapshot_done_today(conn, now):
+    snaps = portfolio_store.list_snapshots(conn)
+    if not snaps:
+        return False
+    return _day(snaps[-1].get("ts") or 0) == _day(now)
+
+
+def _write_daily_snapshot(conn, total, idr, holdings):
+    """Tulis satu snapshot, maksimal sekali per hari (waktu lokal)."""
+    now = int(time.time())
+    if _snapshot_done_today(conn, now):
+        return False
+    contributions = portfolio_store.total_contributions(conn)
+    portfolio_store.insert_snapshot(conn, {
+        "ts": now,
+        "total_idr": total,
+        "contributions_idr": contributions,
+        "market_idr": total - contributions,
+        "breakdown_json": _breakdown_json(holdings, idr),
+    })
+    return True
+
+
 def refresh(conn, online=True):
-    """Segarkan portofolio, hitung saran aksi, dan tulis satu snapshot.
+    """Segarkan portofolio, hitung saran aksi, dan (bila online) snapshot.
 
     Bila `online` benar, tarik riwayat transaksi dan saldo terbaru dari
-    Indodax (read-only) serta harga pasar. Bila salah, pakai snapshot
-    terakhir sebagai cache (tanpa jaringan).
+    Indodax (read-only) serta harga pasar, lalu tulis snapshot — **maksimal
+    sekali per hari** (membuka dasbor berulang tidak menambah baris). Bila
+    salah, pakai snapshot terakhir sebagai cache tanpa jaringan dan tanpa
+    menulis apa pun.
 
     Mengembalikan `{"holdings": [...], "total_idr": float, "actions": [...]}`.
     """
@@ -258,12 +287,6 @@ def refresh(conn, online=True):
         seen.add(key)
         actions.append(a)
 
-    contributions = portfolio_store.total_contributions(conn)
-    portfolio_store.insert_snapshot(conn, {
-        "ts": int(time.time()),
-        "total_idr": total,
-        "contributions_idr": contributions,
-        "market_idr": total - contributions,
-        "breakdown_json": _breakdown_json(holdings, idr),
-    })
+    if online:
+        _write_daily_snapshot(conn, total, idr, holdings)
     return {"holdings": holdings, "total_idr": total, "actions": actions}
