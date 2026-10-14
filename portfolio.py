@@ -4,10 +4,13 @@ Membaca saldo & riwayat transaksi dari Indodax (via `indodax_api`),
 menggabungkannya dengan catatan lokal (`portfolio.db`), lalu menghitung
 kepemilikan dan harga rata-rata. Tidak ada fungsi yang bisa mengirim order.
 """
+import json
+import time
 from dataclasses import dataclass
 
 import indodax_api
 import portfolio_store
+import rules
 
 # Koin yang dilacak -> pair Indodax.
 COIN_PAIRS = {
@@ -184,3 +187,70 @@ def sync_trades(conn, pairs=None):
             if portfolio_store.insert_trade(conn, trade):
                 inserted += 1
     return inserted
+
+
+def fetch_price(pair):
+    """Harga **bid** Indodax untuk `pair`; `None` bila gagal (mis. 429)."""
+    try:
+        import scanner                      # impor malas: menghindari efek samping
+        return scanner.indodax_price(pair)[0]
+    except Exception:
+        return None
+
+
+def _breakdown_json(holdings, idr):
+    items = [{"coin": "IDR", "pair": None, "qty": idr, "price": 1.0,
+              "value_idr": idr}]
+    for h in holdings:
+        items.append({"coin": h.coin, "pair": h.pair, "qty": h.qty,
+                      "price": h.price, "value_idr": h.value_idr})
+    return json.dumps(items, ensure_ascii=False)
+
+
+def _latest_breakdown(conn):
+    snaps = portfolio_store.list_snapshots(conn)
+    if not snaps:
+        return []
+    try:
+        return json.loads(snaps[-1].get("breakdown_json") or "[]")
+    except (ValueError, TypeError):
+        return []
+
+
+def refresh(conn, online=True):
+    """Segarkan portofolio, hitung saran aksi, dan tulis satu snapshot.
+
+    Bila `online` benar, tarik riwayat transaksi dan saldo terbaru dari
+    Indodax (read-only) serta harga pasar. Bila salah, pakai snapshot
+    terakhir sebagai cache (tanpa jaringan).
+
+    Mengembalikan `{"holdings": [...], "total_idr": float, "actions": [...]}`.
+    """
+    if online:
+        sync_trades(conn)
+        balances = fetch_balances()
+        prices = {pair: fetch_price(pair) for pair in COIN_PAIRS.values()}
+    else:
+        items = _latest_breakdown(conn)
+        balances = {it["coin"]: it["qty"] for it in items}
+        prices = {it["pair"]: it["price"] for it in items if it.get("pair")}
+
+    idr = float(balances.get("IDR", 0) or 0)
+    coins = {k: v for k, v in balances.items() if k != "IDR"}
+
+    trades = portfolio_store.list_trades(conn)
+    holdings = compute_holdings(trades, coins, prices)
+    market = sum(h.value_idr for h in holdings)
+    total = idr + market
+
+    actions = (rules.take_profit_actions(holdings)
+               + rules.rebalance_actions(holdings))
+
+    portfolio_store.insert_snapshot(conn, {
+        "ts": int(time.time()),
+        "total_idr": total,
+        "contributions_idr": portfolio_store.total_contributions(conn),
+        "market_idr": market,
+        "breakdown_json": _breakdown_json(holdings, idr),
+    })
+    return {"holdings": holdings, "total_idr": total, "actions": actions}
