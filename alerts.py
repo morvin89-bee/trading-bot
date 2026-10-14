@@ -8,6 +8,14 @@ import requests
 import rules
 
 
+def _rp(x):
+    """Format rupiah gaya Indonesia: 400000 -> 'Rp 400.000'."""
+    try:
+        return "Rp " + f"{float(x):,.0f}".replace(",", ".")
+    except (TypeError, ValueError):
+        return "Rp 0"
+
+
 def build_alerts(holdings: list, actions: "list[rules.Action]") -> list:
     """Ubah daftar `Action` menjadi pesan teks berbahasa Indonesia.
 
@@ -21,7 +29,7 @@ def build_alerts(holdings: list, actions: "list[rules.Action]") -> list:
         note = "" if a.executable else " (di bawah minimum order Rp 10.000 — tunda)"
         if a.kind == "SELL":
             out.append(f"JUAL {a.pair}: {a.reason}. Perkiraan nilai "
-                       f"Rp {a.amount_idr:,.0f}{note}.")
+                       f"{_rp(a.amount_idr)}{note}.")
         else:
             out.append(f"{a.kind} {a.pair}: {a.reason}{note}.")
     return out

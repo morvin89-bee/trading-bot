@@ -8,7 +8,16 @@ import time
 
 
 def _month(ts):
-    return time.strftime("%Y-%m", time.gmtime(ts))
+    # Waktu lokal, konsisten dengan tanggal setoran (`portfolio_cli._parse_date`
+    # memakai waktu lokal) dan dengan apa yang dilihat pengguna.
+    return time.strftime("%Y-%m", time.localtime(ts))
+
+
+def month_contributions(deposits, ts):
+    """Jumlah setoran pada bulan yang sama dengan `ts` (waktu lokal)."""
+    m = _month(ts)
+    return sum(float(d.get("idr") or 0) for d in deposits
+               if _month(d.get("ts") or 0) == m)
 
 
 def monthly_report(snapshots, deposits):

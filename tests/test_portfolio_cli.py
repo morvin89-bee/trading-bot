@@ -11,3 +11,14 @@ def test_cmd_buy_records_trade(tmp_conn):
 def test_cmd_deposit_records(tmp_conn):
     cli.cmd_deposit(tmp_conn, 500000, 1791570000, "setoran Okt")
     assert ps.total_contributions(tmp_conn) == 500000
+
+
+def test_snapshot_survives_network_failure(tmp_conn, monkeypatch):
+    monkeypatch.setattr(cli.ps, "connect", lambda *a, **k: tmp_conn)
+    monkeypatch.setattr(cli.ps, "init_db", lambda conn: None)
+
+    def boom(conn, online=True):
+        raise RuntimeError("jaringan mati")
+
+    monkeypatch.setattr(cli.portfolio, "refresh", boom)
+    assert cli.main(["snapshot"]) == 1       # gagal rapi, bukan meledak

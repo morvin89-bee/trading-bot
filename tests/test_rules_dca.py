@@ -21,3 +21,8 @@ def test_below_min_order_goes_to_idr():
     # 15.000 -> tiap aset < minimum order 10.000, jadi semuanya ke cadangan.
     out = rules.dca_split(15000, {})
     assert out["IDR"] == 15000
+
+
+def test_total_preserved_even_for_fractional_amount():
+    out = rules.dca_split(500000.75, {})
+    assert abs(sum(out.values()) - 500000.75) < 1e-6

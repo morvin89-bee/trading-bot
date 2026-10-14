@@ -4,6 +4,7 @@ Idempoten — baris dengan `external_id` yang sama tidak diduplikasi, jadi
 aman dijalankan berulang kali.
 """
 import os
+import pathlib
 import sqlite3
 
 import portfolio_store as ps
@@ -13,12 +14,14 @@ def migrate(dca_path, conn):
     """Pindahkan tabel `purchases` dari dca.db -> `trades` di portfolio.db.
 
     Mengembalikan jumlah baris baru yang dimasukkan. Bila file atau tabel
-    tidak ada, kembalikan 0 (tanpa error).
+    tidak ada, kembalikan 0 (tanpa error). File sumber dibuka **read-only**
+    supaya migrasi tidak pernah mengubah dca.db.
     """
     if not os.path.exists(dca_path):
         return 0
 
-    src = sqlite3.connect(dca_path)
+    uri = pathlib.Path(os.path.abspath(dca_path)).as_uri() + "?mode=ro"
+    src = sqlite3.connect(uri, uri=True)
     try:
         rows = src.execute(
             "SELECT id, pair, idr, price, coins, bought_at, api_trade_id "

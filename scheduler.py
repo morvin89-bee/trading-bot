@@ -52,7 +52,11 @@ def main(argv=None):
     conn = portfolio_store.connect(portfolio_store.DB_FILE)
     portfolio_store.init_db(conn)
     try:
-        out = take_snapshot(conn)
+        try:
+            out = take_snapshot(conn)
+        except Exception as e:
+            print(f"Gagal mengambil snapshot: {e}")
+            return 1
         text = _summary(out)
         print(text)
 

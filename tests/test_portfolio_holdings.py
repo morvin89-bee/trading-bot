@@ -35,3 +35,12 @@ def test_realized_pnl_on_profitable_sell():
               dict(pair="btc_idr", side="sell", price=1_200_000, qty=1.0,
                    quote=1_200_000, fee=0, ts=2)]
     assert p.realized_pnl(trades)["btc_idr"] == 200_000
+
+
+def test_missing_price_marks_unrealized_unknown():
+    trades = [dict(pair="btc_idr", side="buy", price=1_000_000, qty=1.0,
+                   quote=1_000_000, fee=0, ts=1)]
+    h = p.compute_holdings(trades, {"btc": 1.0}, {"btc_idr": None})[0]
+    assert h.basis_known is True
+    assert h.value_idr == 0.0
+    assert h.unrealized_idr is None      # harga tak tersedia -> P&L tak diketahui

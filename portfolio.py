@@ -141,7 +141,9 @@ def compute_holdings(trades, balances, prices):
         if s and s["buys_exist"]:
             avg = (s["cost"] / s["qty_bought"]) if s["qty_bought"] > 0 else 0.0
             cost_basis = s["cost"]
-            unrealized = value - qty * avg
+            # Bila harga pasar tak tersedia, nilai aset 0 dan P&L belum
+            # diketahui (bukan kerugian) -> `None`.
+            unrealized = (value - qty * avg) if price else None
             basis_known = True
         else:
             avg = None
@@ -243,14 +245,25 @@ def refresh(conn, online=True):
     market = sum(h.value_idr for h in holdings)
     total = idr + market
 
-    actions = (rules.take_profit_actions(holdings)
-               + rules.rebalance_actions(holdings))
+    # Ambil saran take-profit lalu yang lolos band. Keduanya bisa menunjuk
+    # pair yang sama, jadi buang duplikat (kalau tidak, satu posisi tampak
+    # disarankan "jual 50%" padahal hanya 25%).
+    seen = set()
+    actions = []
+    for a in (rules.take_profit_actions(holdings)
+              + rules.rebalance_actions(holdings, idr_reserve=idr)):
+        key = (a.kind, a.pair)
+        if key in seen:
+            continue
+        seen.add(key)
+        actions.append(a)
 
+    contributions = portfolio_store.total_contributions(conn)
     portfolio_store.insert_snapshot(conn, {
         "ts": int(time.time()),
         "total_idr": total,
-        "contributions_idr": portfolio_store.total_contributions(conn),
-        "market_idr": market,
+        "contributions_idr": contributions,
+        "market_idr": total - contributions,
         "breakdown_json": _breakdown_json(holdings, idr),
     })
     return {"holdings": holdings, "total_idr": total, "actions": actions}

@@ -111,7 +111,11 @@ def main(argv=None):
         elif args.cmd == "status":
             print(cmd_status(conn))
         elif args.cmd == "snapshot":
-            out = portfolio.refresh(conn, online=True)
+            try:
+                out = portfolio.refresh(conn, online=True)
+            except Exception as e:
+                print(f"Snapshot gagal: {e}")
+                return 1
             print(f"Snapshot disimpan. Total: Rp {out['total_idr']:,.0f}")
         return 0
     finally:

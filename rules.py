@@ -57,8 +57,9 @@ def dca_split(amount_idr, holdings_value, target=None, min_order=10000):
             out[k] = 0
     out["IDR"] += moved
 
-    # Sisa pembulatan masuk ke cadangan supaya total tetap pas.
-    out["IDR"] += int(amount_idr - sum(out.values()))
+    # Sisa pembulatan masuk ke cadangan supaya total tetap pas (termasuk bila
+    # `amount_idr` bukan bilangan bulat).
+    out["IDR"] += amount_idr - sum(out.values())
     return out
 
 
@@ -111,7 +112,7 @@ def take_profit_actions(holdings, thresholds=((50, 25), (100, 25)),
 
 
 def rebalance_actions(holdings, target=None, band_pct=10.0,
-                      fee_pct=0.002, min_order=10000):
+                      fee_pct=0.002, min_order=10000, idr_reserve=0.0):
     """Saran jual untuk aset yang menyimpang jauh di atas target.
 
     Hanya menghasilkan `SELL`, dan hanya bila **dua-duanya** benar:
@@ -119,10 +120,13 @@ def rebalance_actions(holdings, target=None, band_pct=10.0,
     (2) aset memicu take-profit. **Tidak pernah** menghasilkan `BUY`, jadi
     cadangan IDR tidak pernah dibelanjakan oleh rebalance (aliran DCA yang
     menambah posisi; band hanya memangkas yang kelewat berat).
+
+    `idr_reserve` adalah saldo IDR (cadangan). Karena target dinyatakan atas
+    **seluruh** portofolio, cadangan ikut dihitung sebagai penyebut.
     """
     if target is None:
         target = DEFAULT_TARGET
-    total = sum(h.value_idr for h in holdings)
+    total = sum(h.value_idr for h in holdings) + idr_reserve
     if total <= 0:
         return []
 
