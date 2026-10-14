@@ -1,0 +1,39 @@
+app:
+  title: "Trading Dashboard Mean-Reversion"
+  favicon: "📈"
+  page_icon: "chart_with_upwards_trend"
+  layout: "wide"
+  initial_sidebar_state: "collapsed"
+  refresh_interval: 3000  # ms
+
+ui:
+  primary_color: "#1f77b4"
+  background_color: "#f0f2f6"
+  secondary_background_color: "#ffffff"
+  text_color: "#111111"
+
+market:
+  grid_rows: 3
+  grid_cols: 7
+  pair_font_size: 10
+  z_score_font_size: 12
+  signal_color_bull: "#2ca02c"  # hijau
+  signal_color_bear: "#d62728"  # merah
+  signal_color_neutral: "#ff7f0e" # oranye
+
+charts:
+  height: 300
+  width: None  # auto
+  theme: "streamlit"  # plotly built-in theme
+  timezone: "Asia/Jakarta"  # WIB
+
+risk:
+  max_daily_loss_color: "#ff4b4b"
+  warning_color: "#ffbf4b"
+  success_color: "#2ca02c"
+
+layout:
+  tab_order: ["market", "pair_detail", "portfolio", "history", "control"]
+  compact_mode: false
+
+version: "1.0.0"

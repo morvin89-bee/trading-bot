@@ -1,0 +1,35 @@
+strategy:
+  name: "mean_reversion_arb"
+  description: "Mean reversion arbitrage Indodax vs Tokocrypto based on Z-score of spread"
+
+  # Pair selection
+  pairs: "all"  # "all" or list like ["btc_idr", "eth_idr", ...]
+
+  # Z-Score parameters
+  lookback_windows: 48          # 48 x 5 menit = 4 jam history
+  entry_z: 2.0                  # entry threshold: |z| >= 2.0
+  exit_z: 0.5                   # exit threshold: |z| <= 0.5
+  stop_z: 3.5                   # stop loss threshold: |z| >= 3.5
+
+  # Risk management
+  position_size_pct: 0.02       # 2% modal per trade (dari INITIAL_IDR)
+  max_position_pct: 0.10        # max 10% modal per pair bersamaan
+  max_daily_loss_pct: 0.03      # stop trading jika loss harian > 3%
+  max_concurrent_trades: 3      # max 3 pair bersamaan
+
+  # Filters
+  min_volume_ratio: 1.0         # volume >= median dari window terakhir
+  min_buy_ratio: 0.55           # rasio beli >= 55%
+  max_momentum_pct: 2.0         # block jika |change_pct| > 2% dalam 5 menit
+
+  # Execution
+  cooldown_seconds: 300         # 5 menit cooldown per pair+direction
+  twap_slices: 3                # bagi order jadi 3 slice TWAP
+  twap_interval_sec: 60         # interval 1 menit per slice
+
+  # Validation
+  min_trades_for_stats: 100     # minimal trade sebelum dianggap valid
+
+  # App settings (for dashboard display)
+  version: "1.0.0"
+  refresh_interval: 3000        # ms, otomatis refresh dashboard

@@ -1,0 +1,87 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>Laporan Paper Trading</title>
+<style>
+body { font-family: Segoe UI, Arial, sans-serif; margin: 24px; background: #f5f5f5; }
+h1 { font-size: 22px; }
+.cards { display: flex; gap: 12px; flex-wrap: wrap; margin: 16px 0; }
+.card { background: #fff; border-radius: 8px; padding: 14px 20px; box-shadow: 0 1px 3px rgba(0,0,0,.12); min-width: 140px; }
+.card .label { font-size: 12px; color: #666; }
+.card .value { font-size: 20px; font-weight: bold; }
+.pos { color: #2e7d32; } .neg { color: #c62828; }
+.chart { background: #fff; border-radius: 8px; padding: 12px; box-shadow: 0 1px 3px rgba(0,0,0,.12); margin: 12px 0; }
+table { border-collapse: collapse; width: 100%; background: #fff; }
+th, td { padding: 7px 10px; text-align: right; border-bottom: 1px solid #ddd; font-size: 13px; }
+th { background: #eee; text-align: center; }
+td.l, th.l { text-align: left; }
+.note { font-size: 12px; color: #666; margin: 2px 0 10px; }
+.card .note { margin: 6px 0 0; }
+.legend { font-size: 12px; color: #666; margin: 8px 0 0; }
+.banner { padding: 10px 16px; border-radius: 8px; font-weight: bold; margin: 10px 0 16px; font-size: 14px; }
+.banner.demo { background: #fff3cd; color: #856404; border: 1px solid #ffeeba; }
+.banner.real { background: #d4edda; color: #155724; border: 1px solid #c3e6cb; }
+h2 { font-size: 17px; margin: 20px 0 4px; }
+h3 { font-size: 14px; margin: 4px 0; }
+</style></head><body>
+<div class='banner real'>DATA ASLI (signals.csv) — hasil paper trading Anda sendiri.</div>
+<h1>Laporan Paper Trading Arbitrase</h1>
+<p class="note">Laporan ini dibuat otomatis dari data <b>paper trading</b> (simulasi tanpa uang asli).
+Semua angka bersifat <b>virtual</b> dan hanya untuk latihan &mdash; bukan keuntungan nyata.</p>
+<p class="note"><b>Metode simulasi:</b> setiap trade memakai nominal <b>tetap (statis)</b> Rp 1.000.000 &mdash;
+tidak tergantung besar kecilnya spread maupun saldo exchange.
+P&amp;L per trade = nominal &times; selisih harga bersih (setelah fee &amp; slippage) &minus; biaya transfer.</p>
+
+<h2>Ringkasan</h2>
+<p class="note">Statistik keseluruhan dari semua trade yang disimulasikan bot.</p>
+<div class="cards">
+  <div class="card"><div class="label">Total Trade</div><div class="value">1</div>
+    <div class="note">Jumlah simulasi trade yang dieksekusi bot</div></div>
+  <div class="card"><div class="label">Win Rate</div><div class="value">100.0%</div>
+    <div class="note">Persentase trade yang menghasilkan profit</div></div>
+  <div class="card"><div class="label">Total P&amp;L</div><div class="value pos">1,226 IDR</div>
+    <div class="note">Total keuntungan (+) / kerugian (&minus;) virtual dalam Rupiah</div></div>
+  <div class="card"><div class="label">Trade Terbaik</div><div class="value pos">1,226 IDR</div>
+    <div class="note">Trade dengan keuntungan terbesar</div></div>
+  <div class="card"><div class="label">Trade Terburuk</div><div class="value neg">1,226 IDR</div>
+    <div class="note">Trade dengan kerugian terbesar</div></div>
+</div>
+<p class="legend">Cara baca warna: <span class="pos"><b>hijau</b></span> = untung, <span class="neg"><b>merah</b></span> = rugi.</p>
+
+<div class="chart">
+  <h3>Kurva P&amp;L Kumulatif</h3>
+  <p class="note">Grafik perubahan total keuntungan dari waktu ke waktu. Garis di atas nol = secara keseluruhan untung; di bawah nol = rugi.</p>
+  
+<svg width="760" height="280" role="img">
+  <line x1="40" y1="240.0" x2="720" y2="240.0"
+        stroke="#999" stroke-dasharray="4"/>
+  <polygon points="40,240 380.0,40.0 720,240"
+           fill="#2e7d32" opacity="0.12"/>
+  <polyline points="380.0,40.0" fill="none" stroke="#2e7d32" stroke-width="2"/>
+  <text x="40" y="268" font-size="11" fill="#555">2026-10-09 00:43</text>
+  <text x="720" y="268" font-size="11" fill="#555" text-anchor="end">2026-10-09 00:43</text>
+  <text x="36" y="44.0" font-size="10" fill="#555" text-anchor="end">1,226</text>
+  <text x="36" y="244.0" font-size="10" fill="#555" text-anchor="end">0</text>
+  <text x="720" y="52.0" font-size="10" fill="#555" text-anchor="end">P&amp;L kumulatif (IDR)</text>
+</svg>
+</div>
+<div style="display:flex;gap:12px;flex-wrap:wrap">
+  <div class="chart"><svg width="360" height="240"><text x="180.0" y="16" font-size="13" text-anchor="middle" font-weight="bold">P&amp;L per Pair (IDR)</text><line x1="35" y1="205.0" x2="325" y2="205.0" stroke="#999" stroke-dasharray="4"/><rect x="93.0" y="35.0" width="174.0" height="170.0" fill="#2e7d32"/><text x="180.0" y="219" font-size="10" text-anchor="middle">bnb_idr</text><text x="180.0" y="31.0" font-size="9" text-anchor="middle" fill="#333">1,226</text></svg>
+    <p class="note">Total profit/rugi untuk setiap pasangan (BTC, ETH, dst). Pair dengan P&amp;L tertinggi paling sering memberi peluang.</p>
+  </div>
+  <div class="chart"><svg width="360" height="240"><text x="180.0" y="16" font-size="13" text-anchor="middle" font-weight="bold">P&amp;L per Arah (IDR)</text><line x1="35" y1="205.0" x2="325" y2="205.0" stroke="#999" stroke-dasharray="4"/><rect x="93.0" y="35.0" width="174.0" height="170.0" fill="#2e7d32"/><text x="180.0" y="219" font-size="10" text-anchor="middle">Tokocrypto -> Indodax</text><text x="180.0" y="31.0" font-size="9" text-anchor="middle" fill="#333">1,226</text></svg>
+    <p class="note">Profit/rugi berdasarkan arah arbitrase. Bandingkan apakah lebih sering untung saat beli di Indodax atau di Tokocrypto.</p>
+  </div>
+  <div class="chart"><svg width="360" height="240"><text x="180.0" y="16" font-size="13" text-anchor="middle" font-weight="bold">P&amp;L Harian (IDR)</text><line x1="35" y1="205.0" x2="325" y2="205.0" stroke="#999" stroke-dasharray="4"/><rect x="93.0" y="35.0" width="174.0" height="170.0" fill="#2e7d32"/><text x="180.0" y="219" font-size="10" text-anchor="middle">2026-10-09</text><text x="180.0" y="31.0" font-size="9" text-anchor="middle" fill="#333">1,226</text></svg>
+    <p class="note">Total profit/rugi per hari. Berguna untuk melihat tren performa bot dari hari ke hari.</p>
+  </div>
+</div>
+
+<h2>Detail per Pair</h2>
+<p class="note">Jumlah trade dan total P&amp;L untuk setiap pasangan mata uang.</p>
+<table><tr><th class="l">Pair</th><th>Trade</th><th>P&amp;L (IDR)</th></tr><tr><td class='l'>BNB_IDR</td><td>1</td><td class='pos'>1,226</td></tr></table>
+<h2>Detail per Arah</h2>
+<p class="note">Jumlah trade dan total P&amp;L untuk setiap arah arbitrase.</p>
+<table><tr><th class="l">Arah</th><th>Trade</th><th>P&amp;L (IDR)</th></tr><tr><td class='l'>Tokocrypto -> Indodax</td><td>1</td><td class='pos'>1,226</td></tr></table>
+<h2>P&amp;L Harian</h2>
+<p class="note">Total P&amp;L per hari kalender.</p>
+<table><tr><th class="l">Tanggal</th><th>P&amp;L (IDR)</th></tr><tr><td class='l'>2026-10-09</td><td class='pos'>1,226</td></tr></table>
+</body></html>

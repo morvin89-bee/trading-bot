@@ -1,0 +1,1 @@
+{"market_data": {"btc_idr": {"pair": "btc_idr", "symbol": "BTCIDR", "z_I_to_T": 0.0, "z_T_to_I": 0.0, "spread_I_to_T": -1699134.0, "spread_T_to_I": 3375268.0, "bid_i": 1484056000.0, "ask_i": 1484993000.0, "bid_t": 1486692134.0, "ask_t": 1487431268.0, "signal": null, "timestamp": 1791921422.3084333}}, "last_update": 1791921422.3084376, "last_error": null}

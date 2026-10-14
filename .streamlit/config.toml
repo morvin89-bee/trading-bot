@@ -1,0 +1,16 @@
+[server]
+address = "0.0.0.0"
+port = 8501
+headless = true
+enableCORS = true
+enableXsrfProtection = false
+maxUploadSize = 200
+enableStaticServing = true
+
+[browser]
+gatherUsageStats = false
+serverAddress = "100.99.49.65"
+serverPort = 8501
+
+[theme]
+base = "light"
