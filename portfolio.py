@@ -4,6 +4,8 @@ Membaca saldo & riwayat transaksi dari Indodax (via `indodax_api`),
 menggabungkannya dengan catatan lokal (`portfolio.db`), lalu menghitung
 kepemilikan dan harga rata-rata. Tidak ada fungsi yang bisa mengirim order.
 """
+from dataclasses import dataclass
+
 import indodax_api
 
 # Koin yang dilacak -> pair Indodax.
@@ -59,3 +61,90 @@ def parse_balances(info):
 def fetch_balances():
     """Ambil saldo asli dari Indodax (read-only)."""
     return parse_balances(indodax_api.account_info())
+
+
+@dataclass
+class Holding:
+    pair: str
+    coin: str
+    qty: float
+    avg_cost: float | None
+    price: float | None
+    value_idr: float
+    cost_basis_idr: float | None
+    unrealized_idr: float | None
+    basis_known: bool
+
+
+def _accumulate(trades):
+    """Proses daftar trade per pair.
+
+    Mengembalikan {pair: {"qty_bought", "cost", "realized", "buys_exist"}}.
+    Harga rata-rata = `cost / qty_bought`; reward staking menambah kuantitas
+    tanpa menambah biaya, sehingga tidak menaikkan harga rata-rata.
+    """
+    state = {}
+    for t in sorted(trades, key=lambda x: (x.get("ts") or 0, x.get("id") or 0)):
+        pair = t.get("pair")
+        side = (t.get("side") or "").lower()
+        if not pair or side not in ("buy", "sell", "reward"):
+            continue
+        s = state.setdefault(
+            pair, {"qty_bought": 0.0, "cost": 0.0, "realized": 0.0,
+                   "buys_exist": False})
+        qty = float(t.get("qty") or 0)
+        quote = float(t.get("quote") or 0)
+        fee = float(t.get("fee") or 0)
+        if side == "buy":
+            s["qty_bought"] += qty
+            s["cost"] += quote + fee
+            s["buys_exist"] = True
+        elif side == "sell":
+            avg = (s["cost"] / s["qty_bought"]) if s["qty_bought"] > 0 else 0.0
+            s["realized"] += quote - avg * qty
+            s["cost"] -= avg * qty
+            s["qty_bought"] -= qty
+            if s["qty_bought"] <= 0:      # terjual habis (mungkin lebih, krn reward)
+                s["qty_bought"] = 0.0
+                s["cost"] = 0.0
+        # reward: menambah kuantitas tanpa biaya
+    return state
+
+
+def realized_pnl(trades):
+    """Keuntungan/kerugian yang sudah terealisasi (per pair), dalam IDR."""
+    return {pair: round(s["realized"], 2)
+            for pair, s in _accumulate(trades).items()}
+
+
+def compute_holdings(trades, balances, prices):
+    """Bentuk daftar `Holding` dari saldo, harga, dan riwayat transaksi.
+
+    Kuantitas diambil dari `balances` (otoritatif). Harga rata-rata hanya
+    tersedia bila ada riwayat pembelian untuk koin itu (`basis_known`).
+    """
+    state = _accumulate(trades)
+    out = []
+    for coin, qty in balances.items():
+        if coin == "IDR":
+            continue
+        pair = COIN_PAIRS.get(coin)
+        if not pair:
+            continue
+        s = state.get(pair)
+        price = prices.get(pair)
+        value = qty * price if price else 0.0
+        if s and s["buys_exist"]:
+            avg = (s["cost"] / s["qty_bought"]) if s["qty_bought"] > 0 else 0.0
+            cost_basis = s["cost"]
+            unrealized = value - qty * avg
+            basis_known = True
+        else:
+            avg = None
+            cost_basis = None
+            unrealized = None
+            basis_known = False
+        out.append(Holding(pair, coin, qty, avg, price, value, cost_basis,
+                           unrealized, basis_known))
+    out.sort(key=lambda h: h.value_idr, reverse=True)
+    return out
