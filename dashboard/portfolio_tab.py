@@ -5,6 +5,8 @@ dan grafik pertumbuhan. Semua panggilan jaringan dibungkus `try/except`
 supaya tab tidak pernah membuat dasbor crash. Modul ini tidak bisa dan
 tidak akan mengirim order.
 """
+import time
+
 import pandas as pd
 import plotly.express as px
 import streamlit as st
@@ -37,7 +39,8 @@ def _holdings_rows(holdings):
                                 else "harga rata-rata tidak diketahui"),
             "Nilai (Rp)": round(h.value_idr, 2),
             "Untung/Rugi belum terealisasi (Rp)": (
-                round(h.unrealized_idr, 2) if h.basis_known else None),
+                round(h.unrealized_idr, 2)
+                if h.unrealized_idr is not None else None),
         })
     return rows
 
@@ -85,6 +88,10 @@ def render():
         else:
             st.info("Belum ada aset yang dilacak.")
         st.caption(f"Total portofolio: {fmt_idr(out['total_idr'])}")
+        realized = portfolio.realized_pnl(portfolio_store.list_trades(conn))
+        if realized:
+            st.caption("Keuntungan/kerugian yang sudah terealisasi (total): "
+                       f"{fmt_idr(sum(realized.values()))}")
 
         st.markdown("### Saran Aksi (Take Profit / Rebalance)")
         msgs = alerts.build_alerts(out["holdings"], out["actions"])
@@ -99,8 +106,13 @@ def render():
         values["IDR"] = out["total_idr"] - sum(h.value_idr
                                                for h in out["holdings"])
         saran = rules.dca_split(MONTHLY_IDR, values)
-        st.write(f"Rencana setoran bulanan: {fmt_idr(MONTHLY_IDR)}")
-        st.dataframe([{"Aset": k, "Alokasi": fmt_idr(v)}
+        deps = portfolio_store.list_deposits(conn)
+        nyata = growth_report.month_contributions(deps, time.time())
+        sisa = max(0.0, MONTHLY_IDR - nyata)
+        status = "sudah penuh" if sisa <= 0 else f"kurang {fmt_idr(sisa)}"
+        st.write(f"Setoran bulan ini: **{fmt_idr(nyata)}** dari target "
+                 f"{fmt_idr(MONTHLY_IDR)} ({status}).")
+        st.dataframe([{"Aset": k, "Alokasi yang disarankan": fmt_idr(v)}
                       for k, v in saran.items()], use_container_width=True)
 
         st.markdown("### Pertumbuhan Bulanan")
