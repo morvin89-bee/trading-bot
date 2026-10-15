@@ -16,6 +16,7 @@ def _ok(**overrides):
         "last_fill_ts": {},
         "held_pairs_24h": set(),
         "now": 0.0,
+        "rule": "",
     }
     args.update(overrides)
     return args
@@ -59,9 +60,40 @@ def test_rejects_within_cooldown_of_last_fill():
 
 
 def test_rejects_when_reserve_would_be_touched():
-    # available = free - cadangan
+    # available = free - cadangan (jalur BUY biasa, mis. DCA — ruling F15)
     a = _act(amount=100000)
-    out = safeguards.gates(a, **_ok(free_idr=120000, reserve_idr=50000))
+    out = safeguards.gates(a, **_ok(free_idr=120000, reserve_idr=50000,
+                                    rule=""))
+    assert any("cadangan" in r for r in out)
+
+
+def test_sell_is_never_gated_by_idr_balance():
+    # ruling F15 — sell tidak membelanjakan IDR; sell MENGHASILKAN IDR.
+    # Aturan `free - reserve` tanpa syarat akan menolak semua sell dan
+    # melumpuhkan take-profit seluruhnya
+    a = rules.Action("SELL", "btc_idr", 100000, 1.0, 100.0, "uji", True)
+    out = safeguards.gates(a, **_ok(free_idr=0, reserve_idr=500000))
+    assert not any("cadangan" in r or "saldo" in r for r in out)
+
+
+def test_reserve_buy_may_draw_from_reserve():
+    # ruling F15 — cadangan adalah SUMBER dana reserve buy, bukan penghalangnya.
+    # Jumlahnya sudah dibatasi `max_fraction` (0.5) oleh `reserve_buy_actions`
+    # ADAPTASI (dilaporkan ke controller): rencana menulis jumlah 30000, tapi
+    # 30000 > 0,5 x 50000 = 25000 — mustahil lolos, dan `reserve_buy_actions`
+    # pun tidak pernah menghasilkan 30000 dari cadangan 50000 (budget =
+    # 0,5 x cadangan). Dipakai 25000 (tepat batas), sehingga tes tetap
+    # membuktikan cadangan bisa dipakai sekaligus mematok batasnya.
+    a = rules.Action("BUY", "btc_idr", 25000, 25.0, 1000.0, "reserve buy", True)
+    out = safeguards.gates(a, **_ok(free_idr=0, reserve_idr=50000, rule="reserve_buy"))
+    assert out == []
+
+
+def test_reserve_buy_cannot_exceed_half_of_reserve_even_if_rule_forgets():
+    # pertahanan kedua: batas `max_fraction` ditegakkan di gerbang juga,
+    # supaya salah input dari engine tidak menguras cadangan
+    a = rules.Action("BUY", "btc_idr", 40000, 40.0, 1000.0, "reserve buy", True)
+    out = safeguards.gates(a, **_ok(free_idr=0, reserve_idr=50000, rule="reserve_buy"))
     assert any("cadangan" in r for r in out)
 
 
