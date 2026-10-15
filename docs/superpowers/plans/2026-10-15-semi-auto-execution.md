@@ -126,7 +126,10 @@ def test_verdict_rejects_bch_like_spread():
 
 def test_empty_depth_is_not_zero():
     # Harga hilang tidak boleh dinilai 0 lalu diloloskan (spec 6.3)
-    assert spread.spread_verdict_from_depth({}, max_bps=30) == (None, float("nan"))
+    # NaN tidak pernah == NaN di Python, jadi literal `(None, float("nan"))` tidak akan
+    # pernah lulus — periksa bagian kiri dan NaN-nya terpisah (lihat ruling F9)
+    ok, bps = spread.spread_verdict_from_depth({}, max_bps=30)
+    assert ok is None and math.isnan(bps)
 ```
 
 - [ ] **Step 2: Jalankan, pastikan gagal**
