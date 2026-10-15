@@ -273,7 +273,9 @@ def test_confirmation_text_carries_all_eight_fields():
     p = proposal.new_proposal(_act(), rule="Take-profit +50%", reserve_after=150000,
                               window_s=90, now=0.0)
     t = proposal.confirmation_text(p)
-    for expected in ("btc_idr", "BELI", "Rp 275.000", "2750.0",
+    # qty = 275.000 / 1.000 = 275.0  (bukan 2750.0 — gagal di sini berarti
+    # implementasi salah, bukan ekspektasi salah)
+    for expected in ("btc_idr", "BELI", "Rp 275.000", "275.0",
                      "1.000", "Take-profit +50%", "0,2%", "Rp 150.000"):
         assert expected in t, expected
 
@@ -552,8 +554,13 @@ Expected: FAIL — `resolve_status` belum ada
 
 - [ ] **Step 3: Implementasi `resolve_status`**
 
-Loop maksimal 3 kali, `sleep` memakai `STATUS_BACKOFF_S[i]` **sebelum** percobaan berikut
-(bukan setelah yang pertama). `sleep` disuntikkan supaya tes tidak menunggu 17 detik.
+Loop maksimal 3 kali. Untuk i = 0, 1, 2: **`sleep(STATUS_BACKOFF_S[i])` lalu** query
+percobaan ke-(i+1) — tidur mendahului setiap query, **termasuk sebelum yang pertama**.
+Tiga query karenanya mengamati tidur `[2, 5, 10]`, memenuhi baik tes maupun spesifikasi
+("3 kali bertanya, dengan jeda [2,5,10]"). Menunggu 2 dtk sebelum query pertama memang
+perilaku yang benar: memberi bursa waktu menetap setelah balasan hilang — ini **bukan**
+anti-pattern "tidur tepat setelah submit". Bila query berikutnya sudah terminal,
+hentikan sisa tidur. `sleep` disuntikkan supaya tes tidak menunggu 17 detik.
 Respons yang tidak mengandung status yang dikenal dianggap `unknown` — **bukan**
 `cancelled`. `unknown` diteruskan ke `engine` yang wajib meng-halt (Task 12).
 
@@ -802,10 +809,16 @@ git commit -m "feat: log usulan harian untuk review mode bayangan"
 
 ```python
 def test_v1_never_calls_rebalance():
-    # spec §10 — rebalance adalah modul v2
+    # spec §10 — rebalance adalah modul v2. Yang diperiksa adalah SUMBERNYA,
+    # bukan nama prosedur yang dijanjikan — tes ini harus bisa gagal
+    import inspect, engine
+    assert "rebalance_actions" not in inspect.getsource(engine)
+
+def test_every_action_carries_a_reason():
+    # alasan ikut tampil di pesan Telegram; tanpa ini pengguna hanya melihat angka
     ctx = _rich_ctx()
     acts = engine.collect_actions(ctx)
-    assert all(a.reason != "" for a in acts)
+    assert acts and all(a.reason != "" for a in acts)
 
 def test_spread_rejected_is_notified_and_logged(tmp_path):
     conn = _fresh_db(tmp_path)
@@ -852,12 +865,21 @@ Expected: FAIL — modul belum ada
 
 `collect_actions` menggabungkan **hanya** `take_profit_actions(holdings)` dan
 `reserve_buy_actions(holdings, idr_reserve=ctx.reserve_idr)` lalu memanggil
-`merge_actions`. `rebalance_actions` **tidak boleh muncul** di `engine.py` — tambahkan
-tes `grep`-style: `assert "rebalance_actions" not in open("engine.py").read()`.
+`merge_actions`. `rebalance_actions` **tidak boleh muncul** di `engine.py` —
+dipastikan oleh `test_v1_never_calls_rebalance` di Step 1 (jangan mendefinisikan
+fungsi bernama sama di sini: Python akan menimpanya dan satu tes hilang diam-diam).
 
-`tick` berurutan: `merge_actions` → untuk tiap aksi: `verdict(pair)` (gugur →
-`telegram.line(...)` satu baris + `shadow_log.record(..., "spread_rejected")`, lanjut) →
-`safeguards.gates` (ditolak → `telegram.line(...)` + record `gate_rejected`, lanjut) →
+`tick` berurutan: `merge_actions` → untuk tiap aksi: `verdict(pair)` → **tiga hasil
+berbeda, tidak pernah dicampur**:
+- `True` → lolos, lanjut ke `safeguards.gates`;
+- `False` → spread gugur → `telegram.line(...)` satu baris +
+  `shadow_log.record(..., "spread_rejected")`, **lanjut** ke aksi berikutnya;
+- `None` → **harga hilang = BERHENTI (spec §6.3)** → `record(..., "halted")`,
+  satu notifikasi, dan `tick` mengembalikan `no_action` **tanpa usulan apa pun**.
+  `None` bukan `False`: menolak lalu lanjut menyamakan "depth kosong" dengan
+  "spread jelek", dan yang pertama berarti data tidak ada.
+
+Lalu `safeguards.gates` (ditolak → `telegram.line(...)` + record `gate_rejected`, lanjut) →
 `proposal.new_proposal` + `telegram.confirmation(...)` + record `proposed`.
 **Tidak ada panggilan eksekusi** di tick ini. Setiap proposal dibuat ulang dari data
 `ctx` yang segar — `tick` tidak pernah menyimpan angka dari putaran sebelumnya
@@ -980,6 +1002,8 @@ git commit -m "feat: alur konfirmasi -> eksekusi dengan DB hanya setelah bursa m
   - `dca_state(conn, now_ts: float) -> tuple[str, float]`
     → `("none" | "awaiting" | "confirmed" | "missed", sisa_detik)`
   - `should_remind(conn, now_ts: float) -> bool`
+  - `mark_pending(conn, ts: float)`, `mark_missed(conn, ts: float)` —
+    keduanya dipakai langsung oleh tes di bawah, jadi wajib ada di Interfaces.
 
 - [ ] **Step 1: Tulis tes yang gagal**
 
@@ -1019,8 +1043,11 @@ Simpan `last_dca_date` (kolom sudah ada di `portfolio.db`) sebagai penanda bulan
 `should_remind` bernilai `True` **hanya** bila jam lokal dalam `REMINDER_HOURS`,
 `in_dnd` bernilai `False`, dan DCA masih `awaiting` — pengingat **pasif**: tidak pernah
 mengubah `Tunda` menjadi `Setuju`, tidak pernah mengirim apa pun selain satu baris.
-`dca_state` menghitung jendela 24 jam dari pengiriman; lewat → `"missed"` +
-`shadow_log.record(..., "dca_missed")` oleh pemanggilnya.
+`dca_state` menghitung jendela 24 jam dari pengiriman; lewat → `"missed"`.
+Pencatatan `shadow_log.record(..., "dca_missed")` dilakukan **oleh `dca_window`
+sendiri** tepat saat transisi ke `missed` (sekali saja, bukan setiap siklus) —
+dengan begitu pemanggilnya (Task 14) tidak perlu mengulang buku catatan ini dan
+tiap DCA yang terlewat tercatat pada siklus yang tepat.
 
 - [ ] **Step 4: Jalankan, pastikan lulus**
 
@@ -1113,9 +1140,14 @@ Expected: FAIL — modul belum ada
    `reconcile.mismatches(...)` → ada → `telegram.line("Selisih ... -> trading mati")` +
    `shadow_log.record(..., "halted")` → return `"halted"` (**sebelum** ada usulan apa pun).
 2. `safeguards.permissions_ok` → bukan `None` → `"halted"`.
-3. `dca_window.should_remind` → `telegram.line(...)` pengingat pasif.
-4. `engine.tick(...)` → daftar proposal.
-5. `main_loop.apply_shadow_gate(conn)` → hitung `rejected_count`; bila > 0 →
+3. **Polling Telegram**: `telegram_inbox.get_updates(...)` → tiap jawaban
+   `parse_update` → `engine.on_answer(...)`; bila `text == "/ulang"` →
+   `main_loop.apply_ulang(...)`. **Tanpa langkah ini gerbang bersifat tulis-saja dan
+   setiap konfirmasi akan kedaluwarsa tanpa pernah terjawab (spec §7.1 butir 4)** —
+   ini bukan pelengkap. Proses ini **satu-satunya** konsumen `getUpdates`.
+4. `dca_window.should_remind` → `telegram.line(...)` pengingat pasif.
+5. `engine.tick(...)` → daftar proposal.
+6. `main_loop.apply_shadow_gate(conn)` → hitung `rejected_count`; bila > 0 →
    `shadow_day = 0`, `v1_enabled = False`.
 
 `apply_ulang` memanggil `engine.tick` langsung dengan `now` yang diberikan — **tanpa**
