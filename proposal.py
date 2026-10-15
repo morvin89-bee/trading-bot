@@ -46,13 +46,26 @@ def new_proposal(action: rules.Action, *, rule: str, reserve_after: float,
     `RULE_RESERVE_BUY`) — bukan bagian dari `rules.Action`, dan ejaannya
     harus persis yang dibaca `safeguards.gates`.
 
-    `id` dibentuk deterministik dari (kind, pair, detik pembuatan): unik
-    untuk tiap usulan dalam satu tick karena `merge_actions` menyisakan
-    tepat satu aksi per (kind, pair), dan berubah tiap tick. Dipakai sebagai
-    jangkar tombol Telegram (`"{tombol}:{id}"`) dan jejak log bayangan.
+    `id` = `{kind}_{pair}_{mikrodetik}` dari `int(now * 1_000_000)`:
+
+    - `now` berbeda walau selisihnya di bawah satu detik -> id berbeda
+      (dua tick dalam detik yang sama, mis. `apply_ulang` vs denyut
+      jantung, tidak boleh berbagi satu jangkar tombol);
+    - `now` yang **identik** menghasilkan id yang identik — disengaja,
+      demi determinisme tes;
+    - dua aksi (kind, pair) dari tick yang sama persis menghasilkan id
+      yang sama; penyatuan tiket kembar adalah tugas `merge_actions`
+      (Task 4, **belum dibangun** — jangan mengandalkan id sebagai
+      pengganti penyatuan itu).
+
+    Panjang aman untuk `client_order_id` (<=36 karakter dari
+    `[0-9A-Za-z_-]`): "sell" (4) + "_" + pair + "_" + mikrodetik (<=16
+    selama `now` < 1e10 detik, s/d tahun 2286) -> pasangan <=13 karakter
+    selalu muat (pasangan Indodax terpanjang hari ini 9). Diverifikasi
+    `test_id_sub_second_distinct_and_client_order_id_safe`.
     """
     return Proposal(
-        id=f"{action.kind.lower()}_{action.pair}_{int(now)}",
+        id=f"{action.kind.lower()}_{action.pair}_{int(now * 1_000_000)}",
         kind=action.kind,
         pair=action.pair,
         amount_idr=action.amount_idr,
@@ -67,6 +80,24 @@ def new_proposal(action: rules.Action, *, rule: str, reserve_after: float,
     )
 
 
+def _qty_text(qty: float | None) -> str:
+    """Jumlah koin dalam notasi yang dibaca orang awam — tanpa notasi ilmiah.
+
+    `f"{3e-05}"` menghasilkan "3e-05"; pesan yang memutuskan uang tidak
+    boleh memakai angka yang tidak terbaca orang awam. Dibulatkan ke 8
+    desimal (presisi aset di bursa <= 8), nol ekor dibuang, tetapi satu
+    digit desimal selalu dipertahankan: 275.0 tetap "275.0", 0.00003
+    menjadi "0.00003".
+
+    `qty` yang hilang (None) tampil apa adanya — maknanya belum diputuskan
+    dan ditunda ke Task 12; yang pasti bukan nol.
+    """
+    if qty is None:
+        return str(qty)
+    s = f"{qty:.8f}".rstrip("0")
+    return s + "0" if s.endswith(".") else s
+
+
 def confirmation_text(p: Proposal) -> str:
     """Satu blok Bahasa Indonesia berisi delapan field wajib (§6.2).
 
@@ -79,7 +110,7 @@ def confirmation_text(p: Proposal) -> str:
     return (
         f"{sisi} {p.pair}\n"
         f"Nominal: {alerts._rp(p.amount_idr)}\n"
-        f"Jumlah: {p.qty} koin\n"
+        f"Jumlah: {_qty_text(p.qty)} koin\n"
         f"Harga limit: {alerts._rp(p.price_ref)}\n"
         f"Aturan: {p.rule}\n"
         f"Perkiraan fee {fee_label}: {alerts._rp(p.amount_idr * FEE_PCT)}\n"

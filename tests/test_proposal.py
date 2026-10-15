@@ -3,6 +3,8 @@
 Delapan field wajib pesan konfirmasi (spec §6.2) dan dua pagar yang
 menggantungkannya: kadaluarsa jendela dan geser harga > 0,5% (§6.2/§6.3).
 """
+import string
+
 import proposal
 import rules
 import safeguards
@@ -68,9 +70,39 @@ def test_new_proposal_carries_action_and_metadata():
     assert p.rule == "DCA bulanan" and p.reserve_after == 42000
     assert p.window_s == 86400 and p.created_ts == 5.0
     assert p.status == "proposed"
-    # id harus berdiri sendiri tiap usulan (jangkar tombol Telegram & jejak bayangan)
+    # id tiap usulan dibahas terpisah di
+    # test_id_sub_second_distinct_and_client_order_id_safe
     q = proposal.new_proposal(_act(), rule="r", reserve_after=0, window_s=90, now=6.0)
     assert q.id != p.id
+
+
+def test_id_sub_second_distinct_and_client_order_id_safe():
+    # Dua tick dalam detik YANG SAMA (mis. apply_ulang vs denyut jantung)
+    # tidak boleh berbagi satu jangkar tombol Telegram / kunci log.
+    a = proposal.new_proposal(_act(), rule="r", reserve_after=0, window_s=90, now=100.0)
+    b = proposal.new_proposal(_act(), rule="r", reserve_after=0, window_s=90, now=100.5)
+    assert a.id != b.id
+    # `now` yang identik -> id yang identik (disengaja, demi determinisme tes)
+    c = proposal.new_proposal(_act(), rule="r", reserve_after=0, window_s=90, now=100.0)
+    assert c.id == a.id
+    # client_order_id: <=36 karakter dari [0-9A-Za-z_-] — kasus terpanjang
+    # yang realistis: kind SELL + pasangan terpanjang + mikrodetik penuh
+    d = proposal.new_proposal(
+        rules.Action("SELL", "matic_idr", 275000, 1.0, 100.0, "uji", True),
+        rule="r", reserve_after=0, window_s=90, now=1760550000.123456)
+    assert len(d.id) <= 36
+    assert set(d.id) <= set(string.ascii_letters + string.digits + "_-")
+
+
+def test_qty_line_never_uses_scientific_notation():
+    # Rp 275.000 pada aset mahal menghasilkan qty di bawah 0,0001 —
+    # "3e-05" tidak terbaca orang awam di pesan yang memutuskan uang.
+    p = proposal.new_proposal(_act(amount=300, price=10_000_000.0),
+                              rule="r", reserve_after=0, window_s=90, now=0.0)
+    t = proposal.confirmation_text(p)
+    assert p.qty == 3e-05                 # angka yang memang diusulkan
+    assert "Jumlah: 0.00003 koin" in t    # bukan "3e-05"
+    assert "e-" not in t
 
 
 def test_constants_match_spec():
