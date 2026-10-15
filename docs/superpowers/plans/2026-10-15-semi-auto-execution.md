@@ -214,8 +214,9 @@ def test_sell_is_never_gated_by_idr_balance():
 
 def test_reserve_buy_may_draw_from_reserve():
     # ruling F15 — cadangan adalah SUMBER dana reserve buy, bukan penghalangnya.
-    # Jumlahnya sudah dibatasi `max_fraction` (0.5) oleh `reserve_buy_actions`
-    a = rules.Action("BUY", "btc_idr", 30000, 30.0, 1000.0, "reserve buy", True)
+    # 0 + 0,5 × 50.000 = 25.000 daya beli; jumlah 25.000 berada persis di batas.
+    # (Angka 30.000 pada draf awal mustahil lulus — 30.000 > 25.000 wajib ditolak.)
+    a = rules.Action("BUY", "btc_idr", 25000, 25.0, 1000.0, "reserve buy", True)
     out = safeguards.gates(a, **_ok(free_idr=0, reserve_idr=50000, rule="reserve_buy"))
     assert out == []
 
