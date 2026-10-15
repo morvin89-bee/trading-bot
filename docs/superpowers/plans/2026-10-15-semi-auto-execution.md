@@ -199,8 +199,30 @@ def test_allows_fourth_order_other_asset_today():
 
 def test_rejects_when_reserve_would_be_touched():
     # available = free - cadangan
-    a = _act(amount=100000)
+    a = _act(kind="BUY", amount=100000)
     out = safeguards.gates(a, **_ok(free_idr=120000, reserve_idr=50000))
+    assert any("cadangan" in r for r in out)
+
+def test_sell_is_never_gated_by_idr_balance():
+    # ruling F15 — sell tidak membelanjakan IDR; sell MENGHASILKAN IDR.
+    # Aturan `free - reserve` tanpa syarat akan menolak semua sell dan
+    # melumpuhkan take-profit seluruhnya
+    a = rules.Action("SELL", "btc_idr", 100000, 1.0, 100.0, "uji", True)
+    out = safeguards.gates(a, **_ok(free_idr=0, reserve_idr=500000))
+    assert not any("cadangan" in r or "saldo" in r for r in out)
+
+def test_reserve_buy_may_draw_from_reserve():
+    # ruling F15 — cadangan adalah SUMBER dana reserve buy, bukan penghalangnya.
+    # Jumlahnya sudah dibatasi `max_fraction` (0.5) oleh `reserve_buy_actions`
+    a = rules.Action("BUY", "btc_idr", 30000, 30.0, 1000.0, "reserve buy", True)
+    out = safeguards.gates(a, **_ok(free_idr=0, reserve_idr=50000, rule="reserve_buy"))
+    assert out == []
+
+def test_reserve_buy_cannot_exceed_half_of_reserve_even_if_rule_forgets():
+    # pertahanan kedua: batas `max_fraction` ditegakkan di gerbang juga,
+    # supaya salah input dari engine tidak menguras cadangan
+    a = rules.Action("BUY", "btc_idr", 40000, 40.0, 1000.0, "reserve buy", True)
+    out = safeguards.gates(a, **_ok(free_idr=0, reserve_idr=50000, rule="reserve_buy"))
     assert any("cadangan" in r for r in out)
 
 def test_rejects_buysell_pair_within_24h():
@@ -230,8 +252,20 @@ Expected: FAIL — modul belum ada
 - [ ] **Step 3: Implementasi `safeguards.py`**
 
 Urutan pemeriksaan: atap per order → **pagu per aset hari ini** (`MAX_PER_ASSET_PER_DAY`)
-→ jeda (`now − last_fill_ts[pair] < COOLDOWN_SECONDS`) → anti-loop 24 jam →
-`free_idr − reserve_idr < amount_idr`. Setiap penolakan memakai `alerts._rp` untuk angka
+→ jeda (`now − last_fill_ts[pair] < COOLDOWN_SECONDS`) → anti-loop 24 jam → gerbang saldo.
+**Gerbang saldo sadar jenis aksi** (ruling F15). Aturan `free − reserve < jumlah` yang
+diterapkan tanpa syarat akan menolak **semua** SELL (sell tidak membelanjakan IDR — sell
+*menghasilkan* IDR) dan membuat reserve buy **mustahil** (cadangan adalah sumber dananya):
+gerbang seperti itu melumpuhkan seluruh sistem sambil terlihat lulus semua tesnya.
+
+- **SELL** → gerbang saldo tidak berlaku sama sekali.
+- **BUY dengan `rule == "reserve_buy"`** → `free_idr + max_fraction × reserve_idr < amount_idr`.
+  `max_fraction` (0,5) ditegakkan **di gerbang ini juga**, bukan hanya di
+  `reserve_buy_actions`, supaya salah input dari engine tetap tidak bisa menguras
+  cadangan lebih dari separuh.
+- **BUY lainnya** (DCA, take-profit beli) → `free_idr − reserve_idr < amount_idr`.
+
+Setiap penolakan memakai `alerts._rp` untuk angka
 rupiah supaya formatnya `Rp 275.000`. `permissions_ok` mengembalikan kalimat Indonesia
 atau `None`.
 
