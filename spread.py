@@ -41,7 +41,7 @@ def spread_bps(depth):
 
 
 def fetch_depth(pair_id):
-    """Orderbook publik `pair_id` (baca-saja); `None` bila gagal/429/kosong."""
+    """Orderbook publik `pair_id` (baca-saja); `None` bila gagal/429/kosong/bukan objek."""
     req = urllib.request.Request(
         DEPTH_URL.format(pair_id=pair_id),
         headers={"User-Agent": UA})
@@ -56,25 +56,27 @@ def fetch_depth(pair_id):
         depth = json.loads(body)
     except ValueError:
         return None
-    return depth or None                 # body kosong -> None
+    return depth if isinstance(depth, dict) and depth else None
 
 
 def spread_verdict_from_depth(depth, max_bps=MAX_SPREAD_BPS):
     """Inti murni gerbang: `(lolos?, spread_bps)` dari `depth`.
 
-    Data hilang/rusak atau harga terbaca Rp 0 -> `(None, nan)`: tidak ada
-    keputusan, bukan lolos dengan angka nol (spec 6.3). Ambang dinilai dari
-    nilai mentah (`> max_bps` berarti gugur, §8); angka yang dikembalikan
-    dibulatkan 1 desimal untuk pelaporan.
+    Data hilang/rusak, harga terbaca Rp 0, atau buku terbalik (ask < bid)
+    -> `(None, nan)`: tidak ada keputusan, bukan lolos dengan angka nol
+    (spec 6.3 — ragu berarti tidak kirim). Nilai mentah yang dikembalikan
+    langsung dipakai pesan notifikasi `:.0f` (§8), sehingga angka di pesan
+    selalu jujur; ambang dinilai dari nilai yang sama (`> max_bps` berarti
+    gugur).
     """
     try:
         bid, ask = _best_prices(depth)
         raw = spread_bps(depth)
     except (TypeError, KeyError, IndexError, ValueError, ZeroDivisionError):
         return None, float("nan")
-    if math.isnan(raw) or bid <= 0 or ask <= 0:
+    if math.isnan(raw) or bid <= 0 or ask <= 0 or ask < bid:
         return None, float("nan")
-    return raw <= max_bps, round(raw, 1)
+    return raw <= max_bps, raw
 
 
 def spread_verdict(pair_id, max_bps=MAX_SPREAD_BPS, *, fetch=fetch_depth):
