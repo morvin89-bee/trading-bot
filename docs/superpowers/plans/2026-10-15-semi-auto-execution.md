@@ -172,7 +172,8 @@ git commit -m "feat: gerbang spread 30 bps dengan notifikasi wajib"
   - `MAX_PER_ASSET_PER_DAY = 3`
   - `COOLDOWN_SECONDS = 1800`
   - `gates(action: rules.Action, *, free_idr, reserve_idr, today_counts: dict[str,int],
-    last_fill_ts: dict[str,float], held_pairs_24h: set[str], now: float) -> list[str]`
+    last_fill_ts: dict[str,float], held_pairs_24h: set[str], now: float,
+    rule: str = "") -> list[str]`
     Mengembalikan daftar **alasan penolakan berbahasa Indonesia**; kosong = lolos.
     Atap per order memakai konstanta `MAX_ORDER_IDR` — tidak ada parameter terpisah.
   - `permissions_ok(can_trade: bool, can_withdraw: bool, switch_on: bool) -> str | None`
@@ -199,7 +200,7 @@ def test_allows_fourth_order_other_asset_today():
 
 def test_rejects_when_reserve_would_be_touched():
     # available = free - cadangan
-    a = _act(kind="BUY", amount=100000)
+    a = _act(amount=100000)
     out = safeguards.gates(a, **_ok(free_idr=120000, reserve_idr=50000))
     assert any("cadangan" in r for r in out)
 
