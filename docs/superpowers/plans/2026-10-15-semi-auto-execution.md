@@ -115,7 +115,9 @@ def test_spread_bps_uses_mid_not_bid():
 
 def test_verdict_passes_below_threshold():
     depth = {"buy": [["100", "1"]], "sell": [["100.1", "1"]]}   # ~10 bps
-    assert spread.spread_verdict_from_depth(depth, max_bps=30) == (True, 10)
+    # 9.995002498... — abs diperlukan; pytest.approx(10) bawaan (rel 1e-6) TIDAK akan
+    # lolos untuk selisih 0.005 (lihat ruling F9)
+    assert spread.spread_verdict_from_depth(depth, max_bps=30) == (True, pytest.approx(10, abs=0.01))
 
 def test_verdict_rejects_bch_like_spread():
     depth = {"buy": [["4655000", "1"]], "sell": [["4699000", "1"]]}  # ~94 bps
