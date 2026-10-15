@@ -35,6 +35,20 @@ def test_merged_qty_counted_from_remaining_position():
     assert merged[0].qty <= 5.0
 
 
+def test_sell_base_is_first_input_action_not_last():
+    # KONTRAK dasar SELL = aksi PERTAMA grup (lihat docstring merge_actions:
+    # pemanggil wajib menaruh take_profit_actions di urutan pertama). Angka
+    # 5.0 vs 3.0 disengaja berbeda — tes ini GAGAL bila dasar menjadi aksi
+    # terakhir (3.0), min() (3.0), atau jumlah (8.0); bukan tes simetris.
+    first = rules.Action("SELL", "btc_idr", 500_000, 5.0, 100_000.0,
+                         "take-profit", True)
+    second = rules.Action("SELL", "btc_idr", 300_000, 3.0, 100_000.0,
+                          "rebalance", True)
+    merged = actions_merge.merge_actions([first, second])
+    assert len(merged) == 1
+    assert merged[0].qty == 5.0                   # bukan 3.0 dan bukan 8.0
+
+
 def test_buy_twins_take_largest_nominal_not_sum():
     # nominal dua sumber tidak boleh dijumlahkan — itu melanggar atap
     # per order (spec §6.4); ambil yang terbesar dan satukan alurnya
@@ -59,6 +73,23 @@ def test_singleton_passes_through_untouched():
     merged = actions_merge.merge_actions([a])
     assert merged == [a]
     assert merged[0] is a                        # dilewatkan apa adanya
+
+
+def test_empty_input_stays_empty():
+    assert actions_merge.merge_actions([]) == []
+
+
+def test_three_twins_collapse_to_one():
+    # grup beranggota tiga — jalur loop, bukan hanya kasus dua-anggota
+    acts = [
+        rules.Action("SELL", "btc_idr", 500_000, 5.0, 100_000.0, "pertama", True),
+        rules.Action("SELL", "btc_idr", 300_000, 3.0, 100_000.0, "kedua", True),
+        rules.Action("SELL", "btc_idr", 200_000, 2.0, 100_000.0, "ketiga", True),
+    ]
+    merged = actions_merge.merge_actions(acts)
+    assert len(merged) == 1
+    assert merged[0].qty == 5.0
+    assert merged[0].reason == "pertama; kedua; ketiga"
 
 
 def test_sell_and_buy_for_same_pair_are_not_merged():

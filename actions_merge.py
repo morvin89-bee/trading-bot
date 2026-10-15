@@ -10,13 +10,27 @@ Kebijakan penggabungan:
 - Dikelompokkan per `(kind, pair)` — SELL dan BUY pada pair yang sama
   adalah dua usulan berbeda dan TIDAK digabung.
 - `qty`, `amount_idr`, `price_ref`, `executable` diambil dari aksi yang
-  dipilih sebagai dasar (untuk SELL: aksi pertama — satu-satunya yang
-  berasal dari perhitungan saldo posisi `take_profit_actions`; untuk BUY:
-  nominal terbesar — nominal dua sumber tidak pernah dijumlahkan, karena
-  itu melanggar atap per order §6.4).
+  dipilih sebagai dasar (untuk SELL: aksi pertama — lihat syarat urutan
+  di bawah; untuk BUY: nominal terbesar — nominal dua sumber tidak
+  pernah dijumlahkan, karena itu melanggar atap per order §6.4).
 - `reason` semua aksi kelompok digabung dengan `"; "` — pengguna harus
   melihat SEMUA pemicu (§6.2), bukan hanya yang pertama.
 - Aksi tunggal dilewatkan apa adanya, tanpa disalin.
+
+**Syarat urutan pemanggil — BELUM ditegakkan di mana pun.** Dasar SELL
+adalah aksi **pertama** dalam grup input, dan angka itu hanya benar bila
+aksi pertama berasal dari `take_profit_actions` (satu-satunya sumber yang
+menghitung dari saldo posisi). `rules.Action` tidak membawa kolom
+provenance, jadi modul ini **tidak bisa memeriksa** asal sebuah aksi —
+dan tidak ada tes yang memaksa pemanggil memenuhi syarat ini. Pemanggil
+wajib menempatkan output `take_profit_actions` lebih dulu daripada sumber
+SELL lain dalam grup yang sama (Task 11, `collect_actions`). Kontrak
+"aksi pertama yang menang" sendiri dikunci
+`test_sell_base_is_first_input_action_not_last`. V1 saat ini menghasilkan
+grup SELL beranggota tunggal per tik (take-profit maksimal satu per pair;
+satu-satunya sumber SELL lain mendelegasikan ke hitungan yang sama), jadi
+syarat urutan ini belum pernah dijalani dua aksi berbeda — latent, bukan
+aman.
 
 Modul ini murni daftar dan angka — tidak membuka jaringan, tidak punya
 dan tidak pernah mengirim kemampuan order.
