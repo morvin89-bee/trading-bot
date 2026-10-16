@@ -97,7 +97,9 @@ def rule_name(action: rules.Action) -> str:
 class Context:
     """Konteks yang diperlukan engine untuk satu tick."""
     holdings: List[Any]  # rules.Holding objects
-    prices: dict[str, float]  # pair -> price
+    prices: dict[str, float]  # pair -> price; Task 14 WAJIB isi dari ticker
+                              # (baca kewajiban pemanggil di `on_answer` 2b:
+                              # harga kosong = semua konfirmasi "ignored")
     free_idr: float
     reserve_idr: float
     today_counts: dict[str, int]  # pair -> count
@@ -455,6 +457,13 @@ def on_answer(conn: Any, ctx: Context, *, p: proposal.Proposal, answer: str,
         (`proposal.price_still_valid`) -> `"ignored"` — konfirmasi hangus
         (spec L116, putusan R-E); harga tak terbaca juga berarti tidak ada
         keputusan (§6.3).
+
+        **KEWAJIBAN PEMANGGIL (Task 14):** fungsi ini MEMBACA
+        `ctx.prices.get(p.pair)`, tidak pernah mengambil harga sendiri.
+        Bila `ctx.prices` tidak diisi dari ticker, `price_still_valid`
+        selalu `False` dan SETIAP konfirmasi berbalik `"ignored"` —
+        gagal ke arah aman (bot diam), tetapi fitur konfirmasi jadi
+        mati total dan penyebabnya gampang dicari di lapisan yang salah.
     3. Catat jawaban PERTAMA pada KEDUA mode (`shadow_log.proposals` —
        amendmen rencana R-B); mode bayangan berhenti di sini, transport
        tidak PERNAH disentuh.
