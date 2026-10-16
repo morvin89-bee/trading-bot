@@ -6,25 +6,42 @@ import time
 import sqlite3
 
 
+# Hasil yang mungkin terjadi pada suatu usulan
+outcomes = (
+    "proposed",
+    "setuju",
+    "tunda",
+    "batal",
+    "expired",
+    "spread_rejected",
+    "gate_rejected",
+    "dca_missed",
+    "halted",
+    "executed",
+)
+
+
 def _ensure_table(conn):
     """Buat tabel proposals jika belum ada."""
-    conn.execute(
-        """
-        CREATE TABLE IF NOT EXISTS proposals (
-            id TEXT PRIMARY KEY,
-            ts REAL,
-            day TEXT,
-            kind TEXT,
-            pair TEXT,
-            amount_idr REAL,
-            price_ref REAL,
-            rule TEXT,
-            outcome TEXT,
-            note TEXT
+    cursor = conn.cursor()
+    cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='proposals'")
+    if not cursor.fetchone():
+        cursor.execute(
+            """
+            CREATE TABLE proposals (
+                id TEXT PRIMARY KEY,
+                ts REAL,
+                day TEXT,
+                kind TEXT,
+                pair TEXT,
+                amount_idr REAL,
+                price_ref REAL,
+                rule TEXT,
+                outcome TEXT,
+                note TEXT
+            )
+            """
         )
-        """
-    )
-    conn.commit()
 
 
 def record(conn, p, outcome, note=""):
