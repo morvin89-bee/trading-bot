@@ -7,6 +7,8 @@ menyuntikkan berarti gagal, bukan diam-diam memanggil bursa.
 import inspect
 import engine
 import proposal
+import pytest
+import rules
 import sqlite3
 import tempfile
 from unittest.mock import Mock
@@ -282,6 +284,11 @@ def test_reserve_buy_lolos_gerbang_karena_nama_aturan_reserve_buy(tmp_path):
     )
     # Nama aturan pada usulan harus persis ejaan yang dibaca safeguards.gates
     assert beli[0].rule == proposal.RULE_RESERVE_BUY
+    # F33: sisa cadangan setelah order benar-benar berkurang (spec L112) —
+    # perilaku ini berubah di ronde F31 tapi belum pernah dipatok lewat
+    # engine.tick. Angka: Rp 500.000 - tranche Rp 125.000 (0,25 x monthly
+    # Rp 500.000) = Rp 375.000.
+    assert beli[0].reserve_after == 375_000.0
     # Pesan konfirmasi pengguna juga menampilkan nama itu (bukan "Turun")
     assert "Aturan: reserve_buy" in proposal.confirmation_text(beli[0])
     # Tidak boleh ada penolakan yang tercatat — penolakan abadi = sistem
@@ -313,3 +320,69 @@ def test_shadow_log_mencatat_nama_aturan_reserve_buy_untuk_penolakan(tmp_path):
     # Take-profit punya nama sendiri yang stabil, bukan "reserve_buy" dan
     # bukan kata pertama alasan ("Untung")
     assert ("take_profit", "proposed") in got, f"baris log: {sorted(got)}"
+
+def test_rule_name_setiap_aksi_collect_actions_terdaftar():
+    # F32 + G4: tutup SEMUA aksi yang bisa dihasilkan collect_actions hari
+    # ini (dua sumber v1: take-profit SELL dan reserve buy BUY). Bila Task 13
+    # menambah sumber ketiga (DCA), tes ini gagal dan memaksa keputusan
+    # sadar atas nama aturan sumber baru — bukan degradasi diam-diam ke
+    # "unknown" yang tampil ke pengguna dan masuk log bayangan.
+    acts = engine.collect_actions(_rich_ctx())
+    assert acts, "fixture _rich_ctx harus menghasilkan aksi"
+    harap = {"SELL": engine.RULE_TAKE_PROFIT, "BUY": proposal.RULE_RESERVE_BUY}
+    assert {a.kind for a in acts} == set(harap), (
+        "ada jenis aksi di luar dua sumber v1 — daftarkan sumber barunya "
+        f"dulu. aksi: {[(a.kind, a.pair) for a in acts]}"
+    )
+    for a in acts:
+        nama = engine.rule_name(a)
+        assert nama == harap[a.kind], (
+            f"aksi {a.kind} {a.pair} dinamai {nama!r}, bukan "
+            f"{harap[a.kind]!r} — nama harus berasal dari daftar sumbernya, "
+            "bukan dari isi alasan"
+        )
+        assert nama != "unknown", "G4: 'unknown' tidak boleh sampai pengguna"
+
+def test_rule_name_tidak_membaca_nama_dari_kata_alasan():
+    # F32: pemetaan lama membaca kata "cadangan" dari alasan. Kalau redaksi
+    # alasan berubah (Task 13 menulis alasan DCA sendiri), nama aturan ikut
+    # berubah — atau lebih buruk, aksi lain yang kebetulan menyebut
+    # "cadangan" salah dinamai reserve_buy dan MEMBUKA cabang cadangan di
+    # safeguards.gates. Nama harus tetap sama walau alasan diganti.
+    acts = engine.collect_actions(_rich_ctx())
+    buy = next(a for a in acts if a.kind == "BUY")
+    buy.reason = "dialihkan dari tujuan lain, tanpa kata kunci lama"
+    assert engine.rule_name(buy) == proposal.RULE_RESERVE_BUY, (
+        "nama aturan bergantung pada isi alasan — cacat yang sama dengan F31"
+    )
+
+def test_rule_name_menolak_aksi_tanpa_asal():
+    # F32 + G4: aksi yang tidak pernah didaftarkan collect_actions tidak
+    # boleh diam-diam dinamai "unknown" (pengguna melihat "Aturan: unknown",
+    # shadow_log mencatat rule="unknown"). Gagal keras malah, supaya sumber
+    # baru dipaksa mendeklarasikan dirinya.
+    aksi = rules.Action(
+        kind="SELL", pair="btc_idr", amount_idr=400.0, qty=0.25,
+        price_ref=1600.0, reason="alasan apa pun", executable=True)
+    with pytest.raises(ValueError, match="tidak punya nama aturan"):
+        engine.rule_name(aksi)
+
+def test_collect_actions_menolak_dua_aturan_untuk_pasangan_sama(monkeypatch):
+    # F32: dua sumber yang menghasilkan (kind, pair) sama dengan nama aturan
+    # berbeda adalah kebuntuan penamaan — salah satu pasti salah, dan pilihan
+    # diam-diam bisa jatuh ke arah tidak aman ("reserve_buy" yang salah
+    # membuka cabang cadangan di safeguards.gates). Skenario masa depan
+    # disuntik dengan monkeypatch karena dua sumber hari ini tidak pernah
+    # berbagi (kind, pair).
+    aksi_satu = rules.Action(
+        kind="SELL", pair="btc_idr", amount_idr=400.0, qty=0.25,
+        price_ref=1600.0, reason="dari sumber pertama", executable=True)
+    aksi_dua = rules.Action(
+        kind="SELL", pair="btc_idr", amount_idr=400.0, qty=0.25,
+        price_ref=1600.0, reason="dari sumber kedua", executable=True)
+    monkeypatch.setattr(engine.rules, "take_profit_actions",
+                        lambda holdings: [aksi_satu])
+    monkeypatch.setattr(engine.rules, "reserve_buy_actions",
+                        lambda holdings, idr_reserve: [aksi_dua])
+    with pytest.raises(ValueError, match="dua aturan berbeda"):
+        engine.collect_actions(_rich_ctx())
