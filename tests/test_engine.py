@@ -6,6 +6,7 @@ menyuntikkan berarti gagal, bukan diam-diam memanggil bursa.
 """
 import inspect
 import engine
+import proposal
 import sqlite3
 import tempfile
 from unittest.mock import Mock
@@ -255,3 +256,60 @@ def test_duplicate_rules_produce_single_proposal():
                         verdict=lambda pair, **k: (True, 1.0))
     sells = [p for p in props if p.kind == "SELL" and p.pair == "btc_idr"]
     assert len(sells) <= 1
+
+def test_reserve_buy_lolos_gerbang_karena_nama_aturan_reserve_buy(tmp_path):
+    # F31: engine wajib meneruskan nama aturan "reserve_buy" ke
+    # safeguards.gates (ruling F15). Kalau namanya salah, gerbang saldo
+    # memakai aturan "saldo bebas - cadangan" dan MENOLAK semua reserve buy:
+    # fitur beli-dari-cadangan jadi mati total dan hitungan penolakan tidak
+    # pernah bisa nol (spec §9, "7-14 hari tanpa penolakan").
+    conn = _fresh_db(tmp_path)
+    ctx = _rich_ctx()
+    # Cadangan sengaja besar supaya beda aturan terlihat jelas:
+    # - aturan lama "free - reserve" = Rp 100.000 - Rp 500.000 = Rp -400.000 -> TOLAK
+    # - aturan F15  "free + 0,5 x reserve" = Rp 100.000 + Rp 250.000 = Rp 350.000 -> LOLOS
+    # Nominal beli eth_idr = 0,25 x Rp 500.000 (tranche bulanan) = Rp 125.000.
+    ctx.free_idr = 100_000.0
+    ctx.reserve_idr = 500_000.0
+    sent = []
+    props = engine.tick(conn, ctx, now=0.0, telegram=_tg(sent), shadow=True,
+                        verdict=lambda p, **k: (True, 1.0))
+    beli = [p for p in props if p.kind == "BUY"]
+    assert beli, (
+        "reserve buy tidak diusulkan — nama aturan yang dikirim ke gerbang "
+        "saldo kemungkinan bukan 'reserve_buy', jadi aturan free - reserve "
+        f"yang menolaknya. Pesan terkirim: {sent}"
+    )
+    # Nama aturan pada usulan harus persis ejaan yang dibaca safeguards.gates
+    assert beli[0].rule == proposal.RULE_RESERVE_BUY
+    # Pesan konfirmasi pengguna juga menampilkan nama itu (bukan "Turun")
+    assert "Aturan: reserve_buy" in proposal.confirmation_text(beli[0])
+    # Tidak boleh ada penolakan yang tercatat — penolakan abadi = sistem
+    # tak pernah bisa go-live (konsekuensi F31 nomor 2)
+    outcomes = [r[0] for r in conn.execute("SELECT outcome FROM proposals")]
+    assert "gate_rejected" not in outcomes, f"hasil log bayangan: {outcomes}"
+
+def test_shadow_log_mencatat_nama_aturan_reserve_buy_untuk_penolakan(tmp_path):
+    # F31: dua situs nama aturan pada proposal bayangan (status
+    # "spread_rejected" dan "gate_rejected") juga harus "reserve_buy",
+    # bukan kata pertama alasan ("Turun"). Kolom rule inilah yang dibaca
+    # review harian dan yang dipakai ruling F17b.
+    conn = _fresh_db(tmp_path)
+    conn.row_factory = sqlite3.Row
+
+    # Jalur 1: spread gugur -> proposal bayangan "spread_rejected"
+    engine.tick(conn, _rich_ctx(), now=1000.0, telegram=_tg([]), shadow=True,
+                verdict=lambda p, **k: (False, 94.0))
+    # Jalur 2: ditolak pagu per aset per hari (3 order) -> "gate_rejected"
+    ctx = _rich_ctx()
+    ctx.today_counts = {"eth_idr": 3}
+    engine.tick(conn, ctx, now=2000.0, telegram=_tg([]), shadow=True,
+                verdict=lambda p, **k: (True, 1.0))
+
+    rows = conn.execute("SELECT rule, outcome FROM proposals").fetchall()
+    got = {(r["rule"], r["outcome"]) for r in rows}
+    assert ("reserve_buy", "spread_rejected") in got, f"baris log: {sorted(got)}"
+    assert ("reserve_buy", "gate_rejected") in got, f"baris log: {sorted(got)}"
+    # Take-profit punya nama sendiri yang stabil, bukan "reserve_buy" dan
+    # bukan kata pertama alasan ("Untung")
+    assert ("take_profit", "proposed") in got, f"baris log: {sorted(got)}"

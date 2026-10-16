@@ -16,6 +16,44 @@ import spread
 import telegram_gate
 
 
+RULE_TAKE_PROFIT = "take_profit"
+# Tanda pengenal aksi reserve buy pada `rules.Action.reason` —
+# `rules.reserve_buy_actions` selalu menulis "beli pakai sebagian cadangan".
+_TANDA_CADANGAN = "cadangan"
+
+
+def rule_name(action: rules.Action) -> str:
+    """Nama aturan yang menghasilkan `action` — satu-satunya sumber nama aturan.
+
+    Semua titik di engine yang membutuhkan nama aturan (gerbang
+    `safeguards.gates`, catatan log bayangan, `proposal.new_proposal`, dan
+    kelak `on_answer` pada Task 12) memanggil fungsi ini, supaya
+    `safeguards.gates(rule=...)` dan `proposal.new_proposal(rule=...)`
+    selalu menerima nilai yang **sama persis** (kewajiban
+    `safeguards.py:36-38`).
+
+    Hasil:
+
+    - Aksi reserve buy (BUY yang alasan-nya menyebut pemakaian cadangan)
+      -> `proposal.RULE_RESERVE_BUY`, yaitu tepat `"reserve_buy"` — ejaan
+      yang dibaca `safeguards.gates` (ruling F15). Salah ejaan membuat
+      gerbang saldo memakai aturan `free - reserve`, yang menolak SETIAP
+      reserve buy (cadangan adalah sumber dananya) dan membuat sistem tak
+      pernah bisa lolos syarat nol penolakan (spec §9).
+    - Aksi take-profit (SELL) -> `RULE_TAKE_PROFIT` ("take_profit"), nama
+      yang stabil dan berarti, bukan kata pertama dari alasan berbahasa
+      Indonesia yang bisa berubah bebas.
+    - Selain itu -> "unknown": nama yang tidak dikenal tidak pernah
+      membuka cabang cadangan, jadi gagalnya selalu ke arah yang aman
+      (ragu = tidak kirim).
+    """
+    if action.kind == "BUY" and _TANDA_CADANGAN in action.reason:
+        return proposal.RULE_RESERVE_BUY
+    if action.kind == "SELL":
+        return RULE_TAKE_PROFIT
+    return "unknown"
+
+
 @dataclass
 class Context:
     """Konteks yang diperlukan engine untuk satu tick."""
@@ -75,6 +113,9 @@ def tick(
     # 2. Proses setiap aksi
     for action in actions:
         pair = action.pair
+        # Nama aturan dihitung SATU KALI dari satu sumber (F31): gerbang,
+        # catatan bayangan, dan usulan tidak boleh berbeda ejaan.
+        rule = rule_name(action)
 
         # 3. Gerbang spread
         spread_ok, spread_value = verdict(pair)
@@ -117,7 +158,7 @@ def tick(
                     amount_idr=action.amount_idr,
                     qty=action.qty or 0.0,
                     price_ref=action.price_ref or 0.0,
-                    rule=action.reason.split(" ")[0] if action.reason else "unknown",
+                    rule=rule,
                     reserve_after=ctx.reserve_idr,
                     window_s=0,
                     created_ts=now,
@@ -145,7 +186,7 @@ def tick(
             last_fill_ts=ctx.last_fill_ts,
             held_pairs_24h=ctx.held_pairs_24h,
             now=now,
-            rule=action.reason.split(" ")[0] if action.reason else "",  # Aproksimasi rule name
+            rule=rule,  # nama aturan tunggal: gerbang dan usulan selalu sama
         )
         
         if gate_reasons:
@@ -159,7 +200,7 @@ def tick(
                     amount_idr=action.amount_idr,
                     qty=action.qty or 0.0,
                     price_ref=action.price_ref or 0.0,
-                    rule=action.reason.split(" ")[0] if action.reason else "unknown",
+                    rule=rule,
                     reserve_after=ctx.reserve_idr,
                     window_s=0,
                     created_ts=now,
@@ -178,16 +219,20 @@ def tick(
             continue
 
         # 5. Lolos kedua gerbang -> buat usulan
-        # Hitung sisa cadangan setelah reservo buy (jika berlaku)
+        # Hitung sisa cadangan setelah reserve buy (jika berlaku)
         reserve_after = ctx.reserve_idr
-        if action.kind == "BUY" and "reserve_buy" in action.reason:
-            # Cadangan berkurang sesuai amount_idr yang dipakai
+        if rule == proposal.RULE_RESERVE_BUY:
+            # Cadangan berkurang sesuai amount_idr yang dipakai. Dulu tesnya
+            # "reserve_buy" in action.reason — syarat yang tak pernah terpenuhi
+            # (alasan berisi "beli pakai sebagian cadangan", bukan "reserve_buy"),
+            # jadi sisa cadangan tak pernah berkurang. Sekarang memakai nama
+            # aturan yang sama dengan gerbang dan usulan.
             reserve_after = max(0.0, ctx.reserve_idr - action.amount_idr)
 
         # Buat proposal sebenarnya
         prop = proposal.new_proposal(
             action,
-            rule=action.reason.split(" ")[0] if action.reason else "unknown",
+            rule=rule,
             reserve_after=reserve_after,
             window_s=proposal.REACTIVE_WINDOW_S,  # Default window untuk sinyal reaktif
             now=now,
