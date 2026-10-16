@@ -67,11 +67,11 @@ def resolve_status(transport: Transport, client_order_id: str, *, sleep=time.sle
     for i in range(3):
         sleep(STATUS_BACKOFF_S[i])
         response = transport.get_order_status(client_order_id)
-        status_str = response.get("status")
-        if status_str is None:
-            # No status key -> treat as unknown for this attempt, continue to next
+        status_val = response.get("status")
+        if status_val is None or not isinstance(status_val, str):
+            # No status key or non-string status -> treat as unknown for this attempt, continue to next
             continue
-        status_str = status_str.upper()
+        status_str = status_val.upper()
         if status_str == "FILLED":
             return "filled"
         elif status_str == "CANCELLED":
