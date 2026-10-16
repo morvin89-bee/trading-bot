@@ -3,6 +3,7 @@
 `build_alerts` murni teks (mudah diuji). `send_telegram` disiapkan untuk
 notifikasi opsional dan tidak dipanggil di v1.
 """
+import json
 import requests
 
 import rules
@@ -38,12 +39,15 @@ def build_alerts(holdings: list, actions: "list[rules.Action]") -> list:
     return out
 
 
-def send_telegram(token: str, chat_id: str, text: str) -> bool:
+def send_telegram(token: str, chat_id: str, text: str, reply_markup: dict | None = None) -> bool:
     """Kirim pesan via Telegram Bot API. Mengembalikan False bila gagal."""
     try:
+        params = {"chat_id": chat_id, "text": text}
+        if reply_markup is not None:
+            params["reply_markup"] = json.dumps(reply_markup)
         r = requests.get(
             f"https://api.telegram.org/bot{token}/sendMessage",
-            params={"chat_id": chat_id, "text": text}, timeout=10)
+            params=params, timeout=10)
         return r.status_code == 200
     except Exception:
         return False
