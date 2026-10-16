@@ -48,3 +48,30 @@ def test_line_returns_false_rather_than_raising():
     import telegram_gate
     tg = telegram_gate.Telegram("t", "c", send=lambda *a, **k: (_ for _ in ()).throw(OSError()))
     assert tg.line("x") is False
+
+
+def test_parse_callback_button():
+    import telegram_gate
+    u = {"callback_query": {"id": "1", "data": "setuju:p-9"}}
+    assert telegram_gate.parse_update(u) == ("setuju", "p-9")
+
+
+def test_parse_reply_ulang():
+    import telegram_gate
+    u = {"message": {"text": "/ulang"}}
+    assert telegram_gate.parse_update(u) == ("ulang", "")
+
+
+def test_unrelated_message_is_none():
+    import telegram_gate
+    assert telegram_gate.parse_update({"message": {"text": "halo"}}) is None
+
+
+def test_get_updates_advances_offset():
+    import telegram_gate
+    fetched = {}
+    def fake(token, offset=0):
+        fetched["offset"] = offset
+        return {"result": [{"update_id": 7}], "ok": True}
+    updates, nxt = telegram_gate.get_updates("t", offset=0, fetch=fake)
+    assert fetched["offset"] == 0 and nxt == 8 and len(updates) == 1
