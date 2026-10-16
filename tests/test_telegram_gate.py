@@ -70,8 +70,12 @@ def test_unrelated_message_is_none():
 def test_get_updates_advances_offset():
     import telegram_gate
     fetched = {}
-    def fake(token, offset=0):
+    def fake(token, offset=0, timeout=None):
         fetched["offset"] = offset
+        fetched["timeout"] = timeout
         return {"result": [{"update_id": 7}], "ok": True}
     updates, nxt = telegram_gate.get_updates("t", offset=0, fetch=fake)
-    assert fetched["offset"] == 0 and nxt == 8 and len(updates) == 1
+    assert fetched["offset"] == 0
+    assert fetched["timeout"] == 0
+    assert nxt == 8
+    assert len(updates) == 1

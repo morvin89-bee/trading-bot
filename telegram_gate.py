@@ -30,9 +30,8 @@ def get_updates(token: str, *, offset: int = 0, fetch=None) -> tuple[list[dict],
         # this should be overridden with a mock in tests
         raise NotImplementedError("Fetch function must be provided for production use")
     
-    # Call the fetch function (timeout=0 is handled in the real API call,
-    # but for testing we rely on the injected fetch function)
-    response = fetch(token, offset=offset)
+    # Call the fetch function with timeout=0 as specified
+    response = fetch(token, offset=offset, timeout=0)
     
     # Extract updates from response
     updates = response.get("result", [])
