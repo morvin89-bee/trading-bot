@@ -57,3 +57,44 @@ def test_payload_carries_client_id_and_recv_window():
     assert pl["recvWindow"] == 15000
     assert pl["client_order_id"] == "abc"
     assert pl["order_type"] == "limit"
+
+
+class _StatusTransport:
+    def __init__(self, responses):
+        self.responses = responses
+        self.index = 0
+        self.queried_ids = []
+
+    def get_order_status(self, client_order_id: str) -> dict:
+        self.queried_ids.append(client_order_id)
+        if self.index < len(self.responses):
+            resp = self.responses[self.index]
+            self.index += 1
+            return resp
+        # If we run out of responses, return the last one? But the tests expect exactly three.
+        # For safety, return the last response if we have one, else empty dict?
+        # However, the tests only pass exactly three responses.
+        return self.responses[-1] if self.responses else {}
+
+
+def test_queries_with_same_id_and_documented_backoff():
+    # Review Focus #2 â€” 404 sesaat setelah order sukses
+    t = _StatusTransport(responses=[{"code": -2013}, {"code": -2013}, {"status": "FILLED"}])
+    slept = []
+    out = executor.resolve_status(t, "same-id", sleep=slept.append)
+    assert out == "filled"
+    assert slept == [2, 5, 10]
+    assert t.queried_ids == ["same-id"] * 3
+
+
+def test_gives_up_unknown_after_three_asks_without_new_id():
+    t = _StatusTransport(responses=[{"code": -2013}] * 3)
+    ids = []
+    t.queried_ids = ids
+    assert executor.resolve_status(t, "same-id", sleep=lambda s: None) == "unknown"
+    assert set(ids) == {"same-id"}
+
+
+def test_unknown_is_never_reported_as_cancelled():
+    t = _StatusTransport(responses=[{"code": -2013}] * 3)
+    assert executor.resolve_status(t, "id", sleep=lambda s: None) != "cancelled"

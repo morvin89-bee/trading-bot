@@ -1,12 +1,14 @@
 """Eksekutor: satu order, satu kali — tidak pernah membuka jaringan.
 """
 import re
+import time
 from typing import Protocol, Dict, Any
 
 import proposal
 
 
 MAX_CLIENT_ID_LEN = 36
+STATUS_BACKOFF_S = (2, 5, 10)
 
 
 def make_client_order_id(prefix: str, now: float) -> str:
@@ -58,3 +60,23 @@ def payload_for(p: proposal.Proposal, client_order_id: str, recv_window_ms: int 
         # Parameter lain seperti pair, type, etc. akan ditambahkan oleh pemanggil
         # berdasarkan kebutuhan spesifik Indodax API
     }
+
+
+def resolve_status(transport: Transport, client_order_id: str, *, sleep=time.sleep) -> str:
+    """Query order status with up to three attempts, using backoff [2,5,10] seconds before each attempt."""
+    for i in range(3):
+        sleep(STATUS_BACKOFF_S[i])
+        response = transport.get_order_status(client_order_id)
+        status_str = response.get("status")
+        if status_str is None:
+            # No status key -> treat as unknown for this attempt, continue to next
+            continue
+        status_str = status_str.upper()
+        if status_str == "FILLED":
+            return "filled"
+        elif status_str == "CANCELLED":
+            return "cancelled"
+        elif status_str == "REJECTED":
+            return "rejected"
+        # If status is not one of the known ones, treat as unknown and continue
+    return "unknown"
