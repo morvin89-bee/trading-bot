@@ -8,6 +8,10 @@ from typing import Optional
 import alerts
 import proposal
 
+BUTTON_SETUJU = "setuju"
+BUTTON_TUNDA = "tunda"
+BUTTON_BATAL = "batal"
+
 
 class Telegram:
     def __init__(self, token: str, chat_id: str, *, send=None):
@@ -32,9 +36,9 @@ class Telegram:
         text = proposal.confirmation_text(p)
         keyboard = [
             [
-                {"text": "Setuju", "callback_data": f"setuju:{p.id}"},
-                {"text": "Tunda", "callback_data": f"tunda:{p.id}"},
-                {"text": "Batal bulan ini", "callback_data": f"batal:{p.id}"},
+                {"text": "Setuju", "callback_data": f"{BUTTON_SETUJU}:{p.id}"},
+                {"text": "Tunda", "callback_data": f"{BUTTON_TUNDA}:{p.id}"},
+                {"text": "Batal bulan ini", "callback_data": f"{BUTTON_BATAL}:{p.id}"},
             ]
         ]
         reply_markup = {"inline_keyboard": keyboard}
