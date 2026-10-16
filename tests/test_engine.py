@@ -1,7 +1,13 @@
+"""Tes engine satu tick — tidak pernah membuka jaringan.
+
+Semua jalur keluar (gerbang spread, Telegram) disuntikkan lewat argumen
+`verdict` dan `telegram`; guard di `tests/conftest.py` memastikan lupa
+menyuntikkan berarti gagal, bukan diam-diam memanggil bursa.
+"""
 import inspect
 import engine
-import tempfile
 import sqlite3
+import tempfile
 from unittest.mock import Mock
 from portfolio import Holding
 
@@ -74,20 +80,26 @@ def _ctx(price=950.0):
         held_pairs_24h=set(),
     )
 
-def _ctx_with_spread(spread_value):
-    """Helper for test_shadow_writes_nothing_to_exchange."""
+def _ctx_with_spread():
+    """Helper for test_shadow_writes_nothing_to_exchange.
+
+    Menghasilkan tepat SATU aksi take-profit supaya `tick` benar-benar
+    sampai ke gerbang spread. Versi lamanya menerima `spread_value` yang
+    tidak pernah dipakai dan menghasilkan nol aksi, sehingga `tick` keluar
+    di `engine.py:71` sebelum gerbang pernah dipanggil — inti temuan F22.
+    """
     from types import SimpleNamespace
-    # Holdings don't matter for this test since we're checking network calls
     holdings = [
+        # avg_cost 1000, harga 1600 -> take-profit (+60% > level +50%)
         Holding(
             pair="btc_idr",
             coin="btc",
             qty=1.0,
             avg_cost=1000.0,
-            price=1000.0,
-            value_idr=1000000.0,
+            price=1600.0,
+            value_idr=1600000.0,
             cost_basis_idr=1000000.0,
-            unrealized_idr=0.0,
+            unrealized_idr=600000.0,
             basis_known=True
         )
     ]
@@ -206,20 +218,40 @@ def test_stale_numbers_are_never_reused_across_proposals(tmp_path):
 
 def test_shadow_writes_nothing_to_exchange():
     # tidak ada Transport dibuat â€” jalur fisik tidak ada
-    calls = {"n": 0}
-    ctx = _ctx_with_spread(5.0)
-    # We need a conn for this test, but it's not used in the function
-    # Let's create a dummy conn
-    import sqlite3
+    calls = {"verdict": 0}
+
+    def verdict_spy(pair, **k):
+        calls["verdict"] += 1
+        return True, 1.0
+
     conn = sqlite3.connect(":memory:")
-    engine.tick(conn, ctx, now=0.0, telegram=_tg([]), shadow=True)
-    assert calls["n"] == 0
+    conn.row_factory = sqlite3.Row
+    sent = []
+    props = engine.tick(conn, _ctx_with_spread(), now=0.0,
+                        telegram=_tg(sent), shadow=True, verdict=verdict_spy)
+
+    # 1. Tick benar-benar sampai ke gerbang spread (dulu: nol aksi, keluar duluan)
+    assert calls["verdict"] == 1
+    # 2. Usulan tercatat di log bayangan dengan outcome "proposed"
+    assert len(props) == 1
+    rows = conn.execute("SELECT outcome FROM proposals").fetchall()
+    assert [r["outcome"] for r in rows] == ["proposed"]
+    # 3. Jalur sukses murni: tidak ada notifikasi halt/penolakan yang terkirim
+    assert sent == []
+    # 4. Engine tidak mengenal jalur eksekusi sama sekali — secara struktural
+    #    tidak ada yang bisa menulis ke bursa dari tick ini.
+    assert "executor" not in inspect.getsource(engine)
+    # 5. Tidak ada panggilan jaringan: guard di tests/conftest.py akan mematikan
+    #    tes ini bila ada yang membuka koneksi (lihat F25).
 
 def test_duplicate_rules_produce_single_proposal():
     ctx = _ctx_where_two_rules_fire()
     # We need a conn for this test
     import sqlite3
     conn = sqlite3.connect(":memory:")
-    props = engine.tick(conn, ctx, now=0.0, telegram=_tg([]), shadow=True)
+    # verdict WAJIB disuntikkan: tanpa ini tick memakai bawaan
+    # spread.spread_verdict -> fetch_depth -> urlopen (F25).
+    props = engine.tick(conn, ctx, now=0.0, telegram=_tg([]), shadow=True,
+                        verdict=lambda pair, **k: (True, 1.0))
     sells = [p for p in props if p.kind == "SELL" and p.pair == "btc_idr"]
     assert len(sells) <= 1
