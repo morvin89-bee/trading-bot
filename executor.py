@@ -3,6 +3,8 @@
 import re
 from typing import Protocol, Dict, Any
 
+import proposal
+
 
 MAX_CLIENT_ID_LEN = 36
 
