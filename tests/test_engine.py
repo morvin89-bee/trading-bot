@@ -1,7 +1,7 @@
 """Tes engine satu tick — tidak pernah membuka jaringan.
 
 Semua jalur keluar (gerbang spread, Telegram) disuntikkan lewat argumen
-`verdict` dan `telegram`; guard di `tests/conftest.py` memastikan lupa
+`verdict` dan `telegram`; guard di `conftest.py` (root) memastikan lupa
 menyuntikkan berarti gagal, bukan diam-diam memanggil bursa.
 """
 import inspect
@@ -241,7 +241,7 @@ def test_shadow_writes_nothing_to_exchange():
     # 4. Engine tidak mengenal jalur eksekusi sama sekali — secara struktural
     #    tidak ada yang bisa menulis ke bursa dari tick ini.
     assert "executor" not in inspect.getsource(engine)
-    # 5. Tidak ada panggilan jaringan: guard di tests/conftest.py akan mematikan
+    # 5. Tidak ada panggilan jaringan: guard di conftest.py (root) akan mematikan
     #    tes ini bila ada yang membuka koneksi (lihat F25).
 
 def test_duplicate_rules_produce_single_proposal():
