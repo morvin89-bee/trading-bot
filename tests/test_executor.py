@@ -59,6 +59,21 @@ def test_payload_carries_client_id_and_recv_window():
     assert pl["order_type"] == "limit"
 
 
+def test_payload_carries_pair_type_price_amount():
+    # R-A (Critical): payload yang sampai ke transport.post_order harus
+    # membawa instrumen — tanpa ini order terkirim TANPA pasangan.
+    # Kosakata `type`/`price`/`amount` diambil dari catatan trade yang
+    # dibaca `_normalize_v1`/`_normalize_v2` (indodax_api.py:148-201);
+    # ejaan persis penempatan order BELUM diverifikasi (catatan di
+    # `payload_for`).
+    p = _proposal()
+    pl = executor.payload_for(p, "abc")
+    assert pl["pair"] == "btc_idr"
+    assert pl["type"] == "buy"             # sisi ala catatan trade (v1: `type`)
+    assert pl["price"] == 1000.0           # harga limit = price_ref
+    assert pl["amount"] == 275.0           # jumlah koin (v1: `amount` = qty)
+
+
 class _StatusTransport:
     def __init__(self, responses):
         self.responses = responses

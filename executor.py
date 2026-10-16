@@ -46,19 +46,34 @@ def submit_once(transport: Transport, payload: Dict[str, Any], client_order_id: 
 
 
 def payload_for(p: proposal.Proposal, client_order_id: str, recv_window_ms: int = 15000) -> Dict[str, Any]:
-    """Bangun payload order limit dari Proposal."""
-    # Harga limit dari Proposal.price_ref
-    price = p.price_ref
-    # Untuk order beli: bayarkan dalam IDR, untuk order jual: bayarkan dalam koin
-    # Menurut dokumentasi Indodax v2, parameter tergantung pada tipe order
-    # Namun, spesifikasi task hanya menyebutkan order limit dan recvWindow
-    # Kita asumsikan format dasar yang diperlukan
+    """Bangun payload order limit dari Proposal — SATU-SATUNYA tempat nama
+    parameter POST dibangun (putusan F7; verifikasi hari-1 ada di sini).
+
+    Kosakata diambil HANYA dari bukti yang ada di repo: `type`, `price`,
+    dan `amount` adalah kunci yang dibaca `_normalize_v1` dan
+    `_normalize_v2` (indodax_api.py:148-201) dari catatan trade; `pair`
+    adalah kunci pasangan di seluruh indodax_api.py (mis. `my_trades(pair)`).
+
+    GERBANG VERIFIKASI (sama dengan `client_order_id`, putusan F7):
+    `indodax_api.py` TIDAK memuat fungsi penempatan order — sengaja,
+    supaya tidak ada kunci dagang di repo — jadi kontrak order tidak ada
+    di repo. EJAAN PERSIS parameter penempatan order di bawah ini karena
+    itu BELUM TERVERIFIKASI dan wajib diverifikasi sebelum eksekusi
+    diaktifkan. Jangan menyebarkan nama parameter ke modul lain.
+    """
     return {
         "order_type": "limit",
         "client_order_id": client_order_id,
         "recvWindow": recv_window_ms,
-        # Parameter lain seperti pair, type, etc. akan ditambahkan oleh pemanggil
-        # berdasarkan kebutuhan spesifik Indodax API
+        # Empat field instrumen (putusan R-A): tanpa ini order terkirim
+        # tanpa instrumen. Nilai memakai kosakata catatan trade — `type`
+        # = sisi "buy"/"sell" (indodax_api.py:157 dan 184-190), `amount`
+        # = jumlah KOIN seperti `amount` catatan trade v1
+        # (indodax_api.py:149), `price` = harga limit dari `price_ref`.
+        "pair": p.pair,
+        "type": p.kind.lower(),
+        "price": p.price_ref,
+        "amount": p.qty,
     }
 
 

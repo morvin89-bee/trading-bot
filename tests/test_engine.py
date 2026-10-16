@@ -12,6 +12,7 @@ import proposal
 import pytest
 import re
 import rules
+import spread
 import sqlite3
 import tempfile
 from unittest.mock import Mock
@@ -209,6 +210,20 @@ def _proposal(window_s=proposal.REACTIVE_WINDOW_S, created_ts=0.0, *,
 def _fresh_proposal():
     """Proposal segar (belum kadaluarsa) untuk alur `on_answer`."""
     return _proposal()
+
+
+def _pasangkan_harga(ctx, p):
+    """Isi `ctx.prices` dengan harga persis milik `p` — geseran 0%.
+
+    Gerbang drift 0,5% (langkah 2b `on_answer`, putusan R-E) menimbang
+    `ctx.prices[p.pair]` terhadap `p.price_ref`. Tes yang menguji langkah
+    BERIKUTNYA (spread, gerbang, kirim, status) menyuntikkan harga yang sama
+    supaya tidak berhenti di 2b. `_ctx()` sendiri TIDAK diubah: helper itu
+    juga dipakai tes Task 11, dan menambah data harga bisa membuat aksi
+    baru muncul di sana.
+    """
+    ctx.prices[p.pair] = p.price_ref
+    return ctx
 
 
 class _FakeTransport:
@@ -538,7 +553,8 @@ def test_halt_when_status_unknown_keeps_db_untouched(tmp_path, monkeypatch):
     p = _fresh_proposal()
     t = _FakeTransport(status_sequence=["unknown", "unknown", "unknown"])
     sent = []
-    out = engine.on_answer(conn, _ctx(), p=p, answer="setuju", now=0.0,
+    out = engine.on_answer(conn, _pasangkan_harga(_ctx(), p), p=p,
+                           answer="setuju", now=0.0,
                            transport=t, telegram=_tg(sent), shadow=False,
                            verdict=lambda pair, **k: (True, 1.0))
     assert out == "halted" and _db_rows(conn) == []
@@ -556,7 +572,8 @@ def test_spread_rechecked_at_execution_time(tmp_path):
     t = _FakeTransport(depth_bps=45.0)   # saat eksekusi 45 bps
     conn = _fresh_db(tmp_path)
     sent = []
-    out = engine.on_answer(conn, _ctx(), p=p, answer="setuju", now=10.0,
+    out = engine.on_answer(conn, _pasangkan_harga(_ctx(), p), p=p,
+                           answer="setuju", now=10.0,
                            transport=t, telegram=_tg(sent), shadow=False,
                            # gerbang spread disuntik: baca kedalaman dari
                            # tiruan bursa, bukan dari jaringan (F25)
@@ -569,7 +586,9 @@ def test_halt_when_can_withdraw_flips_true(tmp_path):
     conn = _fresh_db(tmp_path)
     t = _FakeTransport(can_withdraw=True)
     sent = []
-    out = engine.on_answer(conn, _ctx(), p=_fresh_proposal(), answer="setuju",
+    p = _fresh_proposal()
+    out = engine.on_answer(conn, _pasangkan_harga(_ctx(), p), p=p,
+                           answer="setuju",
                            now=0.0, transport=t, telegram=_tg(sent),
                            shadow=False, verdict=lambda pair, **k: (True, 1.0))
     assert out == "halted" and t.posted == []
@@ -580,7 +599,9 @@ def test_writes_db_only_after_exchange_answers(tmp_path, monkeypatch):
     tidur = _tanpa_tidur(monkeypatch)
     conn = _fresh_db(tmp_path)
     t = _FakeTransport(status_sequence=["filled"])
-    out = engine.on_answer(conn, _ctx(), p=_fresh_proposal(), answer="setuju",
+    p = _fresh_proposal()
+    out = engine.on_answer(conn, _pasangkan_harga(_ctx(), p), p=p,
+                           answer="setuju",
                            now=0.0, transport=t, telegram=_tg([]),
                            shadow=False, verdict=lambda pair, **k: (True, 1.0))
     assert out == "sent"
@@ -625,7 +646,9 @@ def test_on_answer_bayangan_mencatat_setuju_tanpa_transport(tmp_path):
         return True, 1.0
 
     t = _FakeTransport(status_sequence=["filled"])
-    out = engine.on_answer(conn, _ctx(), p=_fresh_proposal(), answer="setuju",
+    p = _fresh_proposal()
+    out = engine.on_answer(conn, _pasangkan_harga(_ctx(), p), p=p,
+                           answer="setuju",
                            now=0.0, transport=t, telegram=_tg([]),
                            shadow=True, verdict=verdict_spy)
     assert out == "ignored"
@@ -640,7 +663,9 @@ def test_on_answer_harga_hilang_berhenti_bukan_menolak(tmp_path):
     conn = _fresh_db(tmp_path)
     sent = []
     t = _FakeTransport(status_sequence=["filled"])
-    out = engine.on_answer(conn, _ctx(), p=_fresh_proposal(), answer="setuju",
+    p = _fresh_proposal()
+    out = engine.on_answer(conn, _pasangkan_harga(_ctx(), p), p=p,
+                           answer="setuju",
                            now=0.0, transport=t, telegram=_tg(sent),
                            shadow=False,
                            verdict=lambda pair, **k: (None, float("nan")))
@@ -648,19 +673,27 @@ def test_on_answer_harga_hilang_berhenti_bukan_menolak(tmp_path):
     assert _db_rows(conn) == []
     assert any("tidak tersedia" in s for s in sent), sent
 
-def test_on_answer_balasan_hilang_berhenti_tanpa_kirim_ulang(tmp_path):
+def test_on_answer_balasan_hilang_berhenti_tanpa_kirim_ulang(tmp_path,
+                                                             monkeypatch):
     # Spec §6.1: balasan hilang = jangan ulang kirim; berhenti dan beri
-    # tahu pengguna. Pengiriman tepat SATU kali, status tidak ditanya
-    # (kontrak langkah 7: SubmissionUncertain -> "halted").
+    # tahu pengguna. Pengiriman tepat SATU kali. Status DITANYA maksimal
+    # tiga kali dengan id yang sama, jeda [2, 5, 10] (putusan R-C:
+    # plan:539 "retry adalah tanggung jawab query status", spec L398) —
+    # dan tetap berhenti saat jawabannya tidak pasti.
+    tidur = _tanpa_tidur(monkeypatch)
     conn = _fresh_db(tmp_path)
     sent = []
     t = _FakeTransport(explode=True)
-    out = engine.on_answer(conn, _ctx(), p=_fresh_proposal(), answer="setuju",
+    p = _fresh_proposal()
+    out = engine.on_answer(conn, _pasangkan_harga(_ctx(), p), p=p,
+                           answer="setuju",
                            now=0.0, transport=t, telegram=_tg(sent),
                            shadow=False, verdict=lambda pair, **k: (True, 1.0))
     assert out == "halted"
     assert len(t.posted) == 1            # satu percobaan; tidak ada percobaan kedua
-    assert _db_rows(conn) == []
+    assert t.queried_ids == [p.id] * 3   # ditanya 3x dengan id yang sama
+    assert tidur == [2, 5, 10]           # backoff [2, 5, 10], tanpa jam dinding
+    assert _db_rows(conn) == []          # status belum pasti -> DB nol sentuh
     assert sent, "kegagalan pengiriman wajib sampai ke pengguna (G7)"
 
 def test_on_answer_pagu_per_aset_diulang_sebelum_kirim(tmp_path):
@@ -670,9 +703,10 @@ def test_on_answer_pagu_per_aset_diulang_sebelum_kirim(tmp_path):
     conn = _fresh_db(tmp_path)
     ctx = _ctx()
     ctx.today_counts = {"btc_idr": 3}
+    p = _fresh_proposal()
     sent = []
     t = _FakeTransport(status_sequence=["filled"])
-    out = engine.on_answer(conn, ctx, p=_fresh_proposal(), answer="setuju",
+    out = engine.on_answer(conn, _pasangkan_harga(ctx, p), p=p, answer="setuju",
                            now=0.0, transport=t, telegram=_tg(sent),
                            shadow=False, verdict=lambda pair, **k: (True, 1.0))
     assert out == "gate_blocked" and t.posted == []
@@ -686,7 +720,9 @@ def test_on_answer_penolakan_spread_membulatkan_bps_ke_atas(tmp_path):
     # 30.0 tidak > 30); dibulatkan ke atas menjadi "30.1" (jujur).
     conn = _fresh_db(tmp_path)
     sent = []
-    out = engine.on_answer(conn, _ctx(), p=_fresh_proposal(), answer="setuju",
+    p = _fresh_proposal()
+    out = engine.on_answer(conn, _pasangkan_harga(_ctx(), p), p=p,
+                           answer="setuju",
                            now=0.0, transport=_FakeTransport(),
                            telegram=_tg(sent), shadow=False,
                            verdict=lambda pair, **k: (False, 30.004))
@@ -703,7 +739,8 @@ def test_on_answer_submit_dan_tanya_status_memakai_id_sama(tmp_path,
     conn = _fresh_db(tmp_path)
     p = _fresh_proposal()
     t = _FakeTransport(status_sequence=["filled"])
-    out = engine.on_answer(conn, _ctx(), p=p, answer="setuju", now=0.0,
+    out = engine.on_answer(conn, _pasangkan_harga(_ctx(), p), p=p,
+                           answer="setuju", now=0.0,
                            transport=t, telegram=_tg([]), shadow=False,
                            verdict=lambda pair, **k: (True, 1.0))
     assert out == "sent"
@@ -713,6 +750,14 @@ def test_on_answer_submit_dan_tanya_status_memakai_id_sama(tmp_path,
     assert t.posted[0]["order_type"] == "limit"
     assert t.posted[0]["recvWindow"] == 15000
     assert tidur == [2]
+    # R-A: empat field instrumen benar-benar sampai ke transport.post_order
+    # — tanpa ini order terkirim TANPA instrumen. Kosakata diambil dari
+    # catatan trade di indodax_api.py:148-201 (`type`, `price`, `amount`).
+    pl = t.posted[0]
+    assert pl["pair"] == p.pair              # "btc_idr"
+    assert pl["type"] == p.kind.lower()      # "sell" — sisi ala catatan trade
+    assert pl["price"] == p.price_ref        # 1600.0 — harga limit
+    assert pl["amount"] == p.qty             # 0.25 — jumlah koin (v1: `amount`)
 
 def test_on_answer_reserve_buy_lolos_gerbang_saldo_input_sungguhan(tmp_path,
                                                                    monkeypatch):
@@ -729,7 +774,8 @@ def test_on_answer_reserve_buy_lolos_gerbang_saldo_input_sungguhan(tmp_path,
     p = _proposal(kind="BUY", rule=proposal.RULE_RESERVE_BUY,
                   amount_idr=25_000.0, qty=0.025, price_ref=1_000_000.0)
     t = _FakeTransport(status_sequence=["filled"])
-    out = engine.on_answer(conn, ctx, p=p, answer="setuju", now=0.0,
+    out = engine.on_answer(conn, _pasangkan_harga(ctx, p), p=p,
+                           answer="setuju", now=0.0,
                            transport=t, telegram=_tg([]), shadow=False,
                            verdict=lambda pair, **k: (True, 1.0))
     assert out == "sent", (
@@ -750,7 +796,8 @@ def test_on_answer_pembelian_biasa_ditahan_tanpa_nama_reserve_buy(tmp_path):
                   amount_idr=25_000.0, qty=0.025, price_ref=1_000_000.0)
     t = _FakeTransport(status_sequence=["filled"])
     sent = []
-    out = engine.on_answer(conn, ctx, p=p, answer="setuju", now=0.0,
+    out = engine.on_answer(conn, _pasangkan_harga(ctx, p), p=p,
+                           answer="setuju", now=0.0,
                            transport=t, telegram=_tg(sent), shadow=False,
                            verdict=lambda pair, **k: (True, 1.0))
     assert out == "gate_blocked" and t.posted == []
@@ -759,3 +806,197 @@ def test_on_answer_pembelian_biasa_ditahan_tanpa_nama_reserve_buy(tmp_path):
     assert baris and all(x in baris[0] for x in
                          ("saldo bebas Rp 0", "cadangan Rp 50.000",
                           "kurang dari Rp 25.000")), sent
+
+
+# --- putusan ronde review (R-A … R-E) --------------------------------------
+
+def test_on_answer_jawaban_kedua_diabaikan_tanpa_order_baru(tmp_path,
+                                                            monkeypatch):
+    # R-B (Critical): dua "setuju" dalam jendela 90 dtk = SATU order.
+    # Guard langkah 0 membaca shadow_log.proposals (jawaban pertama kini
+    # dicatat di kedua mode — amendmen rencana) SEBELUM menyentuh transport.
+    tidur = _tanpa_tidur(monkeypatch)
+    conn = _fresh_db(tmp_path)
+    p = _fresh_proposal()
+    ctx = _pasangkan_harga(_ctx(), p)
+    t = _FakeTransport(status_sequence=["filled"])
+    panggilan = {"verdict": 0}
+
+    def verdict_spy(pair, **k):
+        panggilan["verdict"] += 1
+        return True, 1.0
+
+    out1 = engine.on_answer(conn, ctx, p=p, answer="setuju", now=0.0,
+                            transport=t, telegram=_tg([]), shadow=False,
+                            verdict=verdict_spy)
+    assert out1 == "sent"
+    sent2 = []
+    out2 = engine.on_answer(conn, ctx, p=p, answer="setuju", now=1.0,
+                            transport=t, telegram=_tg(sent2), shadow=False,
+                            verdict=verdict_spy)
+    assert out2 == "ignored"
+    assert len(t.posted) == 1              # order kedua TIDAK pernah terkirim
+    assert t.queried_ids == [p.id]         # guard berhenti sebelum transport
+    assert _db_rows(conn) == [{"status": "filled"}]   # tetap satu baris
+    assert panggilan["verdict"] == 1       # jawaban kedua berhenti di langkah 0
+    assert tidur == [2]                    # tidak ada percobaan status kedua
+    assert any("sudah dijawab" in s for s in sent2), sent2
+
+
+def test_on_answer_jawaban_kedua_setelah_balasan_hilang_tidak_kirim_ulang(
+        tmp_path, monkeypatch):
+    # R-B (Critical) — kasus yang paling berbahaya: balasan hilang ->
+    # TIDAK ada baris `order_status`, jadi guard yang hanya membaca tabel
+    # itu akan MELESET. Pengaman utamanya baris "setuju" di
+    # shadow_log.proposals. Tanpa guard, jawaban kedua mengirim order
+    # KEDUA dengan client_order_id yang sama persis.
+    tidur = _tanpa_tidur(monkeypatch)
+    conn = _fresh_db(tmp_path)
+    p = _fresh_proposal()
+    ctx = _pasangkan_harga(_ctx(), p)
+    t = _FakeTransport(explode=True)
+    out1 = engine.on_answer(conn, ctx, p=p, answer="setuju", now=0.0,
+                            transport=t, telegram=_tg([]), shadow=False,
+                            verdict=lambda pair, **k: (True, 1.0))
+    assert out1 == "halted"
+    assert _db_rows(conn) == []            # kasus hilang: memang tak ada baris DB
+    assert _outcomes(conn) == ["setuju"]   # tetapi jawaban pertama tercatat
+    sent2 = []
+    out2 = engine.on_answer(conn, ctx, p=p, answer="setuju", now=1.0,
+                            transport=t, telegram=_tg(sent2), shadow=False,
+                            verdict=lambda pair, **k: (True, 1.0))
+    assert out2 == "ignored"
+    assert len(t.posted) == 1              # TIDAK pernah kirim ulang
+    assert any("sudah dijawab" in s for s in sent2), sent2
+
+
+def test_on_answer_balasan_hilang_lalu_status_final_ditulis(tmp_path,
+                                                            monkeypatch):
+    # R-C: cabang SubmissionUncertain MENANYAKAN status dengan id yang sama
+    # (plan:539 "retry adalah tanggung jawab query status (Task 7)",
+    # spec L398 "maks 3 kali bertanya, jeda [2, 5, 10]") — TANPA PERNAH
+    # mengirim ulang. Status final -> baris DB + catatan "executed".
+    tidur = _tanpa_tidur(monkeypatch)
+    conn = _fresh_db(tmp_path)
+    p = _fresh_proposal()
+    ctx = _pasangkan_harga(_ctx(), p)
+    t = _FakeTransport(explode=True, status_sequence=["filled"])
+    sent = []
+    out = engine.on_answer(conn, ctx, p=p, answer="setuju", now=0.0,
+                           transport=t, telegram=_tg(sent), shadow=False,
+                           verdict=lambda pair, **k: (True, 1.0))
+    assert out == "sent"
+    assert len(t.posted) == 1              # tidak pernah kirim ulang
+    assert t.queried_ids == [p.id]         # ditanya dengan id yang sama
+    assert tidur == [2]                    # berhenti pada percobaan pertama
+    assert _db_rows(conn) == [{"status": "filled"}]   # DB baru setelah final
+    assert _outcomes(conn) == ["executed"]
+    assert any("berhasil diisi" in s for s in sent), sent
+
+
+def test_tick_penolakan_spread_membulatkan_bps_ke_atas(tmp_path, monkeypatch):
+    # R-D (utang F13, Task 11): bps 30.004 harus tampil "30.1", bukan "30"
+    # — "spread 30 bps melebihi batas 30 bps" adalah kalimat yang
+    # menyalahi dirinya sendiri. Berlaku untuk KEDUA situs: pesan
+    # notifikasi dan catatan log bayangan.
+    conn = _fresh_db(tmp_path)
+    sent = []
+    engine.tick(conn, _ctx(), now=0.0, telegram=_tg(sent), shadow=True,
+                verdict=lambda p, **k: (False, 30.004))
+    assert any("spread 30.1 bps melebihi batas 30 bps" in s for s in sent), sent
+    notes = [r[0] for r in conn.execute("SELECT note FROM proposals")]
+    assert any("30.1" in n for n in notes), notes
+    # Ambang dibaca dari konstanta, bukan angka literal di dalam teks:
+    # ganti konstanta -> pesan ikut berubah.
+    monkeypatch.setattr(spread, "MAX_SPREAD_BPS", 25)
+    sent2 = []
+    engine.tick(conn, _ctx(), now=1.0, telegram=_tg(sent2), shadow=True,
+                verdict=lambda p, **k: (False, 30.004))
+    assert any("melebihi batas 25 bps" in s for s in sent2), sent2
+
+
+def test_on_answer_harga_bergeser_konfirmasi_hangus(tmp_path):
+    # R-E: spec L116 — "harga bergeser > 0,5% dari angka di pesan dalam
+    # jendela konfirmasi -> hangus". 1609,0 vs 1600,0 = +0,5625% > 0,5%.
+    # Gerbangnya langkah 2b: berhenti SEBELUM verdict (langkah 4) dan
+    # SEBELUM mencatat jawaban — tidak ada tulisan sama sekali.
+    conn = _fresh_db(tmp_path)
+    p = _fresh_proposal()                 # price_ref 1600.0
+    ctx = _ctx()
+    ctx.prices["btc_idr"] = 1609.0         # +0,5625% > 0,5%
+    panggilan = {"verdict": 0}
+
+    def verdict_spy(pair, **k):
+        panggilan["verdict"] += 1
+        return True, 1.0
+
+    t = _FakeTransport(status_sequence=["filled"])
+    sent = []
+    out = engine.on_answer(conn, ctx, p=p, answer="setuju", now=0.0,
+                           transport=t, telegram=_tg(sent), shadow=False,
+                           verdict=verdict_spy)
+    assert out == "ignored"
+    assert t.posted == [] and t.queried_ids == []
+    assert panggilan["verdict"] == 0       # berhenti SEBELUM langkah 4
+    assert _db_rows(conn) == [] and _outcomes(conn) == []
+    assert any("bergeser" in s and "hangus" in s for s in sent), sent
+
+
+def test_on_answer_harga_masih_sah_dalam_05_persen_diteruskan(tmp_path,
+                                                              monkeypatch):
+    # Batas gerbang drift persis 0,5% (proposal.PRICE_DRIFT_TOL): 1608,0
+    # vs 1600,0 = tepat +0,5% -> masih SAH (price_still_valid memakai
+    # "<="), jadi usulan diteruskan, bukan hangus.
+    tidur = _tanpa_tidur(monkeypatch)
+    conn = _fresh_db(tmp_path)
+    p = _fresh_proposal()                 # price_ref 1600.0
+    ctx = _ctx()
+    ctx.prices["btc_idr"] = 1608.0         # tepat +0,5% -> masih berlaku
+    t = _FakeTransport(status_sequence=["filled"])
+    out = engine.on_answer(conn, ctx, p=p, answer="setuju", now=0.0,
+                           transport=t, telegram=_tg([]), shadow=False,
+                           verdict=lambda pair, **k: (True, 1.0))
+    assert out == "sent"
+    assert len(t.posted) == 1
+    assert _db_rows(conn) == [{"status": "filled"}]
+
+
+def test_on_answer_harga_tidak_terbaca_konfirmasi_hangus(tmp_path):
+    # R-E + spec §6.3: harga hilang = TIDAK ADA keputusan —
+    # `price_still_valid(p, None)` menolak, jadi konfirmasi hangus di
+    # langkah 2b, bukan diteruskan ke gerbang dengan angka lama.
+    conn = _fresh_db(tmp_path)
+    p = _fresh_proposal()
+    ctx = _ctx()                          # prices={} — harga tak terbaca
+    t = _FakeTransport(status_sequence=["filled"])
+    sent = []
+    out = engine.on_answer(conn, ctx, p=p, answer="setuju", now=0.0,
+                           transport=t, telegram=_tg(sent), shadow=False,
+                           verdict=lambda pair, **k: (True, 1.0))
+    assert out == "ignored"
+    assert t.posted == [] and _db_rows(conn) == []
+    assert any("hangus" in s for s in sent), sent
+
+
+def test_on_answer_produksi_setelah_tick_tanpa_bentrok_primary_key(tmp_path):
+    # R-B — alur produksi sesungguhnya: `tick` (mode bayangan) sudah menulis
+    # baris "proposed" dengan id yang sama sebelum jawaban datang. Guard
+    # harus membaca OUTCOME (bukan sekadar keberadaan baris, atau jawaban
+    # pertama ikut terkunci), dan catatan "setuju" harus MEMPERBARUI baris
+    # itu — INSERT kedua akan bentrok PRIMARY KEY dan menumbangkan alur
+    # jawaban dengan IntegrityError.
+    conn = _fresh_db(tmp_path)
+    ctx = _ctx()
+    props = engine.tick(conn, ctx, now=0.0, telegram=_tg([]), shadow=True,
+                        verdict=lambda p, **k: (True, 1.0))
+    assert props, "fixture _ctx harus menghasilkan usulan"
+    p = props[0]
+    _pasangkan_harga(ctx, p)
+    out = engine.on_answer(conn, ctx, p=p, answer="setuju", now=0.0,
+                           transport=_FakeTransport(), telegram=_tg([]),
+                           shadow=True, verdict=lambda pair, **k: (True, 1.0))
+    assert out == "ignored"
+    rows = conn.execute(
+        "SELECT outcome FROM proposals WHERE id = ?", (p.id,)).fetchall()
+    assert [r[0] for r in rows] == ["setuju"]   # satu baris, diperbarui
+    assert len(_outcomes(conn)) == len(props)   # tiap usulan tepat satu baris

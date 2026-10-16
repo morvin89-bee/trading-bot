@@ -19,6 +19,7 @@ import rules
 import safeguards
 import shadow_log
 import spread
+import sqlite3
 import telegram_gate
 
 
@@ -209,7 +210,13 @@ def tick(
             return []
         
         if not spread_ok:
-            # Spread gugur
+            # Spread gugur. bps dibulatkan KE ATAS (ruling F13): 30.004
+            # tampil "30.1", bukan "30" — "spread 30 bps melebihi batas
+            # 30 bps" adalah kalimat yang menyalahi dirinya sendiri.
+            # Angka yang sama dipakai untuk catatan log bayangan DAN
+            # pesan notifikasi (kedua situs dulu sama-sama membulatkan ke
+            # terdekat); ambang dibaca dari konstanta, bukan literal.
+            bps_atas = math.ceil(spread_value * 10) / 10
             if shadow:
                 # Buat proposal dummy untuk logging
                 dummy_proposal = proposal.Proposal(
@@ -229,11 +236,11 @@ def tick(
                     conn,
                     dummy_proposal,
                     "spread_rejected",
-                    f"Spread {spread_value:.0f} bps melebihi batas untuk {pair}",
+                    f"Spread {bps_atas:.1f} bps melebihi batas untuk {pair}",
                 )
             telegram.line(
                 f"Order {action.kind} {pair} tidak dieksekusi: spread "
-                f"{spread_value:.0f} bps melebihi batas 30 bps."
+                f"{bps_atas:.1f} bps melebihi batas {spread.MAX_SPREAD_BPS} bps."
             )
             # Lanjut ke aksi berikutnya
             continue
@@ -356,6 +363,78 @@ def _tulis_status_order(conn: Any, p: proposal.Proposal, status: str, *,
     conn.commit()
 
 
+def _outcome_log(conn: Any, p: proposal.Proposal) -> Optional[str]:
+    """Outcome `p.id` di `shadow_log.proposals`, atau None bila belum ada.
+
+    Tabelnya milik `shadow_log`; bila belum pernah dibuat memang belum ada
+    catatan apa pun -> None. Tidak pernah membuka jaringan — hanya membaca
+    koneksi SQLite yang diberikan pemanggil.
+    """
+    try:
+        baris = conn.execute(
+            "SELECT outcome FROM proposals WHERE id = ?", (p.id,)).fetchone()
+    except sqlite3.OperationalError:
+        return None
+    return baris[0] if baris else None
+
+
+def _sudah_dijawab(conn: Any, p: proposal.Proposal) -> bool:
+    """True bila `p.id` sudah pernah dijawab/dieksekusi (langkah 0, R-B).
+
+    Pengaman utamanya `shadow_log.proposals` (kolom `id` PRIMARY KEY),
+    yang mencatat `setuju`/`executed` pada jawaban PERTAMA — kini dicatat
+    di kedua mode (amendmen rencana R-B). Pada kasus balasan hilang tidak
+    ada baris `order_status` sama sekali, jadi guard yang hanya membaca
+    tabel itu akan meleset; baris `order_status` tetap dicek sebagai
+    lapis kedua, bukan satu-satunya.
+    """
+    if _outcome_log(conn, p) in ("setuju", "executed"):
+        return True
+    try:
+        baris = conn.execute(
+            "SELECT 1 FROM order_status WHERE client_order_id = ?",
+            (p.id,)).fetchone()
+    except sqlite3.OperationalError:
+        return False
+    return baris is not None
+
+
+def _catat_hasil(conn: Any, p: proposal.Proposal, outcome: str,
+                 note: str) -> None:
+    """Catat `outcome` untuk `p.id`; baris lama diperbarui, bukan gagal.
+
+    `shadow_log.proposals.id` PRIMARY KEY dan produksi menulis id yang
+    sama berulang: 'proposed' (tick, mode bayangan) -> 'setuju' (jawaban
+    pertama, kini kedua mode) -> 'executed' (status final). INSERT biasa
+    akan gagal keras pada tulisan kedua dan seterusnya, jadi bila baris
+    sudah ada, `outcome`/`note` diperbarui — jumlah baris tetap SATU per
+    usulan. Tulis barunya tetap lewat `shadow_log.record` (pemilik skema).
+    """
+    if _outcome_log(conn, p) is None:
+        shadow_log.record(conn, p, outcome, note)
+    else:
+        conn.execute(
+            "UPDATE proposals SET outcome = ?, note = ? WHERE id = ?",
+            (outcome, note, p.id))
+        conn.commit()
+
+
+def _beritahu_status(p: proposal.Proposal, status: str,
+                     telegram: telegram_gate.Telegram) -> None:
+    """Satu baris notifikasi per perubahan status bursa (G7)."""
+    if status == "filled":
+        sisi = {"BUY": "beli", "SELL": "jual"}.get(p.kind, p.kind)
+        telegram.line(
+            f"{p.pair} {sisi} {alerts._rp(p.amount_idr)} berhasil diisi, "
+            f"order_id: {p.id}")
+    elif status == "cancelled":
+        telegram.line(
+            f"{p.pair} order {p.id} dibatalkan bursa, tidak ada posisi berubah")
+    else:  # "rejected"
+        telegram.line(
+            f"{p.pair} order {p.id} ditolak bursa, tidak ada posisi berubah")
+
+
 def on_answer(conn: Any, ctx: Context, *, p: proposal.Proposal, answer: str,
               now: float, transport: Any, telegram: telegram_gate.Telegram,
               shadow: bool,
@@ -364,20 +443,31 @@ def on_answer(conn: Any, ctx: Context, *, p: proposal.Proposal, answer: str,
               ) -> str:
     """Jawaban manusia atas satu proposal -> eksekusi SATU order, atau berhenti.
 
-    Urutan kontrak (Task 12) — setiap langkah yang gagal berhenti TANPA
-    menyentuh portfolio.db:
+    Urutan kontrak (Task 12, putusan ronde review R-A…R-E) — setiap langkah
+    yang gagal berhenti TANPA menyentuh portfolio.db:
 
+    0. `p.id` sudah pernah dijawab/dieksekusi (baca `shadow_log.proposals`;
+       pada balasan hilang memang tidak ada baris `order_status`) ->
+       `"ignored"` + pemberitahuan, SEBELUM menyentuh transport (R-B).
     1. `answer` bukan "setuju" -> `"ignored"` (tunda/batal = tidak ada tindakan).
     2. Jendela konfirmasi habis (`proposal.is_expired`) -> `"ignored"`.
-    3. Mode bayangan -> catat "setuju" ke log bayangan, kembalikan
-       `"ignored"`; transport tidak PERNAH disentuh.
+    2b. Harga sekarang bergeser > 0,5% dari angka di pesan
+        (`proposal.price_still_valid`) -> `"ignored"` — konfirmasi hangus
+        (spec L116, putusan R-E); harga tak terbaca juga berarti tidak ada
+        keputusan (§6.3).
+    3. Catat jawaban PERTAMA pada KEDUA mode (`shadow_log.proposals` —
+       amendmen rencana R-B); mode bayangan berhenti di sini, transport
+       tidak PERNAH disentuh.
     4. Gerbang spread diulang pada harga SEKARANG (`verdict`) — lolos saat
        komposisi tidak menjamin lolos saat eksekusi. Harga hilang (`None`)
        = berhenti (ruling F5); spread gugur = `"gate_blocked"`.
     5. `safeguards.gates` diulang dengan konteks sekarang -> `"gate_blocked"`.
     6. `safeguards.permissions_ok` (`canWithdraw` aktif = berhenti) -> `"halted"`.
-    7. `executor.submit_once` SATU KALI; `SubmissionUncertain` -> berhenti,
-       tidak pernah mengirim ulang (spec §6.1) -> `"halted"`.
+    7. `executor.submit_once` SATU KALI; `SubmissionUncertain` -> TANYA
+       status dengan id yang sama (maks 3 kali, backoff [2, 5, 10]) TANPA
+       PERNAH mengirim ulang (putusan R-C; plan:539, spec §6.1/L398):
+       status final -> tulis satu baris DB + "executed" -> `"sent"`;
+       masih `"unknown"` -> `"halted"`, DB disentuh nol kali.
     8. `executor.resolve_status` dengan id yang sama; "unknown" ->
        `"halted"` + notifikasi, DB disentuh nol kali; status final ->
        BARU di sini tulis satu baris ke portfolio.db + catat "executed"
@@ -393,6 +483,18 @@ def on_answer(conn: Any, ctx: Context, *, p: proposal.Proposal, answer: str,
     Returns:
         "sent" | "ignored" | "halted" | "gate_blocked" — sesuai kontrak.
     """
+    # 0. Jawaban ganda = SATU order (putusan R-B): bila `p.id` sudah pernah
+    #    dijawab/dieksekusi, berhenti SEBELUM menyentuh transport. Pengaman
+    #    utamanya `shadow_log.proposals` — pada balasan hilang tidak ada
+    #    baris `order_status`, jadi guard yang hanya membaca tabel itu akan
+    #    meleset dan jawaban kedua akan mengirim order kedua dengan
+    #    `client_order_id` yang sama persis.
+    if _sudah_dijawab(conn, p):
+        telegram.line(
+            f"Usulan ini sudah dijawab — jawaban diabaikan, tidak ada order "
+            f"baru (id: {p.id}).")
+        return "ignored"
+
     # 1. Bukan persetujuan -> tidak ada tindakan sama sekali.
     if answer != telegram_gate.BUTTON_SETUJU:
         return "ignored"
@@ -402,13 +504,34 @@ def on_answer(conn: Any, ctx: Context, *, p: proposal.Proposal, answer: str,
     if proposal.is_expired(p, now):
         return "ignored"
 
-    # 3. Mode bayangan: MENCATAT persetujuan adalah hasilnya; jalur fisik
-    #    tidak pernah dijalankan dan transport tidak pernah disentuh.
+    # 2b. Gerbang geser harga 0,5% (spec L116, putusan R-E): angka yang
+    #     dibaca pengguna di pesan konfirmasi harus masih mewakili harga
+    #     sekarang. Harga hilang/tak terbaca pun berarti TIDAK ADA
+    #     keputusan (§6.3) dan `price_still_valid` menolaknya.
+    harga_sekarang = ctx.prices.get(p.pair)
+    if not proposal.price_still_valid(p, harga_sekarang):
+        if harga_sekarang is None or harga_sekarang <= 0:
+            alasan_hangus = (
+                f"Harga {p.pair} tidak bisa dibaca untuk memeriksa geseran")
+        else:
+            alasan_hangus = f"Harga {p.pair} bergeser dari angka di pesan"
+        telegram.line(
+            f"{alasan_hangus} — konfirmasi hangus, tidak ada order dikirim.")
+        return "ignored"
+
+    # 3. Catat jawaban PERTAMA pada KEDUA mode (amendmen rencana R-B):
+    #    baris inilah yang membuat jawaban kedua berhenti di langkah 0.
+    #    Mode bayangan MENCATAT persetujuan sebagai hasilnya lalu berhenti;
+    #    jalur fisik tidak pernah dijalankan dan transport tidak pernah
+    #    disentuh.
     if shadow:
-        shadow_log.record(
+        _catat_hasil(
             conn, p, "setuju",
             "Mode bayangan: persetujuan dicatat, tidak ada order dikirim.")
         return "ignored"
+    _catat_hasil(
+        conn, p, "setuju",
+        "Persetujuan pertama diterima; order menyusul setelah lolos gerbang.")
 
     # 4. Gerbang spread DIULANG pada harga sekarang (spec §8, Review
     #    Focus #3). `verdict` disuntikkan pemanggil — tes tidak pernah
@@ -465,18 +588,30 @@ def on_answer(conn: Any, ctx: Context, *, p: proposal.Proposal, answer: str,
     # 7. Kirim SATU KALI dengan client order id tetap = id proposal
     #    (<= 36 karakter, charset [0-9A-Za-z_-] — terdokumentasi di
     #    proposal.py, F18). Balasan hilang -> `SubmissionUncertain` ->
-    #    BERHENTI: tidak pernah mengirim ulang, tidak pernah mengarang
-    #    status (spec §6.1; prinsip ragu = tidak kirim). Query status yang
-    #    mengambil alih tugas ini adalah milik Task 7/pemanggil — bukan
-    #    alasan untuk mengulang kirim.
+    #    TANYA status dengan id yang sama (putusan R-C; plan:539 "retry
+    #    adalah tanggung jawab query status (Task 7)", spec §6.1/L398
+    #    "maks 3 kali bertanya, jeda [2, 5, 10]") TANPA PERNAH mengirim
+    #    ulang dan TANPA mengarang status (prinsip ragu = tidak kirim).
     payload = executor.payload_for(p, p.id)
     try:
         executor.submit_once(transport, payload, p.id)
     except executor.SubmissionUncertain:
         telegram.line(
             f"Balasan pengiriman order {p.pair} hilang — tidak dikirim "
-            f"ulang. Berhenti; periksa manual di bursa (id: {p.id}).")
-        return "halted"
+            f"ulang; status ditanya ke bursa (id: {p.id}).")
+        status = executor.resolve_status(transport, p.id)
+        if status == "unknown":
+            telegram.line(
+                f"Status order {p.pair} masih belum pasti setelah tiga kali "
+                "ditanya — berhenti, tidak dikirim ulang. Periksa manual di "
+                f"bursa (id: {p.id}).")
+            return "halted"
+        # Status final -> BARU di sini portfolio.db ditulis (spec §6.6),
+        # satu baris, lalu catat ke log usulan dan beri tahu pengguna.
+        _tulis_status_order(conn, p, status, ts=now)
+        _catat_hasil(conn, p, "executed", f"Status bursa: {status}")
+        _beritahu_status(p, status, telegram)
+        return "sent"
 
     # 8. Tanya status dengan id yang sama (maks tiga kali, backoff [2, 5,
     #    10] — di dalam `executor.resolve_status`). Masih "unknown" ->
@@ -493,16 +628,6 @@ def on_answer(conn: Any, ctx: Context, *, p: proposal.Proposal, answer: str,
     # (spec §6.6), satu baris, lalu catat ke log usulan dan beri tahu
     # pengguna (G7: satu baris notifikasi per perubahan status).
     _tulis_status_order(conn, p, status, ts=now)
-    shadow_log.record(conn, p, "executed", f"Status bursa: {status}")
-    if status == "filled":
-        sisi = {"BUY": "beli", "SELL": "jual"}.get(p.kind, p.kind)
-        telegram.line(
-            f"{p.pair} {sisi} {alerts._rp(p.amount_idr)} berhasil diisi, "
-            f"order_id: {p.id}")
-    elif status == "cancelled":
-        telegram.line(
-            f"{p.pair} order {p.id} dibatalkan bursa, tidak ada posisi berubah")
-    else:  # "rejected"
-        telegram.line(
-            f"{p.pair} order {p.id} ditolak bursa, tidak ada posisi berubah")
+    _catat_hasil(conn, p, "executed", f"Status bursa: {status}")
+    _beritahu_status(p, status, telegram)
     return "sent"
