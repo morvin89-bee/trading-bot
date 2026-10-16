@@ -1,13 +1,19 @@
 """Engine satu tick: mengubah konteks menjadi daftar usulan untuk disetujui pengguna.
 
-Modul ini murni dan deterministik — tidak membuka jaringan, tidak pernah
-mengirim kemampuan order. Semua keputusan bersifat lokal dan dapat diuji.
-Hanya memproses aksi take-profit dan reserve buy (modul v1).
+Modul ini tidak pernah membuka jaringan sendiri — seluruh keluaran (gerbang
+spread, Telegram, transport bursa) disuntikkan pemanggil dan diuji dengan
+tiruan. `tick` murni lokal dan deterministik; `on_answer` mengirim order
+hanya lewat transport yang diberikan pemanggil, tidak pernah membuat kunci,
+dan tidak pernah mengulang kirim. Hanya memproses aksi take-profit dan
+reserve buy (modul v1).
 """
 from dataclasses import dataclass
 from typing import List, Callable, Any, Optional
 
 import actions_merge
+import alerts
+import executor
+import math
 import proposal
 import rules
 import safeguards
@@ -43,12 +49,19 @@ def _catat_asal(peta: dict, action: rules.Action, nama: str) -> None:
 def rule_name(action: rules.Action) -> str:
     """Nama aturan yang menghasilkan `action` — satu-satunya sumber nama aturan.
 
-    Semua titik di engine yang membutuhkan nama aturan (gerbang
-    `safeguards.gates`, catatan log bayangan, `proposal.new_proposal`, dan
-    kelak `on_answer` pada Task 12) memanggil fungsi ini, supaya
-    `safeguards.gates(rule=...)` dan `proposal.new_proposal(rule=...)`
-    selalu menerima nilai yang **sama persis** (kewajiban
-    `safeguards.py:36-38`).
+    Semua titik di engine yang menyusun proposal dari aksi (gerbang
+    `safeguards.gates`, catatan log bayangan, `proposal.new_proposal`)
+    memanggil fungsi ini, supaya `safeguards.gates(rule=...)` dan
+    `proposal.new_proposal(rule=...)` selalu menerima nilai yang **sama
+    persis** (kewajiban `safeguards.py:36-38`).
+
+    **`on_answer` (Task 12) TIDAK memanggil fungsi ini** (putusan F36):
+    ia menerima `proposal.Proposal` yang sudah membawa `rule` — hasil
+    pemakaian fungsi ini saat proposal dibuat. Aksi yang direkonstruksi
+    dari callback tidak punya nama asal terdaftar dan akan kena
+    `ValueError`; janji lama docstring ini bahwa `on_answer` akan
+    memanggil `rule_name` sudah dikoreksi dan tidak boleh diwariskan
+    sebagai spesifikasi.
 
     Hasil (F32 — nama diambil dari ASAL aksi, bukan dari kata di dalam
     alasan):
@@ -299,3 +312,197 @@ def tick(
         proposals.append(prop)
 
     return proposals
+
+
+def _tulis_status_order(conn: Any, p: proposal.Proposal, status: str, *,
+                        ts: float) -> None:
+    """Tulis SATU baris status order final — satu-satunya tulisan portfolio.db.
+
+    Spesifikasi §6.6: "portfolio.db hanya ditulis setelah bursa menyatakan
+    terisi / batal / ditolak". Maka fungsi ini hanya dipanggil dari langkah
+    terakhir `on_answer`, setelah `resolve_status` mengembalikan status
+    final; setiap langkah yang gagal tidak pernah menyentuhnya.
+
+    Bentuk tabel adalah keputusan builder (§13): satu baris per order,
+    dijangkar `client_order_id` — id yang sama dipakai saat kirim dan saat
+    bertanya status (§6.1), sehingga order yang sama tidak bisa menulis
+    dua baris.
+    """
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS order_status (
+            client_order_id TEXT PRIMARY KEY,
+            ts REAL,
+            pair TEXT,
+            kind TEXT,
+            amount_idr REAL,
+            qty REAL,
+            price_ref REAL,
+            rule TEXT,
+            status TEXT
+        )
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO order_status (
+            client_order_id, ts, pair, kind, amount_idr,
+            qty, price_ref, rule, status
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (p.id, ts, p.pair, p.kind, p.amount_idr,
+         p.qty, p.price_ref, p.rule, status),
+    )
+    conn.commit()
+
+
+def on_answer(conn: Any, ctx: Context, *, p: proposal.Proposal, answer: str,
+              now: float, transport: Any, telegram: telegram_gate.Telegram,
+              shadow: bool,
+              verdict: Callable[[str, Any],
+                                tuple[bool | None, float]] = spread.spread_verdict,
+              ) -> str:
+    """Jawaban manusia atas satu proposal -> eksekusi SATU order, atau berhenti.
+
+    Urutan kontrak (Task 12) — setiap langkah yang gagal berhenti TANPA
+    menyentuh portfolio.db:
+
+    1. `answer` bukan "setuju" -> `"ignored"` (tunda/batal = tidak ada tindakan).
+    2. Jendela konfirmasi habis (`proposal.is_expired`) -> `"ignored"`.
+    3. Mode bayangan -> catat "setuju" ke log bayangan, kembalikan
+       `"ignored"`; transport tidak PERNAH disentuh.
+    4. Gerbang spread diulang pada harga SEKARANG (`verdict`) — lolos saat
+       komposisi tidak menjamin lolos saat eksekusi. Harga hilang (`None`)
+       = berhenti (ruling F5); spread gugur = `"gate_blocked"`.
+    5. `safeguards.gates` diulang dengan konteks sekarang -> `"gate_blocked"`.
+    6. `safeguards.permissions_ok` (`canWithdraw` aktif = berhenti) -> `"halted"`.
+    7. `executor.submit_once` SATU KALI; `SubmissionUncertain` -> berhenti,
+       tidak pernah mengirim ulang (spec §6.1) -> `"halted"`.
+    8. `executor.resolve_status` dengan id yang sama; "unknown" ->
+       `"halted"` + notifikasi, DB disentuh nol kali; status final ->
+       BARU di sini tulis satu baris ke portfolio.db + catat "executed"
+       -> `"sent"`.
+
+    Nama aturan dibaca dari `p.rule` (putusan F36): proposal sudah membawa
+    nilai persis yang dipakai `tick` saat `safeguards.gates` dan
+    `shadow_log` pertama kali. Menghitung ulang lewat `rule_name` akan kena
+    `ValueError`, karena aksi yang direkonstruksi dari callback tidak
+    punya nama asal terdaftar — janji docstring lama bahwa `on_answer`
+    akan memanggil `rule_name` sudah dikoreksi.
+
+    Returns:
+        "sent" | "ignored" | "halted" | "gate_blocked" — sesuai kontrak.
+    """
+    # 1. Bukan persetujuan -> tidak ada tindakan sama sekali.
+    if answer != telegram_gate.BUTTON_SETUJU:
+        return "ignored"
+
+    # 2. Jendela konfirmasi habis -> hangus; angka lama tidak pernah
+    #    dipakai ulang (spec §6.2/§7.1).
+    if proposal.is_expired(p, now):
+        return "ignored"
+
+    # 3. Mode bayangan: MENCATAT persetujuan adalah hasilnya; jalur fisik
+    #    tidak pernah dijalankan dan transport tidak pernah disentuh.
+    if shadow:
+        shadow_log.record(
+            conn, p, "setuju",
+            "Mode bayangan: persetujuan dicatat, tidak ada order dikirim.")
+        return "ignored"
+
+    # 4. Gerbang spread DIULANG pada harga sekarang (spec §8, Review
+    #    Focus #3). `verdict` disuntikkan pemanggil — tes tidak pernah
+    #    membuka jaringan (F25).
+    spread_ok, spread_value = verdict(p.pair)
+    if spread_ok is None:
+        # Harga hilang = BERHENTI, bukan menolak lalu lanjut (ruling F5).
+        telegram.line(
+            f"Harga {p.pair} tidak tersedia — proses dihentikan untuk "
+            "melindungi dana.")
+        return "halted"
+    if not spread_ok:
+        # Menolak: bps dibulatkan KE ATAS (ruling F13) supaya angka yang
+        # terbaca tidak pernah lebih memaafkan dari kenyataan; kedua
+        # besaran (spread dan ambang) ditampilkan (ruling F17a).
+        bps_atas = math.ceil(spread_value * 10) / 10
+        telegram.line(
+            f"{p.pair} tidak dieksekusi: spread {bps_atas:.1f} bps > "
+            f"{spread.MAX_SPREAD_BPS} bps.")
+        return "gate_blocked"
+
+    # 5. Gerbang safeguards DIULANG dengan angka konteks sekarang (saldo,
+    #    atap per order, pagu per aset per hari, jeda, anti-loop). Nama
+    #    aturan dari proposal (F36) — ejaan "reserve_buy" persis sama
+    #    dengan yang dipakai saat proposal dibuat (F17b), supaya gerbang
+    #    saldo yang sadar aturan (F15) membuka cabang yang benar.
+    aksi = rules.Action(
+        kind=p.kind, pair=p.pair, amount_idr=p.amount_idr, qty=p.qty,
+        price_ref=p.price_ref,
+        reason=f"usulan terkonfirmasi pengguna ({p.id})", executable=True)
+    gate_reasons = safeguards.gates(
+        aksi,
+        free_idr=ctx.free_idr,
+        reserve_idr=ctx.reserve_idr,
+        today_counts=ctx.today_counts,
+        last_fill_ts=ctx.last_fill_ts,
+        held_pairs_24h=ctx.held_pairs_24h,
+        now=now,
+        rule=p.rule,
+    )
+    if gate_reasons:
+        for alasan in gate_reasons:
+            telegram.line(alasan)
+        return "gate_blocked"
+
+    # 6. Izin bursa dibaca ulang tepat sebelum kirim (spec §6.6):
+    #    canWithdraw aktif ATAU canTrade tidak cocok sakelar -> berhenti.
+    izin = safeguards.permissions_ok(transport.can_trade,
+                                     transport.can_withdraw, switch_on=True)
+    if izin is not None:
+        telegram.line(izin)
+        return "halted"
+
+    # 7. Kirim SATU KALI dengan client order id tetap = id proposal
+    #    (<= 36 karakter, charset [0-9A-Za-z_-] — terdokumentasi di
+    #    proposal.py, F18). Balasan hilang -> `SubmissionUncertain` ->
+    #    BERHENTI: tidak pernah mengirim ulang, tidak pernah mengarang
+    #    status (spec §6.1; prinsip ragu = tidak kirim). Query status yang
+    #    mengambil alih tugas ini adalah milik Task 7/pemanggil — bukan
+    #    alasan untuk mengulang kirim.
+    payload = executor.payload_for(p, p.id)
+    try:
+        executor.submit_once(transport, payload, p.id)
+    except executor.SubmissionUncertain:
+        telegram.line(
+            f"Balasan pengiriman order {p.pair} hilang — tidak dikirim "
+            f"ulang. Berhenti; periksa manual di bursa (id: {p.id}).")
+        return "halted"
+
+    # 8. Tanya status dengan id yang sama (maks tiga kali, backoff [2, 5,
+    #    10] — di dalam `executor.resolve_status`). Masih "unknown" ->
+    #    berhenti dan beri tahu; DB disentuh nol kali.
+    status = executor.resolve_status(transport, p.id)
+    if status == "unknown":
+        telegram.line(
+            f"Status order {p.pair} tidak pasti setelah tiga kali ditanya "
+            "— berhenti, tidak dikirim ulang. Periksa manual di bursa "
+            f"(id: {p.id}).")
+        return "halted"
+
+    # Status final dari bursa -> BARU di sini portfolio.db ditulis
+    # (spec §6.6), satu baris, lalu catat ke log usulan dan beri tahu
+    # pengguna (G7: satu baris notifikasi per perubahan status).
+    _tulis_status_order(conn, p, status, ts=now)
+    shadow_log.record(conn, p, "executed", f"Status bursa: {status}")
+    if status == "filled":
+        sisi = {"BUY": "beli", "SELL": "jual"}.get(p.kind, p.kind)
+        telegram.line(
+            f"{p.pair} {sisi} {alerts._rp(p.amount_idr)} berhasil diisi, "
+            f"order_id: {p.id}")
+    elif status == "cancelled":
+        telegram.line(
+            f"{p.pair} order {p.id} dibatalkan bursa, tidak ada posisi berubah")
+    else:  # "rejected"
+        telegram.line(
+            f"{p.pair} order {p.id} ditolak bursa, tidak ada posisi berubah")
+    return "sent"
