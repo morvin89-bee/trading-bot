@@ -112,8 +112,9 @@ def test_dca_missed_recorded_exactly_once(tmp_path):
 def test_new_schedule_appears_next_month_only(tmp_path):
     conn = _fresh_db(tmp_path)
     # jendela dulu: sejak T-13.6 mark_missed bergerbang (butuh jendela + awaiting)
+    # dan sejak T-13.7 butuh ts yang sudah melewati jendela 24 jam
     dca_window.mark_pending(conn, _ts(hour=9, minute=0))
-    dca_window.mark_missed(conn, _ts(hour=10, minute=0))
+    dca_window.mark_missed(conn, _ts(day=2, hour=9, minute=1))
     # hari berikutnya di bulan yang sama: tidak ada jadwal baru
     assert dca_window.dca_state(conn, _ts(day=2, hour=9, minute=0))[0] == "missed"
     # bulan berikutnya barulah siklus baru muncul ("none")
@@ -193,9 +194,9 @@ def test_ensure_bot_state_idempotent(tmp_path):
 def test_mark_missed_records_once_even_if_called_twice(tmp_path):
     conn = _fresh_db(tmp_path)
     dca_window.mark_pending(conn, _ts(hour=9, minute=0))  # gerbang T-13.6: butuh jendela
-    dca_window.mark_missed(conn, _ts(hour=10, minute=0))
+    dca_window.mark_missed(conn, _ts(day=2, hour=9, minute=1))  # T-13.7: setelah jendela lewat
     # panggilan ganda pada waktu berbeda di bulan yang sama — tidak boleh menggandakan
-    dca_window.mark_missed(conn, _ts(hour=11, minute=0))
+    dca_window.mark_missed(conn, _ts(day=2, hour=10, minute=0))
     assert _jumlah_missed(conn) == 1
     assert dca_window.dca_state(conn, _ts(day=2, hour=10, minute=0))[0] == "missed"
 
@@ -203,7 +204,7 @@ def test_mark_missed_records_once_even_if_called_twice(tmp_path):
 def test_missed_marker_carries_no_fabricated_numbers(tmp_path):
     conn = _fresh_db(tmp_path)
     dca_window.mark_pending(conn, _ts(hour=9, minute=0))  # gerbang T-13.6: butuh jendela
-    ts = _ts(hour=10, minute=0)
+    ts = _ts(day=2, hour=9, minute=1)  # T-13.7: setelah jendela 24 jam lewat
     dca_window.mark_missed(conn, ts)
     baris = conn.execute(
         "SELECT id, ts, day, kind, pair, amount_idr, price_ref, rule, outcome "
@@ -224,9 +225,9 @@ def test_missed_marker_carries_no_fabricated_numbers(tmp_path):
 def test_late_confirmation_does_not_resurrect_missed(tmp_path):
     conn = _fresh_db(tmp_path)
     dca_window.mark_pending(conn, _ts(hour=9, minute=0))  # gerbang T-13.6: butuh jendela
-    dca_window.mark_missed(conn, _ts(hour=10, minute=0))
-    dca_window.mark_confirmed(conn, _ts(hour=12, minute=0))  # jawaban telat
-    assert dca_window.dca_state(conn, _ts(hour=13, minute=0))[0] == "missed"
+    dca_window.mark_missed(conn, _ts(day=2, hour=9, minute=1))  # T-13.7: setelah jendela lewat
+    dca_window.mark_confirmed(conn, _ts(day=2, hour=12, minute=0))  # jawaban telat
+    assert dca_window.dca_state(conn, _ts(day=2, hour=13, minute=0))[0] == "missed"
     assert _jumlah_missed(conn) == 1
 
 
@@ -412,7 +413,9 @@ def test_mark_missed_does_not_overwrite_confirmed(tmp_path):
     conn = _fresh_db(tmp_path)
     dca_window.mark_pending(conn, _ts(hour=9, minute=0))
     dca_window.mark_confirmed(conn, _ts(hour=10, minute=0))
-    dca_window.mark_missed(conn, _ts(hour=11, minute=0))
+    # T-13.7: ts setelah jendela lewat — kalau tidak, tes ini jadi kosong terhadap
+    # mutasi gerbang status (penolakan akan datang dari syarat waktu, bukan status)
+    dca_window.mark_missed(conn, _ts(day=2, hour=9, minute=1))
     assert dca_window.dca_state(conn, _ts(hour=12, minute=0)) == ("confirmed", 0.0)
     assert _ada_tabel_proposals(conn) is False
 
@@ -423,7 +426,7 @@ def test_mark_missed_does_not_overwrite_batal(tmp_path):
     conn = _fresh_db(tmp_path)
     dca_window.mark_pending(conn, _ts(hour=9, minute=0))
     dca_window.mark_batal(conn, _ts(hour=10, minute=0))
-    dca_window.mark_missed(conn, _ts(hour=11, minute=0))
+    dca_window.mark_missed(conn, _ts(day=2, hour=9, minute=1))  # T-13.7: setelah jendela lewat
     assert dca_window.dca_state(conn, _ts(hour=12, minute=0)) == ("none", 0.0)
     assert _ada_tabel_proposals(conn) is False
     assert _jumlah_missed(conn) == 0
@@ -440,3 +443,55 @@ def test_mark_missed_accepts_window_crossing_month_boundary(tmp_path):
     dca_window.mark_missed(conn, _ts_berikutnya(hour=10))  # jendela sudah lewat
     assert _jumlah_missed(conn) == 1
     assert dca_window.dca_state(conn, _ts_berikutnya(hour=11))[0] == "missed"
+
+
+def test_mark_missed_before_window_end_is_refused(tmp_path):
+    # T-13.7 — jendela masih berjalan (baru 1 jam dari 24): menulis catatan
+    # "tidak dibalas dalam 24 jam" saat sisa jendela masih ada adalah PEMALSUAN
+    # ANGKA — wajib ditolak tanpa tulisan apa pun.
+    conn = _fresh_db(tmp_path)
+    dca_window.mark_pending(conn, _ts(hour=9, minute=0))
+    dca_window.mark_missed(conn, _ts(hour=10, minute=0))  # 23 jam masih sisa
+    assert _ada_tabel_proposals(conn) is False  # nol tulisan sama sekali
+    assert _jumlah_missed(conn) == 0
+    baris = conn.execute("SELECT dca_status FROM bot_state WHERE id = 1").fetchone()
+    assert baris[0] == "awaiting"  # keadaan tidak berubah
+    assert dca_window.dca_state(conn, _ts(hour=11, minute=0))[0] == "awaiting"
+
+
+def test_batal_on_fresh_row_is_deliberate_and_silent(tmp_path):
+    # Minor 2 — pin keputusan sadar: putusan mengizinkan baris (None, _bulan(ts)),
+    # jadi Batal pada baris tanpa keadaan menyetel bulan berjalan jadi "batal"
+    # dengan NOL baris shadow_log. Tanpa tes ini pembaca tidak bisa membedakan
+    # "sengaja" dari "lupa". Dampaknya hanya menahan order; bulan pulih sendiri
+    # pada pengiriman 09.00 berikutnya (mark_pending tanpa syarat).
+    conn = _fresh_db(tmp_path)
+    dca_window.mark_batal(conn, _ts(hour=10, minute=0))
+    baris = conn.execute(
+        "SELECT last_dca_date, dca_status FROM bot_state WHERE id = 1"
+    ).fetchone()
+    assert baris[0] == time.strftime("%Y-%m", time.localtime(_ts(hour=10)))
+    assert baris[1] == "batal"
+    assert _ada_tabel_proposals(conn) is False  # nol jejak audit
+    assert dca_window.dca_state(conn, _ts(hour=11, minute=0)) == ("none", 0.0)
+    # pemulihan sendiri: pengiriman 09.00 berikutnya menimpa "batal"
+    dca_window.mark_pending(conn, _ts(day=2, hour=9, minute=0))
+    assert dca_window.dca_state(conn, _ts(day=2, hour=10, minute=0))[0] == "awaiting"
+
+
+def test_refusing_writers_report_true_or_false(tmp_path):
+    # Minor 4 — penulis yang bisa menolak harus bisa dibedakan pemanggil:
+    # True bila diterapkan, False bila ditolak (Task 14 perlu memberi tahu user
+    # "bulan ini sudah selesai, Batal tidak berlaku"). mark_pending tidak punya
+    # prasyarat dan tidak pernah menolak — sengaja TANPA nilai kembalian.
+    conn = _fresh_db(tmp_path)
+    assert dca_window.mark_confirmed(conn, _ts(hour=9, minute=0)) is False  # tanpa jendela
+    assert dca_window.mark_missed(conn, _ts(hour=10, minute=0)) is False  # tanpa jendela
+    assert dca_window.mark_batal(conn, _ts(hour=11, minute=0)) is True  # baris kosong: berlaku
+    dca_window.mark_pending(conn, _ts(day=2, hour=9, minute=0))
+    assert dca_window.mark_confirmed(conn, _ts(day=2, hour=10, minute=0)) is True
+    assert dca_window.mark_batal(conn, _ts(day=2, hour=11, minute=0)) is False  # sudah confirmed
+    assert dca_window.mark_confirmed(conn, _ts(day=2, hour=12, minute=0)) is False  # sudah selesai
+    dca_window.mark_pending(conn, _ts(day=3, hour=9, minute=0))
+    assert dca_window.mark_missed(conn, _ts(day=3, hour=10, minute=0)) is False  # belum lewat
+    assert dca_window.mark_missed(conn, _ts(day=4, hour=9, minute=1)) is True  # lewat 24 jam
