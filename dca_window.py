@@ -274,7 +274,7 @@ def mark_batal(conn, ts):
     bulan itu — arahnya menahan order, tidak pernah memerintahkannya. Jalur baris
     kosong ini keputusan SADAR (diizinkan teks putusan, dipin tes
     `test_batal_on_fresh_row_is_deliberate_and_silent`). Inilah salah satu dari
-    empat jalan menulis `dca_status` (lihat STATUS_DCA); tanpa fungsi ini Task 14
+    lima jalan menulis `dca_status` (lihat STATUS_DCA); tanpa fungsi ini Task 14
     tergoda menulis kolomnya langsung, yang dilarang.
 
     Mengembalikan True bila batal diterapkan, False bila ditolak prasyarat
