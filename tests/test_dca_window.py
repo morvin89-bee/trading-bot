@@ -4,6 +4,8 @@ import os
 import sqlite3
 import time
 
+import pytest
+
 import dca_window
 
 
@@ -114,6 +116,7 @@ def test_states_follow_the_window(tmp_path):
     state, sisa = dca_window.dca_state(conn, _ts(hour=9, minute=1))
     assert state == "awaiting"
     assert sisa == 86340.0  # 86.400 detik − 60 detik (dihitung, bukan dikutip)
+    # ^ literal DST-rapuh: benar di mesin ini (UTC+7, tanpa DST); mesin ber-DST bisa beda
     dca_window.mark_confirmed(conn, _ts(hour=10, minute=0))
     assert dca_window.dca_state(conn, _ts(hour=11, minute=0)) == ("confirmed", 0.0)
 
@@ -218,6 +221,110 @@ def test_window_boundary_is_end_exclusive(tmp_path):
     # 1 detik sebelum tepat 24 jam masih awaiting, tepat 24 jam sudah missed.
     conn = _fresh_db(tmp_path)
     dca_window.mark_pending(conn, _ts(hour=9, minute=0))
-    assert dca_window.dca_state(conn, _ts(day=2, hour=8, minute=59)) == ("awaiting", 60.0)
+    assert dca_window.dca_state(conn, _ts(day=2, hour=8, minute=59)) == ("awaiting", 60.0)  # 60.0: literal DST-rapuh, benar di UTC+7 tanpa DST
     assert dca_window.dca_state(conn, _ts(day=2, hour=9, minute=0)) == ("missed", 0.0)
     assert _jumlah_missed(conn) == 1
+
+
+def test_should_remind_docstring_states_one_message_per_slot():
+    # T-13.1 — should_remind True sepanjang satu jam; dedupe ada di pemanggil
+    # (rencana L1189 memanggilnya tiap tick, HEARTBEAT_S = 300). Kalimat ini yang
+    # mewariskan kewajiban "maksimal satu pesan per slot" ke Task 14.
+    doc = inspect.getdoc(dca_window.should_remind) or ""
+    assert "maksimal satu pesan per slot" in doc
+
+
+def test_crashed_between_audit_and_status_recovers(tmp_path):
+    # T-13.2 — sisa kecelakaan: commit baris audit berhasil, commit status mati
+    # di tengah (di sini disimulasikan dengan menyetel ulang status ke awaiting).
+    # Pemanggilan berikutnya wajib memulihkan diri, bukan mati IntegrityError
+    # selamanya sampai bulan berganti.
+    conn = _fresh_db(tmp_path)
+    dca_window.mark_pending(conn, _ts(hour=9, minute=0))
+    dca_window.mark_missed(conn, _ts(day=2, hour=9, minute=1))
+    conn.execute("UPDATE bot_state SET dca_status = 'awaiting' WHERE id = 1")
+    conn.commit()
+    state, _ = dca_window.dca_state(conn, _ts(day=2, hour=12, minute=0))
+    assert state == "missed"          # pulih sendiri, bukan meledak
+    assert _jumlah_missed(conn) == 1  # tetap tepat satu catatan
+
+
+def test_confirm_without_pending_window_is_noop(tmp_path):
+    # T-13.3 — tombol Setuju dari keyboard basi yang mendarat SEBELUM pengiriman
+    # tidak boleh mengarang bulan "confirmed" (bulan DCA hilang diam-diam).
+    conn = _fresh_db(tmp_path)
+    dca_window.mark_confirmed(conn, _ts(hour=9, minute=0))
+    assert dca_window.dca_state(conn, _ts(hour=10, minute=0)) == ("none", 0.0)
+    baris = conn.execute(
+        "SELECT last_dca_date, dca_status FROM bot_state WHERE id = 1"
+    ).fetchone()
+    assert baris[0] is None and baris[1] is None  # keadaan tidak tersentuh
+
+
+def test_confirm_during_pending_window_works(tmp_path):
+    # sisi kedua T-13.3: pada jendela yang sah, konfirmasi tetap berfungsi
+    conn = _fresh_db(tmp_path)
+    dca_window.mark_pending(conn, _ts(hour=9, minute=0))
+    dca_window.mark_confirmed(conn, _ts(hour=10, minute=0))
+    assert dca_window.dca_state(conn, _ts(hour=11, minute=0)) == ("confirmed", 0.0)
+    assert dca_window.should_remind(conn, _ts(hour=15, minute=0)) is False
+
+
+def test_confirm_in_different_month_than_pending_is_ignored(tmp_path):
+    # T-13.3 — keputusan sadar: jawaban silang-bulan diabaikan, jendela aslinya
+    # tidak boleh tertimpa, dan bulan penerima jawaban tidak dikarang "confirmed".
+    conn = _fresh_db(tmp_path)
+    dca_window.mark_pending(conn, _ts_berikutnya(hour=9))
+    dca_window.mark_confirmed(conn, _ts(hour=10, minute=0))
+    assert dca_window.dca_state(conn, _ts(hour=11, minute=0)) == ("none", 0.0)
+    assert dca_window.dca_state(conn, _ts_berikutnya(hour=12))[0] == "awaiting"
+
+
+def test_unknown_status_fails_loud_not_open(tmp_path):
+    # T-13.4 — penulisan langsung (terlarang) menyisipkan nilai tak dikenal:
+    # wajib gagal keras, bukan diam-diam jatuh ke awaiting lalu menulis catatan
+    # dca_missed palsu untuk DCA yang terjawab.
+    conn = _fresh_db(tmp_path)
+    dca_window.mark_pending(conn, _ts(hour=9, minute=0))
+    conn.execute("UPDATE bot_state SET dca_status = 'rancu' WHERE id = 1")
+    conn.commit()
+    with pytest.raises(ValueError, match="dca_status"):
+        dca_window.dca_state(conn, _ts(hour=10, minute=0))
+    assert _jumlah_missed(conn) == 0  # tidak ada catatan palsu
+
+
+def test_null_sent_ts_fails_loud_with_value_error(tmp_path):
+    # Minor 2 — data rusak harus menjelaskan dirinya sendiri, bukan TypeError
+    # "None + int" yang buram
+    conn = _fresh_db(tmp_path)
+    dca_window.mark_pending(conn, _ts(hour=9, minute=0))
+    conn.execute("UPDATE bot_state SET dca_sent_ts = NULL WHERE id = 1")
+    conn.commit()
+    with pytest.raises(ValueError, match="dca_sent_ts"):
+        dca_window.dca_state(conn, _ts(hour=10, minute=0))
+
+
+def test_mark_batal_writes_no_record_and_yields_none(tmp_path):
+    # Putusan "mark_batal dikirim SEKARANG" — tombol "Batal bulan ini" (spec L205):
+    # batal bukan penolakan dan bukan kelalaian, jadi nol catatan shadow_log
+    # (tidak boleh menggerus rejected_count, sinyal reset §9).
+    conn = _fresh_db(tmp_path)
+    dca_window.mark_pending(conn, _ts(hour=9, minute=0))
+    dca_window.mark_batal(conn, _ts(hour=10, minute=0))
+    assert dca_window.dca_state(conn, _ts(hour=11, minute=0)) == ("none", 0.0)
+    assert _ada_tabel_proposals(conn) is False  # nol tulisan sama sekali
+    assert _jumlah_missed(conn) == 0
+    assert dca_window.should_remind(conn, _ts(hour=15, minute=0)) is False
+
+
+def test_reminder_at_03_blocked_by_dnd_not_by_schedule(tmp_path):
+    # Minor 1 — mendiskriminasikan cabang in_dnd di dalam should_remind:
+    # dengan set jam pengingat dipaksa jadi (3,), 03.00 tetap tidak boleh True.
+    conn = _fresh_db(tmp_path)
+    dca_window.mark_pending(conn, _ts(hour=9, minute=0))
+    asli = dca_window.REMINDER_HOURS
+    try:
+        dca_window.REMINDER_HOURS = (3,)
+        assert dca_window.should_remind(conn, _ts(hour=3, minute=0)) is False
+    finally:
+        dca_window.REMINDER_HOURS = asli

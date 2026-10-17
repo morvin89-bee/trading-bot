@@ -26,6 +26,13 @@ DCA_WINDOW_H = 24
 DND = (23, 7)
 REMINDER_HOURS = (15, 21)  # 03.00 sengaja tidak ada: berada di dalam DND
 
+# Nilai resmi `dca_status`. Kolom ini HANYA boleh ditulis lewat fungsi modul ini
+# (mark_pending / mark_confirmed / mark_missed / mark_batal) — dilarang keras
+# menulisnya lewat UPDATE langsung. Nilai di luar daftar ini membuat dca_state
+# gagal keras (ValueError), bukan diam-diam jatuh ke awaiting dan menulis
+# catatan dca_missed palsu (review T-13.4).
+STATUS_DCA = ("awaiting", "confirmed", "missed", "batal")
+
 
 def in_dnd(now_ts):
     """True bila jam lokal berada di jendela DND.
@@ -99,11 +106,15 @@ def mark_pending(conn, ts):
 def mark_confirmed(conn, ts):
     """Catat jawaban "Setuju" untuk DCA bulan ini — dipanggil Task 14 saat tombol ditekan.
 
-    Tidak pernah menimpa status "missed": lewat jendela 24 jam DCA tidak dikejar
-    (spec §7.2), jadi jawaban telat harus tetap "missed".
+    Syarat: harus ada jendela pengiriman yang masih "awaiting" di bulan yang sama.
+    Tanpa syarat itu fungsi ini NO-OP — arahnya sengaja: tombol Setuju dari
+    keyboard basi yang mendarat sebelum pengiriman, atau jawaban yang mendarat di
+    bulan lain dari jendelanya, tidak boleh mengarang bulan "confirmed" dan
+    menghapus DCA bulan itu diam-diam (review T-13.3). Karena syaratnya "awaiting",
+    status "missed" dan "batal" juga otomatis ditolak.
     """
     baris = _baris(conn)
-    if baris[0] == _bulan(ts) and baris[4] == "missed":
+    if not (baris[0] == _bulan(ts) and baris[4] == "awaiting"):
         return
     conn.execute(
         "UPDATE bot_state SET last_dca_date = ?, dca_status = 'confirmed' WHERE id = 1",
@@ -112,20 +123,47 @@ def mark_confirmed(conn, ts):
     conn.commit()
 
 
+def _catatan_missed_ada(conn, bulan):
+    """True bila penanda audit dca_missed untuk `bulan` sudah ada di shadow_log.
+
+    Guard memakai BARIS AUDIT, bukan status — lihat mark_missed (review T-13.2).
+    """
+    ada_tabel = conn.execute(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='proposals'"
+    ).fetchone()[0]
+    if not ada_tabel:
+        return False
+    return (
+        conn.execute(
+            "SELECT COUNT(*) FROM proposals WHERE id = ?",
+            (f"dca_missed_{bulan}",),
+        ).fetchone()[0]
+        > 0
+    )
+
+
 def mark_missed(conn, ts):
     """Tandai DCA bulan ini dilewati, dan catat ke shadow_log tepat satu kali (F8).
 
+    Guard-nya berangkat dari BARIS AUDIT, bukan dari status: bila proses mati di
+    antara commit catatan dan commit status, pemanggilan berikutnya memulihkan
+    diri (melewati catatan yang sudah ada, lalu menyetel status), bukan mati
+    IntegrityError selamanya sampai bulan berganti (review T-13.2).
+
+    PEMANGGIL (Task 14) DILARANG menulis catatan shadow_log "dca_missed" sendiri —
+    termasuk di bawah id lain; modul ini sudah mencatatnya tepat sekali. Satu
+    pemanggilan ganda hanya menimpa status, tidak pernah menambah baris.
+
+    Transisi yang tak pernah diamati siklus apa pun (bot mati, lalu bulan
+    berganti) hilang bersama bulannya — backfill di luar cakupan, sengaja
+    (review Minor 4).
+
     Jejak audit ditulis lebih dulu, baru statusnya: bila terputus di tengah,
     kegagalan berikutnya nyaring (meledak), bukan catatan hilang diam-diam.
-    Panggilan ganda di bulan yang sama TIDAK menulis catatan kedua.
     """
     ensure_bot_state(conn)
     bulan = _bulan(ts)
-    baris = conn.execute(
-        "SELECT last_dca_date, dca_status FROM bot_state WHERE id = 1"
-    ).fetchone()
-    sudah_tercatat = baris[0] == bulan and baris[1] == "missed"
-    if not sudah_tercatat:
+    if not _catatan_missed_ada(conn, bulan):
         # Penanda audit tanpa angka yang dikarang: pair/nominal/harga tidak
         # diketahui karena memang tidak ada usulan yang pernah dibuat -> NULL.
         penanda = types.SimpleNamespace(
@@ -150,6 +188,29 @@ def mark_missed(conn, ts):
     conn.commit()
 
 
+def mark_batal(conn, ts):
+    """Catat tombol "Batal bulan ini" (spec L205): menyetel dca_status = 'batal'.
+
+    TIDAK menulis catatan shadow_log apa pun — batal bukan penolakan dan bukan
+    kelalaian, jadi tidak boleh menggerus rejected_count (sinyal reset mode
+    bayangan per spec §9). `dca_state` memperlakukan batal sebagai "none": tanpa
+    sisa jendela, tanpa pengingat, tanpa catatan missed. Kontrak empat status
+    dca_state tidak berubah.
+
+    "Batal bulan ini" bersifat bulan-berjalan: menekan tombol berarti membatalkan
+    DCA bulan itu, jadi tidak menunggu jendela aktif — arahnya selalu menahan
+    order, tidak pernah mengarang apa pun. Inilah salah satu dari empat jalan
+    menulis `dca_status` (lihat STATUS_DCA); tanpa fungsi ini Task 14 tergoda
+    menulis kolomnya langsung, yang dilarang.
+    """
+    ensure_bot_state(conn)
+    conn.execute(
+        "UPDATE bot_state SET last_dca_date = ?, dca_status = 'batal' WHERE id = 1",
+        (_bulan(ts),),
+    )
+    conn.commit()
+
+
 def dca_state(conn, now_ts):
     """Status DCA bulan berjalan: ("none" | "awaiting" | "confirmed" | "missed", sisa_detik).
 
@@ -157,17 +218,37 @@ def dca_state(conn, now_ts):
     24 jam sesudah pengiriman sudah "missed". Lewat batas, shadow_log dicatat
     tepat sekali pada siklus transisi (F8), bukan setiap siklus.
     `sisa_detik` hanya bermakna untuk "awaiting"; status lain selalu 0.0.
+    Status "batal" (mark_batal) menghasilkan ("none", 0.0) — tanpa jendela,
+    tanpa pengingat, tanpa catatan missed.
+
+    Gagal keras, bukan diam-diam: `dca_status` di luar STATUS_DCA (penulisan
+    langsung yang terlarang) → ValueError; `dca_sent_ts` NULL dengan bulan terisi
+    → ValueError — data rusak tidak boleh ditebak (review T-13.4 & Minor 2).
     """
     baris = _baris(conn)
     if baris[0] != _bulan(now_ts):
         return ("none", 0.0)
-    if baris[4] == "confirmed":
+    status = baris[4]
+    if status not in STATUS_DCA:
+        raise ValueError(
+            f"dca_status tak dikenal: {status!r}; nilai yang boleh {STATUS_DCA}. "
+            "Kolom ini hanya ditulis lewat fungsi modul dca_window — "
+            "penulisan langsung dilarang (review T-13.4)."
+        )
+    if status == "confirmed":
         return ("confirmed", 0.0)
-    if baris[4] == "missed":
+    if status == "missed":
         return ("missed", 0.0)
+    if status == "batal":
+        return ("none", 0.0)
     # status "awaiting" — waktu pengiriman selalu ikut tersimpan oleh mark_pending;
     # NULL di sini berarti data rusak, dan data rusak tidak boleh ditebak.
     kirim = baris[3]
+    if kirim is None:
+        raise ValueError(
+            "dca_sent_ts kosong padahal bulan DCA terisi — data rusak; "
+            "dca_window tidak pernah menebak waktu pengiriman (review Minor 2)."
+        )
     batas = kirim + DCA_WINDOW_H * 3600
     if now_ts < batas:
         return ("awaiting", batas - now_ts)
@@ -177,6 +258,12 @@ def dca_state(conn, now_ts):
 
 def should_remind(conn, now_ts):
     """True hanya bila jam lokal di REMINDER_HOURS, di luar DND, dan DCA masih awaiting.
+
+    True sepanjang satu jam pengingat (mis. 15.00-15.59); pemanggil WAJIB
+    mengirim maksimal satu pesan per slot — predikat ini tidak boleh menulis
+    apa pun untuk mengurangi sendiri, jadi dedupe ada di tangan pemanggil
+    (review T-13.1: HEARTBEAT_S 300 detik × 12 tick per jam tanpa dedupe =
+    12 pesan identik, melanggar spec "satu pengingat ringan").
 
     Pengingat PASIF: fungsi ini tidak pernah mengubah jawaban yang tersimpan,
     tidak pernah menulis apa pun selain catatan "missed" yang wajib (F8), dan
