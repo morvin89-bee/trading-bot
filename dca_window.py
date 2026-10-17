@@ -58,7 +58,11 @@ def ensure_bot_state(conn):
     0/1, default 0), `shadow_day` (INTEGER, default 0). Dua kolom terakhir,
     `dca_sent_ts` dan `dca_status`, adalah kerja jendela DCA: tanpanya
     `mark_pending` tidak punya tempat menyimpan waktu pengiriman dan `dca_state`
-    tidak bisa membedakan awaiting/confirmed/missed. `total_disetor` dan
+    tidak bisa membedakan awaiting/confirmed/missed. `shadow_checked_day` (TEXT,
+    boleh NULL) adalah kerja Task 14: penanda hari lokal yang sudah dihitung,
+    tanpa penanda itu `shadow_day` naik setiap denyut jantung dan sakelar
+    menyala dalam hitungan jam, bukan 7 hari (spec §9).
+    `total_disetor` dan
     `reserve_buy_enabled` TIDAK disimpan di sini (R-G): yang pertama sudah
     tersedia dari snapshots.contributions_idr, yang kedua berisiko ganda dengan
     v1_enabled.
@@ -71,10 +75,23 @@ def ensure_bot_state(conn):
             v1_enabled INTEGER NOT NULL DEFAULT 0,
             shadow_day INTEGER NOT NULL DEFAULT 0,
             dca_sent_ts REAL,
-            dca_status TEXT
+            dca_status TEXT,
+            shadow_checked_day TEXT
         )
         """
     )
+    # Basis data yang dibuat sebelum Task 14 tidak punya `shadow_checked_day`.
+    # Penambahan kolom harus idempoten: dicek dulu lewat PRAGMA, baru ditambah
+    # kalau belum ada — `ALTER TABLE` kedua akan gagal dan merusak pemanggil.
+    # `bot_state` adalah tabel milik proyek ini sendiri, bukan data warisan
+    # produksi, jadi larangan R-G (dilarang ALTER pada tabel warisan) tidak berlaku
+    # di sini. Tabel warisan `portfolio_store` tetap tidak disentuh.
+    # Indeks 1 = nama kolom, dipakai supaya tidak bergantung pada row_factory.
+    kolom = [
+        baris[1] for baris in conn.execute("PRAGMA table_info(bot_state)")
+    ]
+    if "shadow_checked_day" not in kolom:
+        conn.execute("ALTER TABLE bot_state ADD COLUMN shadow_checked_day TEXT")
     conn.execute("INSERT OR IGNORE INTO bot_state (id) VALUES (1)")
     conn.commit()
 
