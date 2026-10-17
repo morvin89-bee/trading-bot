@@ -115,7 +115,9 @@ def test_new_schedule_appears_next_month_only(tmp_path):
     # dan sejak T-13.7 butuh ts yang sudah melewati jendela 24 jam
     dca_window.mark_pending(conn, _ts(hour=9, minute=0))
     dca_window.mark_missed(conn, _ts(day=2, hour=9, minute=1))
-    # hari berikutnya di bulan yang sama: tidak ada jadwal baru
+    # status "missed" sudah tercatat: dca_state kapan pun di bulan yang sama
+    # (di sini tepat 24 jam pengiriman — satu menit SEBELUM ts pencatatannya)
+    # tetap membaca "missed"
     assert dca_window.dca_state(conn, _ts(day=2, hour=9, minute=0))[0] == "missed"
     # bulan berikutnya barulah siklus baru muncul ("none")
     assert dca_window.dca_state(conn, _ts_berikutnya(hour=9))[0] == "none"
@@ -317,6 +319,11 @@ def test_null_sent_ts_fails_loud_with_value_error(tmp_path):
     conn.commit()
     with pytest.raises(ValueError, match="dca_sent_ts"):
         dca_window.dca_state(conn, _ts(hour=10, minute=0))
+    # Minor 3 putaran-5: gerbang waktu punya dua setengah; setengah
+    # "dca_sent_ts NULL" (baris ini: bulan terisi, status "awaiting") wajib
+    # MENOLAK sendiri — bukan TypeError buram "None + int" di produksi
+    assert dca_window.mark_missed(conn, _ts(hour=11, minute=0)) is False
+    assert _jumlah_missed(conn) == 0
 
 
 def test_mark_batal_writes_no_record_and_yields_none(tmp_path):
@@ -399,7 +406,10 @@ def test_mark_missed_without_window_is_refused(tmp_path):
     dca_window.mark_pending(conn, _ts(hour=9, minute=0))
     conn.execute("UPDATE bot_state SET last_dca_date = NULL WHERE id = 1")
     conn.commit()
-    dca_window.mark_missed(conn, _ts(hour=11, minute=0))
+    # T-13.8: ts setelah jendela lewat — kalau tidak, penolakan datang dari
+    # syarat waktu, bukan dari "harus ada jendela", dan tes ini jadi kosong
+    # terhadap mutasi penghapusan prasyarat 1
+    dca_window.mark_missed(conn, _ts(day=2, hour=10, minute=0))
     baris = conn.execute(
         "SELECT last_dca_date, dca_status FROM bot_state WHERE id = 1"
     ).fetchone()
@@ -457,6 +467,21 @@ def test_mark_missed_before_window_end_is_refused(tmp_path):
     baris = conn.execute("SELECT dca_status FROM bot_state WHERE id = 1").fetchone()
     assert baris[0] == "awaiting"  # keadaan tidak berubah
     assert dca_window.dca_state(conn, _ts(hour=11, minute=0))[0] == "awaiting"
+
+
+def test_mark_missed_boundary_is_admitted_at_exact_24h(tmp_path):
+    # Minor 2 putaran-5 — pin DETIK tepat pada gerbang waktu, langsung (bukan
+    # lewat transisi dca_state): 1 detik sebelum dca_sent_ts + 24 jam masih
+    # ditolak (jendela berjalan), tepat pada dca_sent_ts + 24 jam DIIZINKAN —
+    # batas akhir eksklusif, sejajar putusan DND. _ts presisi menit, jadi
+    # offset detik dibangun eksplisit dari kirim.
+    conn = _fresh_db(tmp_path)
+    kirim = _ts(hour=9, minute=0)
+    dca_window.mark_pending(conn, kirim)
+    assert dca_window.mark_missed(conn, kirim + 24 * 3600 - 1) is False  # −1 detik: masih berjalan
+    assert _jumlah_missed(conn) == 0
+    assert dca_window.mark_missed(conn, kirim + 24 * 3600) is True  # tepat batas: lewat
+    assert _jumlah_missed(conn) == 1
 
 
 def test_batal_on_fresh_row_is_deliberate_and_silent(tmp_path):
