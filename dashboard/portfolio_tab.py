@@ -17,7 +17,7 @@ import portfolio
 import portfolio_store
 import rules
 
-MONTHLY_IDR = 500000
+MONTHLY_IDR = rules.MONTHLY_IDR
 READ_ONLY_BANNER = "Read-only — sistem ini tidak bisa mengirim order."
 
 

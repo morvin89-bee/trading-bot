@@ -14,6 +14,11 @@ DEFAULT_TARGET = {
     "IDR": 0.10,
 }
 
+# Satu-satunya rumah angka setoran bulanan; `dashboard` menyalin dari sini.
+MONTHLY_IDR = 500000
+# Nama aturan DCA untuk provenance (F32) dan gerbang F46.
+RULE_DCA = "dca_bulanan"
+
 
 def dca_split(amount_idr, holdings_value, target=None, min_order=10000):
     """Bagi setoran bulanan sesuai bobot target, miring ke aset termurah.
@@ -145,7 +150,7 @@ def max_position_ok(amount_idr, total_idr, max_pct=0.25):
     return amount_idr <= max_pct * total_idr
 
 
-def reserve_buy_actions(holdings, idr_reserve, target=None, monthly=500000,
+def reserve_buy_actions(holdings, idr_reserve, target=None, monthly=MONTHLY_IDR,
                         drop_pct=15.0, max_fraction=0.5, min_order=10000):
     """Saran **BELI** memakai sebagian cadangan saat aset jatuh (spec 6.4).
 
@@ -187,4 +192,48 @@ def reserve_buy_actions(holdings, idr_reserve, target=None, monthly=500000,
             executable=True,
         ))
         budget -= amount
+    return actions
+
+
+def dca_actions(holdings, idr_free, prices, *, max_order, monthly=MONTHLY_IDR,
+                target=None, min_order=10000):
+    """Saran **BELI** DCA bulanan: bagi setoran sesuai bobot target (F45).
+
+    `monthly` dibagi oleh `dca_split` memakai nilai portofolio (`holdings`
+    + `idr_free`) lalu tiap alokasi dipotong ke `max_order` — kelebihannya
+    TIDAK dibagikan ulang, tetap sebagai cadangan IDR (bisa dipakai
+    reserve buy). `max_order` wajib diisi pemanggil (dari
+    `safeguards.MAX_ORDER_IDR`); `rules` tidak boleh mengimpor
+    `safeguards` (circular). Aset tanpa harga (`prices` kosong/nol)
+    dilewati — `price_ref` tidak bisa diisi dengan jujur.
+    """
+    if target is None:
+        target = DEFAULT_TARGET
+    nilai = {h.pair: h.value_idr for h in holdings}
+    nilai["IDR"] = idr_free
+    alokasi = dca_split(monthly, nilai, target, min_order=min_order)
+
+    actions = []
+    for pair in target:
+        if pair == "IDR":
+            continue
+        nominal = alokasi.get(pair, 0)
+        if nominal <= 0:
+            continue
+        harga = prices.get(pair)
+        if not harga:
+            continue  # tanpa harga yang jujur, price_ref tak bisa diisi
+        jumlah = min(nominal, max_order)
+        reason = "DCA bulanan: beli sesuai bobot target"
+        if jumlah < nominal:
+            reason += " (dipotong pada batas per order, sisa tetap cadangan)"
+        actions.append(Action(
+            kind="BUY",
+            pair=pair,
+            amount_idr=jumlah,
+            qty=jumlah / harga,
+            price_ref=harga,
+            reason=reason,
+            executable=True,
+        ))
     return actions
