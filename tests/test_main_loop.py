@@ -439,6 +439,49 @@ def test_modus_bayangan_tidak_pernah_menyentuh_bursa(tmp_path):
     assert transport.queried == []
 
 
+def test_setuju_di_bayangan_dengan_transport_terpasang_tidak_mengirim_order(
+        tmp_path):
+    """Tekan Setuju di mode bayangan walau transport TERPASANG: bursa tetap
+    tidak tersentuh.
+
+    Inilah konfigurasi paling berbahaya yang bisa dimiliki bot ini: transport
+    ada dan siap mencatat order apa pun yang salah kirim, tapi mode bayangan
+    masih menyala. Mutasi yang memaksa `shadow=False` pada `tick_cycle` harus
+    gagal DI SINI lewat pernyataan (outcome bukan "setuju"), bukan lewat
+    kecelakaan (traceback) — menyusul kelemahan yang ditemukan mutasi M5b di
+    ronde sebelumnya, saat deteksi hanya terjadi karena sebuah AttributeError.
+    """
+    conn = _fresh_db(tmp_path)
+    telegram = _TelegramPerekam()
+    # Kunci View-Only di mode bayangan: canTrade False (spec §6.6).
+    transport = _TransportPerekam(can_trade=False, can_withdraw=False)
+
+    # Usulan didaftarkan langsung, bukan lewat siklus pertama: bila mutasi
+    # membuat siklus berhenti sebelum membentuk usulan, `telegram.konfirmasi`
+    # kosong dan tes gagal dengan IndexError — kecelakaan, bukan pernyataan.
+    usulan = proposal.new_proposal(
+        _act(), rule="take_profit", reserve_after=0.0, window_s=90,
+        now=_ts(hour=12),
+    )
+    telegram.confirmation(usulan)                    # pesan konfirmasi terkirim
+    shadow_log.record(conn, usulan, "proposed", "")  # jejak audit seperti tick
+    main_loop._ingat([usulan])                       # menunggu jawaban
+
+    fetch = _FetchPerekam([_update_tombol("setuju", usulan.id)])
+    _satu_siklus(conn, telegram=telegram, transport=transport, shadow=True,
+                 now=_ts(hour=12, minute=1), ctx=_ctx(), fetch=fetch)
+
+    # Jawaban tetap DIPROSES: tercatat "setuju" di jejak audit.
+    baris = conn.execute(
+        "SELECT outcome FROM proposals WHERE id = ?", (usulan.id,)
+    ).fetchone()
+    assert baris[0] == "setuju"
+    # Namun bursa tidak PERNAH disentuh: tidak ada order terkirim dan tidak
+    # ada pun status yang ditanya.
+    assert transport.posted == []
+    assert transport.queried == []
+
+
 def test_selisih_berhenti_sebelum_ada_usulan(tmp_path):
     """Rekonsiliasi menghentikan tick SEBELUM usulan apa pun dibentuk.
 
@@ -594,15 +637,38 @@ def test_jawaban_setuju_menandai_dca_bulan_ini_confirmed(tmp_path):
     assert dca_window.dca_state(conn, _ts(hour=12))[0] == "confirmed"
 
 
-def test_perintah_ulang_mengusulkan_langsung_dengan_data_baru(tmp_path):
-    """`/ulang` memicu engine.tick SEKARANG, bukan menunggu denyut berikutnya."""
+def test_perintah_ulang_mengusulkan_langsung_dengan_data_baru(tmp_path,
+                                                              monkeypatch):
+    """/ulang DIBACA polling dan diteruskan ke `apply_ulang` pada siklus ini.
+
+    Yang dipin di sini adalah pengiriman JAWABANNYA: teks `/ulang` harus
+    benar-benar dikonsumsi polling dan diteruskan ke `apply_ulang` dengan
+    `now` siklus berjalan. Tanpa polling (fetch tidak disuntikkan) penerusan
+    itu mustahil terjadi, jadi tes ini benar-benar membedakan perintah dari
+    denyut biasa. (Denyut biasa memang menghasilkan usulan identik dari
+    konteks dan waktu yang sama — karena itu keberadaan usulan saja tidak
+    cukup; lihat mutasi E1 di laporan Task 14.)
+    """
     conn = _fresh_db(tmp_path)
     telegram = _TelegramPerekam()
     fetch = _FetchPerekam([_update_teks("/ulang")])
 
+    # Perekam penerusan: `apply_ulang` asli tetap dijalankan apa adanya.
+    diteruskan = []
+    asli = main_loop.apply_ulang
+
+    def perekam(conn_asli, ctx_asli, **kw):
+        diteruskan.append(kw["now"])
+        return asli(conn_asli, ctx_asli, **kw)
+
+    monkeypatch.setattr(main_loop, "apply_ulang", perekam)
+
     _satu_siklus(conn, telegram=telegram, now=_ts(hour=12, minute=2),
                  ctx=_ctx(), fetch=fetch)
 
+    # Jawaban dikonsumsi: `apply_ulang` dipanggil TEPAT sekali, dengan waktu
+    # siklus ini — bukan ditunda ke denyut berikutnya.
+    assert diteruskan == [_ts(hour=12, minute=2)]
     assert len(telegram.konfirmasi) == 1
     assert telegram.konfirmasi[0].price_ref == 1400.0
     assert telegram.konfirmasi[0].created_ts == _ts(hour=12, minute=2)
