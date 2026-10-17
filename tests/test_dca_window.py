@@ -520,3 +520,68 @@ def test_refusing_writers_report_true_or_false(tmp_path):
     dca_window.mark_pending(conn, _ts(day=3, hour=9, minute=0))
     assert dca_window.mark_missed(conn, _ts(day=3, hour=10, minute=0)) is False  # belum lewat
     assert dca_window.mark_missed(conn, _ts(day=4, hour=9, minute=1)) is True  # lewat 24 jam
+
+
+def test_boleh_usul_menunggu_jam_kirim_di_tanggal_1(tmp_path):
+    conn = _fresh_db(tmp_path)
+    assert dca_window.boleh_usul_dca(conn, _ts(day=1, hour=8, minute=59)) is False
+    assert dca_window.boleh_usul_dca(conn, _ts(day=1, hour=9)) is True
+
+
+def test_boleh_usul_tutup_setelah_bulan_ditandai(tmp_path):
+    conn = _fresh_db(tmp_path)
+    dca_window.mark_pending(conn, _ts(day=1, hour=9))
+    assert dca_window.boleh_usul_dca(conn, _ts(day=1, hour=9, minute=5)) is False
+
+
+def test_boleh_usul_tutup_setelah_dikonfirmasi_walaupun_order_gagal(tmp_path):
+    """Keputusan pengguna 2026-10-17: Setuju ditekan, order gagal keluar
+    sekalipun, bulan ini SELESAI — tidak pernah ditawarkan ulang."""
+    conn = _fresh_db(tmp_path)
+    dca_window.mark_pending(conn, _ts(day=1, hour=9))
+    dca_window.mark_confirmed(conn, _ts(day=1, hour=9, minute=10))
+    assert dca_window.boleh_usul_dca(conn, _ts(day=1, hour=20)) is False
+
+
+def test_boleh_usul_telat_di_tengah_bulan_diautukan(tmp_path):
+    """Bot mati di tanggal 1 -> begitu hidup lagi tanggal 5, tetap boleh."""
+    conn = _fresh_db(tmp_path)
+    assert dca_window.boleh_usul_dca(conn, _ts(day=5, hour=10)) is True
+
+
+def test_boleh_usul_menolak_jendela_lintas_bulan(tmp_path):
+    conn = _fresh_db(tmp_path)
+    des_sore = time.mktime(time.struct_time(
+        (2026, 12, 30, 12, 0, 0, 0, 0, -1)))   # +24 jam = 31 Des, masih Des
+    des_akhir = time.mktime(time.struct_time(
+        (2026, 12, 31, 12, 0, 0, 0, 0, -1)))   # +24 jam = 1 Januari
+    assert dca_window.boleh_usul_dca(conn, des_sore) is True
+    assert dca_window.boleh_usul_dca(conn, des_akhir) is False
+
+
+def test_mark_skip_menutup_bulan_tanpa_membuka_jendela(tmp_path):
+    conn = _fresh_db(tmp_path)
+    now = _ts(day=1, hour=9, minute=5)
+    assert dca_window.mark_skip(conn, now) is True
+    assert dca_window.dca_state(conn, now) == ("none", 0.0)
+    # Tidak ada jendela -> pengingat 15.00 tidak menyala, +24 jam tidak
+    # mencatat dca_missed palsu.
+    sore = _ts(day=1, hour=15)
+    assert dca_window.should_remind(conn, sore) is False
+    assert dca_window.dca_state(conn, sore) == ("none", 0.0)
+
+
+def test_mark_skip_menolak_bila_bulan_sudah_ada(tmp_path):
+    conn = _fresh_db(tmp_path)
+    dca_window.mark_pending(conn, _ts(day=1, hour=9))
+    assert dca_window.mark_skip(conn, _ts(day=1, hour=9, minute=5)) is False
+    assert dca_window.dca_state(conn, _ts(day=1, hour=10))[0] == "awaiting"
+
+
+def test_mark_skip_tidak_mengarang_waktu_kirim(tmp_path):
+    """`dca_sent_ts` harus tetap NULL — tidak ada pesan yang pernah terkirim."""
+    conn = _fresh_db(tmp_path)
+    dca_window.mark_skip(conn, _ts(day=1, hour=9, minute=5))
+    baris = conn.execute(
+        "SELECT dca_sent_ts FROM bot_state WHERE id = 1").fetchone()
+    assert baris[0] is None

@@ -28,7 +28,7 @@ DND = (23, 7)
 REMINDER_HOURS = (15, 21)  # 03.00 sengaja tidak ada: berada di dalam DND
 
 # Nilai resmi `dca_status`. Kolom ini HANYA boleh ditulis lewat fungsi modul ini
-# (mark_pending / mark_confirmed / mark_missed / mark_batal) — dilarang keras
+# (mark_pending / mark_confirmed / mark_missed / mark_batal / mark_skip) — dilarang keras
 # menulisnya lewat UPDATE langsung. Nilai di luar daftar ini membuat dca_state
 # gagal keras (ValueError), bukan diam-diam jatuh ke awaiting dan menulis
 # catatan dca_missed palsu (review T-13.4).
@@ -293,6 +293,75 @@ def mark_batal(conn, ts):
     )
     conn.commit()
     return True
+
+
+def mark_skip(conn, ts):
+    """Tutup bulan ini sebagai "dilewati": percobaan gagal diusulkan, tanpa jendela.
+
+    Inilah penanda "bulan dilewati" untuk percobaan yang gagal diusulkan
+    (spread terlalu lebar, saldo tidak cukup, gerbang lain menolak usulan
+    sebelum pesan konfirmasi terkirim): bulan ditutup tanpa jendela sama
+    sekali, tanpa pengingat, dan tanpa catatan dca_missed — persis perilaku
+    `dca_state` terhadap "batal". Keputusan pengguna 2026-10-17: percobaan
+    sekali per bulan, gagal diusulkan = bulan dilewati, tanpa percobaan
+    ulang. Bulan berikutnya berjalan normal (mark_pending tanpa syarat).
+
+    Mengapa bukan `mark_batal` biasa: ia menolak baris yang memegang bulan
+    lain (T-13.5), sedangkan di sini baris MEMANG memegang bulan lalu (bulan
+    berjalan belum tersentuh) — itulah alasan fungsi ini ada.
+
+    Menulis HANYA `last_dca_date` + `dca_status = 'batal'`, lalu commit.
+    `dca_sent_ts` TIDAK disentuh: tidak ada pesan yang pernah terkirim, jadi
+    mengisi kolom waktu kirim dengan apa pun = mengarang angka (sejajar
+    mark_missed prasyarat 3 dan mark_confirmed T-13.3).
+
+    NO-OP + False bila `last_dca_date` sudah bulan `ts` — jangan menimpa
+    jendela yang sedang awaiting atau keputusan yang sudah tercatat. True
+    bila bulan ditutup.
+    """
+    baris = _baris(conn)
+    if baris[0] == _bulan(ts):
+        return False  # bulan sudah ada — jendela/keputusan tidak ditimpa
+    conn.execute(
+        "UPDATE bot_state SET last_dca_date = ?, dca_status = 'batal' WHERE id = 1",
+        (_bulan(ts),),
+    )
+    conn.commit()
+    return True
+
+
+def boleh_usul_dca(conn, now_ts):
+    """True bila DCA bulanan masih boleh diusulkan pada `now_ts` — predikat murni.
+
+    Dipakai `main_loop.tick_cycle` (Task 15.4) sebelum menyusun usulan DCA.
+    Fungsi ini tidak menulis apa pun dan tidak memeriksa DND — tick_cycle
+    hanya berjalan jam aktif, jadi DND urusan pemanggil.
+
+    Tiga syarat, semuanya wajib:
+
+    1. Bulan ini BELUM TERSENTUH (`baris[0] != _bulan(now_ts)`): jendela yang
+       terkirim, terkonfirmasi, terlewat, maupun dibatalkan semuanya menutup
+       peluang — percobaan sekali per bulan. Termasuk keputusan pengguna
+       2026-10-17: Setuju ditekan, order gagal keluar sekalipun, bulan ini
+       SELESAI, tidak pernah ditawarkan ulang.
+    2. Tanggal 1 menunggu jam kirim: `tm_mday == 1 and tm_hour <
+       DCA_SEND_HOUR` → False (kirim pukul 09.00 lokal — kabel Task 13 #6).
+       Tanggal 2 dst. telat boleh: bot yang mati di tanggal 1 mengusulkan
+       begitu hidup lagi, selama syarat 3 terpenuhi.
+    3. Jendela 24 jam dari sekarang harus berakhir di bulan yang SAMA
+       (`_bulan(now_ts + DCA_WINDOW_H * 3600) == _bulan(now_ts)`) — kabel
+       T-13: `dca_state` mengembalikan ("none", 0.0) pada ketidakcocokan
+       bulan SEBELUM aritmetika jendela, jadi jendela yang melintasi batas
+       bulan tidak bisa tercatat dan "Setuju" pengguna akan sia-sia diam-diam.
+       Lewat ambang ini bulan dilewati (mark_skip), bulan depan jalan normal.
+    """
+    baris = _baris(conn)
+    if baris[0] == _bulan(now_ts):
+        return False  # bulan ini sudah terkirim/batal/terkonfirmasi/terlewat
+    sekarang = time.localtime(now_ts)
+    if sekarang.tm_mday == 1 and sekarang.tm_hour < DCA_SEND_HOUR:
+        return False  # tanggal 1, sebelum jam kirim 09.00
+    return _bulan(now_ts + DCA_WINDOW_H * 3600) == _bulan(now_ts)
 
 
 def dca_state(conn, now_ts):
