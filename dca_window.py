@@ -4,7 +4,8 @@ Aturan (spec §7.2-7.3):
 - Konfirmasi DCA dikirim 09.00 lokal; jendela jawab 24 jam; lewat -> "missed".
 - DND 23.00-07.00 lokal: batas awal inklusif, batas akhir eksklusif.
 - Pengingat pasif pada 15.00 dan 21.00 (03.00 sengaja tidak ada — berada di DND).
-  Pengingat hanya mengembalikan True; pengirimannya urusan pemanggil (Task 14).
+  Pengingat hanya mengembalikan True; pengirimannya urusan pemanggil (Task 14):
+  maksimal satu pesan per slot pengingat.
 
 Semua perhitungan jam memakai time.localtime — memakai gmtime akan membuat
 setiap batas jam salah diam-diam.
@@ -143,25 +144,45 @@ def _catatan_missed_ada(conn, bulan):
 
 
 def mark_missed(conn, ts):
-    """Tandai DCA bulan ini dilewati, dan catat ke shadow_log tepat satu kali (F8).
+    """Tandai jendela DCA yang lewat dilewati, dan catat ke shadow_log tepat satu kali (F8).
 
-    Guard-nya berangkat dari BARIS AUDIT, bukan dari status: bila proses mati di
-    antara commit catatan dan commit status, pemanggilan berikutnya memulihkan
-    diri (melewati catatan yang sudah ada, lalu menyetel status), bukan mati
-    IntegrityError selamanya sampai bulan berganti (review T-13.2).
+    Dua prasyarat (review T-13.6) — selain itu NO-OP, tanpa tulisan apa pun:
+
+    1. HARUS ADA JENDELA: `last_dca_date` tidak NULL. Tanpa jendela, menulis
+       akan memalsukan bulan — persis pemalsuan yang dijaga mark_confirmed
+       (T-13.3) dan mark_batal (T-13.5). Syarat ini TIDAK sebulan: jendela bisa
+       melintasi batas bulan (dikirim hari terakhir, lewat hari pertama bulan
+       berikutnya) dan saat lewat statusnya masih "awaiting", jadi jendela
+       lintas-bulan tetap boleh ditandai.
+    2. STATUS MASIH "awaiting" — menolak "confirmed" (persetujuan tidak boleh
+       hilang diam-diam), "missed" (idempoten), dan "batal" (bulan yang sudah
+       dibatalkan tidak boleh mendapat catatan dca_missed palsu).
+
+    Sisa kecelakaan (proses mati di antara commit catatan dan commit status)
+    masih memenuhi kedua prasyarat — statusnya memang "awaiting" — dan guard
+    anti-ganda di sini berangkat dari BARIS AUDIT (`_catatan_missed_ada`), bukan
+    dari status: pemanggilan berikutnya melewati catatan yang sudah ada lalu
+    menyetel status — memulihkan diri, bukan mati IntegrityError permanen
+    (review T-13.2).
 
     PEMANGGIL (Task 14) DILARANG menulis catatan shadow_log "dca_missed" sendiri —
-    termasuk di bawah id lain; modul ini sudah mencatatnya tepat sekali. Satu
-    pemanggilan ganda hanya menimpa status, tidak pernah menambah baris.
+    termasuk di bawah id lain; modul ini sudah mencatatnya tepat sekali.
 
     Transisi yang tak pernah diamati siklus apa pun (bot mati, lalu bulan
     berganti) hilang bersama bulannya — backfill di luar cakupan, sengaja
     (review Minor 4).
 
-    Jejak audit ditulis lebih dulu, baru statusnya: bila terputus di tengah,
-    kegagalan berikutnya nyaring (meledak), bukan catatan hilang diam-diam.
+    Urutan tulisan: jejak audit dulu, baru commit status. Bila terputus di
+    tengah, yang HILANG hanyalah commit statusnya (baris audit tetap tersimpan);
+    kehilangan itu terdeteksi dan diperbaiki pada pemanggilan berikutnya — lihat
+    paragraf sisa kecelakaan di atas. Yang tidak pernah terjadi di sini:
+    catatan audit hilang diam-diam tanpa jejak.
     """
-    ensure_bot_state(conn)
+    baris = _baris(conn)
+    if baris[0] is None:
+        return  # tidak ada jendela — tidak boleh memalsukan bulan (T-13.6)
+    if baris[4] != "awaiting":
+        return  # confirmed / missed / batal tidak ditimpa dan tidak dicatat (T-13.6)
     bulan = _bulan(ts)
     if not _catatan_missed_ada(conn, bulan):
         # Penanda audit tanpa angka yang dikarang: pair/nominal/harga tidak
@@ -192,21 +213,36 @@ def mark_batal(conn, ts):
     """Catat tombol "Batal bulan ini" (spec L205): menyetel dca_status = 'batal'.
 
     TIDAK menulis catatan shadow_log apa pun — batal bukan penolakan dan bukan
-    kelalaian, jadi tidak boleh menggerus rejected_count (sinyal reset mode
-    bayangan per spec §9). `dca_state` memperlakukan batal sebagai "none": tanpa
-    sisa jendela, tanpa pengingat, tanpa catatan missed. Kontrak empat status
-    dca_state tidak berubah.
+    kelalaian, jadi tidak ada kejadian yang perlu dicatat. `dca_state`
+    memperlakukan batal sebagai "none": tanpa sisa jendela, tanpa pengingat,
+    tanpa catatan missed. Kontrak empat status `dca_state` tidak berubah.
 
-    "Batal bulan ini" bersifat bulan-berjalan: menekan tombol berarti membatalkan
-    DCA bulan itu, jadi tidak menunggu jendela aktif — arahnya selalu menahan
-    order, tidak pernah mengarang apa pun. Inilah salah satu dari empat jalan
-    menulis `dca_status` (lihat STATUS_DCA); tanpa fungsi ini Task 14 tergoda
-    menulis kolomnya langsung, yang dilarang.
+    Dua prasyarat (review T-13.5) — selain itu NO-OP, tanpa tulisan apa pun:
+
+    1. Baris BELUM SELESAI untuk bulan ini: menolak status "confirmed" atau
+       "missed" — tombol basi atau tekanan ganda tidak boleh menghapus keputusan
+       yang sudah tercatat (pengguna menyetujui, lalu Batal menimpa jadi "none"
+       tanpa jejak sama sekali).
+    2. Baris MEMEGANG BULAN LAIN: menolak bila `last_dca_date` bukan NULL dan
+       bukan bulan `ts` — tombol dari bulan lain tidak boleh mengklaim bulan ini
+       lewat penulisan `last_dca_date` (klaim = gerbang "jadwal baru bulan
+       depan" Task 14), persis pemalsuan yang dijaga mark_confirmed (T-13.3).
+
+    Pada baris kosong (tanpa keadaan) atau jendela "awaiting" bulan ini, batal
+    berlaku: membatalkan jendela yang sedang menunggu memang menghentikan order
+    bulan itu — arahnya menahan order, tidak pernah memerintahkannya. Inilah
+    salah satu dari empat jalan menulis `dca_status` (lihat STATUS_DCA); tanpa
+    fungsi ini Task 14 tergoda menulis kolomnya langsung, yang dilarang.
     """
-    ensure_bot_state(conn)
+    baris = _baris(conn)
+    bulan = _bulan(ts)
+    if baris[0] == bulan and baris[4] in ("confirmed", "missed"):
+        return  # sudah selesai bulan ini — tombol basi tidak menghapus keputusan (T-13.5)
+    if baris[0] not in (None, bulan):
+        return  # baris memegang bulan lain — tombol lintas-bulan tidak berlaku (T-13.5)
     conn.execute(
         "UPDATE bot_state SET last_dca_date = ?, dca_status = 'batal' WHERE id = 1",
-        (_bulan(ts),),
+        (bulan,),
     )
     conn.commit()
 
