@@ -443,16 +443,8 @@ def main(argv=None, *, conn=None, db_path=None, telegram=None,
             telegram = telegram_gate.Telegram(token, chat)
 
         reset_state()
-        keadaan = load_state(conn)
-        shadow = not keadaan["v1_enabled"]
         transport = None
-        if shadow or transport_factory is None:
-            print(
-                "Eksekusi belum dinyalakan: berjalan dalam mode bayangan, "
-                "tidak ada order yang bisa dikirim."
-            )
-        else:
-            transport = transport_factory()
+        telah_menyala = False
 
         if ctx is None:
             ctx = _konteks_kosong()
@@ -460,6 +452,28 @@ def main(argv=None, *, conn=None, db_path=None, telegram=None,
         siklus = 0
         while args.siklus is None or siklus < args.siklus:
             sekarang = jam()
+            keadaan = load_state(conn)
+            shadow = not keadaan["v1_enabled"]
+
+            if shadow:
+                transport = None
+                if not telah_menyala:
+                    print(
+                        "Eksekusi belum dinyalakan: berjalan dalam mode bayangan, "
+                        "tidak ada order yang bisa dikirim."
+                    )
+            elif transport_factory is None:
+                transport = None
+                if not telah_menyala:
+                    print(
+                        "Eksekusi belum dinyalakan: tidak ada pabrik transport, "
+                        "tidak ada order yang bisa dikirim."
+                    )
+            else:
+                if transport is None:
+                    transport = transport_factory()
+                telah_menyala = True
+
             if should_run_habitual(sekarang):
                 tick_cycle(conn, now=sekarang, telegram=telegram,
                            transport=transport, shadow=shadow, ctx=ctx,

@@ -420,7 +420,7 @@ def test_modus_bayangan_tidak_pernah_menyentuh_bursa(tmp_path):
     Tes lama (`built == []`) selalu lulus karena tidak ada yang pernah
     mengisi `built`. Di sini transport benar-benar ada, dan `posted`/
     `queried_ids` harus tetap kosong sementara usulan justru TERBENTUK —
-    jadi jalur Sasha benar-benar berjalan tanpa menyentuh bursa.
+    jadi jalur bursa benar-benar berjalan tanpa menyentuh bursa.
     """
     conn = _fresh_db(tmp_path)
     # Mode bayangan memakai kunci View-Only: canTrade False (spec §6.6).
@@ -794,6 +794,30 @@ def test_main_tidak_pernah_memanggil_pabrik_transport_saat_sakelar_mati(
 
     assert keluar == 0
     assert dipanggil == []
+
+
+def test_main_di_nyalakan_setelah_7_hari_memanggil_pabrik_transport(
+        tmp_path, capsys):
+    """7 hari tanpa penolakan menyala: pabrik dipanggil, keluar 0."""
+    conn = _fresh_db(tmp_path)
+    dipanggil = []
+
+    main_loop.set_shadow_day(conn, 7)  # v1_enabled = True
+
+    def pabrik():
+        dipanggil.append(1)
+        return _TransportPerekam(can_trade=True, can_withdraw=False)
+
+    keluar = main_loop.main(
+        ["--siklus", "1"], conn=conn, telegram=_TelegramPerekam(),
+        transport_factory=pabrik, jam=lambda: _ts(hour=12),
+        tidur=lambda s: None,
+    )
+
+    keluaran = capsys.readouterr().out
+    assert keluar == 0
+    assert dipanggil == [1]           # pabrik benar-benar dipanggil sekali
+    assert "eksekusi belum dinyalakan" not in keluaran.lower()
 
 
 def test_main_tidak_pernah_membangun_transport_bfisik():
