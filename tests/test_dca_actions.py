@@ -1,5 +1,3 @@
-import time
-
 import portfolio
 import rules
 
@@ -46,8 +44,24 @@ def test_dca_actions_melewati_aset_tanpa_harga():
 
 
 def test_dca_actions_kosong_bila_semua_ke_cadangan():
-    assert rules.dca_actions([], 0.0, {}, monthly=15_000,
-                             max_order=275_000) == []
+    # Harga lengkap untuk ketiga aset -> `[]` hanya bisa berasal dari jalur
+    # alokasi < min_order yang dipindahkan ke cadangan IDR (bukan jalur
+    # "tanpa harga" yang di sini tidak mungkin terjadi).
+    aksi = rules.dca_actions(
+        [], 0.0,
+        {"btc_idr": 1_000_000.0, "eth_idr": 500_000.0, "sol_idr": 100_000.0},
+        monthly=15_000, max_order=275_000)
+    assert aksi == []
+
+
+def test_dca_actions_melewati_atau_harga_negatif():
+    # Harga negatif harus dianggap tidak jujur, sama seperti harga kosong.
+    aksi = rules.dca_actions(
+        [], 0.0,
+        {"btc_idr": 1_000_000.0, "eth_idr": -500_000.0, "sol_idr": 100_000.0},
+        max_order=275_000)
+    assert [a.pair for a in aksi] == ["btc_idr", "sol_idr"]
+    assert all(a.price_ref > 0 and a.qty > 0 for a in aksi)
 
 
 def test_dca_actions_alasan_indonesia_menyebut_dca():

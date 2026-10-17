@@ -195,8 +195,9 @@ def reserve_buy_actions(holdings, idr_reserve, target=None, monthly=MONTHLY_IDR,
     return actions
 
 
-def dca_actions(holdings, idr_free, prices, *, max_order, monthly=MONTHLY_IDR,
-                target=None, min_order=10000):
+def dca_actions(holdings, idr_free, prices, *, max_order,
+                monthly=MONTHLY_IDR, target=None,
+                min_order=10000) -> list[Action]:
     """Saran **BELI** DCA bulanan: bagi setoran sesuai bobot target (F45).
 
     `monthly` dibagi oleh `dca_split` memakai nilai portofolio (`holdings`
@@ -204,8 +205,8 @@ def dca_actions(holdings, idr_free, prices, *, max_order, monthly=MONTHLY_IDR,
     TIDAK dibagikan ulang, tetap sebagai cadangan IDR (bisa dipakai
     reserve buy). `max_order` wajib diisi pemanggil (dari
     `safeguards.MAX_ORDER_IDR`); `rules` tidak boleh mengimpor
-    `safeguards` (circular). Aset tanpa harga (`prices` kosong/nol)
-    dilewati — `price_ref` tidak bisa diisi dengan jujur.
+    `safeguards` (circular). Aset tanpa harga jujur (`prices` kosong, nol,
+    atau negatif) dilewati — `price_ref` tidak bisa diisi dengan jujur.
     """
     if target is None:
         target = DEFAULT_TARGET
@@ -221,7 +222,7 @@ def dca_actions(holdings, idr_free, prices, *, max_order, monthly=MONTHLY_IDR,
         if nominal <= 0:
             continue
         harga = prices.get(pair)
-        if not harga:
+        if not harga or harga <= 0:
             continue  # tanpa harga yang jujur, price_ref tak bisa diisi
         jumlah = min(nominal, max_order)
         reason = "DCA bulanan: beli sesuai bobot target"
