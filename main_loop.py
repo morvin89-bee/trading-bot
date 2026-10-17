@@ -247,7 +247,15 @@ def _jawab(conn, ctx, aksi, id_usulan, *, now, telegram, transport,
             dca_window.mark_confirmed(conn, now)
     elif aksi == telegram_gate.BUTTON_BATAL:
         if usulan is not None and usulan.rule == rules.RULE_DCA:
-            if not dca_window.mark_batal(conn, now):
+            if dca_window.mark_batal(conn, now):
+                # Jendela resmi ditutup: lepas proposal dari ingatan, supaya
+                # jawaban lanjutan (mis. Setuju) menempuh jalur "id tak
+                # dikenal" yang inert — tanpa ini `on_answer` tetap mengirim
+                # order sementara `dca_status` 'batal' (order tanpa jendela
+                # yang sah). `mark_batal` False = bulan sudah selesai:
+                # ingatan TIDAK dilepas, perilaku lama dipertahankan.
+                _USULAN_MENUNGGU.pop(id_usulan, None)
+            else:
                 telegram.line(
                     "Bulan ini sudah selesai, Batal bulan ini tidak berlaku."
                 )
@@ -399,16 +407,18 @@ def tick_cycle(
             verdict=verdict,
         )
     except ValueError:
-        # Aksi tanpa provenance = BERHENTI, diam, tanpa diulang. Satu-satunya
+        # Aksi tanpa provenance = BERHENTI SEGERA, tanpa diulang. Satu-satunya
         # arah aman: nama aturan yang hilang berarti keputusan tidak bisa
         # ditelusuri, dan menebak berarti mempertahankan angka yang salah.
-        # Konsekuensi jendela DCA: `_catat_dca` tidak jalan di siklus yang
-        # berhenti ini, jadi bulan DCA TETAP TERBUKA — percobaan bulan ini
-        # belum dihitung habis dan akan diusulkan ulang begitu siklus sehat
-        # kembali (selama jendela 24 jam masih berakhir di bulan yang sama).
-        # Tidak ada belanja ganda: usulan yang pernah benar-benar terkirim
-        # sudah mengunci bulannya sendiri lewat mark_pending (boleh_usul_dca
-        # lalu menolak), dan tombol lama atas id tak dikenal inert lewat F46.
+        # Yang TIDAK dijamin "diam": bila ValueError datang di TENGAH daftar
+        # aksi, pesan konfirmasi untuk aksi SEBELUMNYA mungkin sudah terkirim
+        # ke pengguna — tetapi `usulan` tidak pernah dikembalikan, jadi
+        # `_ingat` tidak mendaftarkannya dan tombolnya inert lewat jalur
+        # "id tak dikenal" (F46). Konsekuensi jendela DCA: `_catat_dca` tidak
+        # jalan, bulan DCA TETAP TERBUKA — percobaan belum dihitung habis dan
+        # diusulkan ulang pada siklus sehat berikutnya (selama jendela 24 jam
+        # masih berakhir di bulan yang sama). Pesan konfirmasi yatim itu
+        # tidak mengunci apa pun dan tidak bisa memicu order.
         return "halted"
     _ingat(usulan)
     # Pencatatan jendela DCA (Task 15.4): buka bila usulan DCA benar-benar

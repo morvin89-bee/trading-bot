@@ -1105,6 +1105,65 @@ def test_jawaban_id_tak_dikenal_tidak_menyentuh_jendela_dca(tmp_path):
     assert any("usulan-juga-tak-ada" in b for b in dikenal)
 
 
+def test_batal_lalu_setuju_pada_usulan_dca_yang_sama_tidak_mengirim_order(
+        tmp_path):
+    """Batal (mark_batal True) LALU Setuju pada id DCA YANG SAMA: jendela
+    sudah ditutup resmi, jadi Setuju lanjutan harus inert — nol order dan
+    `dca_status` tetap 'batal'. Tanpa pelepasan ingatan di `_jawab`,
+    Setuju lanjutan menemukan proposalnya masih terdaftar, `mark_confirmed`
+    no-op (baris bukan 'awaiting'), tetapi `on_answer` TETAP mengirim order
+    sungguhan — order keluar tanpa jendela yang sah (temuan review final;
+    inkonsistensi audit)."""
+    conn = _fresh_db(tmp_path)
+    telegram = _TelegramPerekam()
+    dca_window.mark_pending(conn, _ts(hour=9))
+    p = _usulan_dca(_ts(hour=9))
+    main_loop._ingat([p])
+
+    # Mode bayangan MATI + transport perekam: satu-satunya konfigurasi yang
+    # bisa MEMBUKTIKAN lubangnya (order benar-benar terkirim). Tanpa ini
+    # tes gagal sebagai kecelakaan (F40), bukan sebagai pernyataan.
+    transport = _TransportPerekam(can_trade=True, can_withdraw=False,
+                                  status="FILLED")
+    ctx = _ctx(price=1400.0)
+    # Saldo cukup besar supaya gerbang saldo tidak menolak — tanpa ini
+    # jawaban Setuju berhenti di "gate_blocked" dan lubangnya tidak pernah
+    # terbukti mengirim order (tes jadi tidak peka terhadap cacatnya).
+    ctx.free_idr = 400000.0
+
+    fetch = _FetchPerekam([
+        _update_tombol("batal", p.id),
+        _update_tombol("setuju", p.id),
+    ])
+    _satu_siklus(conn, telegram=telegram, transport=transport, shadow=False,
+                 now=_ts(hour=12), ctx=ctx, fetch=fetch, verdict=_ok_verdict)
+
+    # (a) NOL order — jendela sudah ditutup Batal; Setuju lanjutan inert.
+    assert transport.posted == [], (
+        f"order terkirim setelah Batal menutup jendela: {transport.posted}")
+    # (b) Audit konsisten: bulan tetap 'batal' — tidak ada order tanpa
+    #     jendela yang sah, dan tidak ada flip diam-diam ke 'confirmed'.
+    baris = conn.execute(
+        "SELECT dca_status FROM bot_state WHERE id = 1").fetchone()
+    assert baris["dca_status"] == "batal"
+    assert dca_window.dca_state(conn, _ts(hour=12))[0] == "none"
+    # (c) Pengguna dijawab jujur: Setuju lanjutan jatuh ke jalur "id tak
+    #     dikenal" — tombol pada pesan yang jendelanya sudah ditutup tidak
+    #     berlaku lagi.
+    assert any(p.id in b and "tidak dikenal" in b for b in telegram.lines)
+    # (d) Proposal tidak "hidup kembali": tidak ada outcome setuju/executed
+    #     yang tercatat untuk id ini. Tabel yang belum pernah dibuat = nol
+    #     catatan (pola yang sama dengan `engine._outcome_log`).
+    try:
+        hidup = conn.execute(
+            "SELECT COUNT(*) FROM proposals WHERE id = ? AND outcome IN "
+            "('setuju', 'executed')", (p.id,)
+        ).fetchone()[0]
+    except sqlite3.OperationalError:
+        hidup = 0
+    assert hidup == 0
+
+
 def test_siklus_sebelum_jam_usul_tidak_menutup_bulan(tmp_path):
     """Guard `ctx.dca_enabled`: siklus di luar jendela usul (tanggal 1,
     08.00 — sebelum `DCA_SEND_HOUR`) tidak boleh menyentuh bulan sama
