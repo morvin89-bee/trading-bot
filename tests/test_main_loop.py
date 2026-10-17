@@ -1184,3 +1184,92 @@ def test_ulang_hanya_mencatat_jendela_satu_kali(tmp_path, monkeypatch):
     assert panggilan == [("mark_pending", now)], (
         "siklus /ulang harus mencatat jendela TEPAT satu kali (apply_ulang); "
         f"upaya tercatat: {panggilan}")
+
+
+# --------------------------------------------------------------------------
+# Capstone — siklus DCA penuh: usul (bayangan) -> Setuju -> SATU order (nyata)
+# --------------------------------------------------------------------------
+
+def test_dca_konfirmasi_menghasilkan_satuan_order_end_to_end(tmp_path):
+    """Kapstone Task 15: usulan DCA bulanan -> Setuju -> tepat SATU order.
+
+    Dua siklus sungguhan berurutan, tanpa produksi yang disuntik:
+
+    1. Tanggal 1 pukul 09.05, MODE BAYANGAN (`shadow=True`): `tick_cycle`
+       menghitung sakelar DCA per-siklus dari `boleh_usul_dca`, engine
+       mengusulkan DCA untuk ketiga pasangan target, dan `_catat_dca`
+       membuka jendela (`mark_pending`). Id usulan diambil dari
+       `telegram.konfirmasi` — bukan direkayasa.
+    2. Pukul 09.10, MODE HIDUP (`shadow=False`), transport perekam
+       `status="FILLED"`: pengguna menekan Setuju — dua kali, dalam SATU
+       fetch (tombol lama yang ditekan ganda). `_TransportPerekam` yang
+       `can_trade=True` adalah konfigurasi live (bukan View-Only bayangan).
+
+    Yang dipatok di sini adalah SATUANNYA hasil: `transport.posted` tepat
+    satu payload `order_type == "limit"` dengan `client_order_id` = id
+    proposal (verifikasi F7 di `executor.payload_for`), satu baris
+    `order_status` dengan `status == "filled"` dan `rule == rules.RULE_DCA`
+    (penulisan langkah 8 `engine.on_answer` — kolom dan nilai persis seperti
+    yang dipakai tes live di tests/test_engine.py), jendela DCA `confirmed`,
+    dan jawaban ganda TIDAK menghasilkan order kedua. Setiap asersi di sini
+    bisa gagal: literal `posted == []` tidak pernah dipakai sebagai
+    "bukti" dan payload dibaca dari daftar yang benar-benar terisi.
+    """
+    conn = _fresh_db(tmp_path)
+    telegram = _TelegramPerekam()
+
+    # 1. Siklus pertama bulan ini — mode bayangan, transport tidak terpasang.
+    keluar = _satu_siklus(conn, telegram=telegram, shadow=True,
+                          now=_ts(day=1, hour=9, minute=5), ctx=_ctx_dca())
+    assert keluar == "proposed"
+    dca = [p for p in telegram.konfirmasi if p.rule == rules.RULE_DCA]
+    assert dca, (
+        "usulan DCA tidak terkirim; konfirmasi: "
+        f"{[(p.rule, p.pair) for p in telegram.konfirmasi]}")
+    id_usulan = dca[0].id
+
+    # 2. Siklus berikutnya — mode hidup, transport perekam siap mencatat
+    #    SETIAPA order. Harga sama persis supaya gerbang geser 0,5% tidak
+    #    menggugurkan konfirmasi (angka di pesan harus masih valid).
+    transport = _TransportPerekam(can_trade=True, can_withdraw=False,
+                                  status="FILLED")
+    fetch = _FetchPerekam([
+        _update_tombol("setuju", id_usulan),
+        _update_tombol("setuju", id_usulan),   # jawaban ganda dalam satu fetch
+    ])
+    _satu_siklus(conn, telegram=telegram, transport=transport, shadow=False,
+                 now=_ts(day=1, hour=9, minute=10), ctx=_ctx_dca(),
+                 verdict=_ok_verdict, fetch=fetch)
+
+    # Tepat SATU order keluar — bukan nol, bukan dua.
+    assert len(transport.posted) == 1, (
+        f"payload terkirim: {transport.posted}")
+    payload = transport.posted[0]
+    # Nama kunci payload persis seperti yang dibangun executor.payload_for
+    # (pola tests/test_engine.py dan tests/test_executor.py): order_type,
+    # bukan "type" — "type" adalah sisi order (buy/sell).
+    assert payload["order_type"] == "limit"
+    assert payload["type"] == "buy"
+    assert payload["pair"] == dca[0].pair
+    # Gerbang verifikasi F7: client_order_id = id proposal yang dikirim.
+    assert payload["client_order_id"] == id_usulan
+
+    # Satu baris order_status dengan status final dan nama aturan DCA
+    # (penulisan langkah 8 `engine.on_answer`; kolom & nilai dari skema
+    # nyata di `engine._tulis_status_order`).
+    baris_status = conn.execute(
+        "SELECT status, rule FROM order_status WHERE client_order_id = ?",
+        (id_usulan,),
+    ).fetchone()
+    assert baris_status is not None, "tidak ada baris order_status tertulis"
+    assert baris_status["status"] == "filled"
+    assert baris_status["rule"] == rules.RULE_DCA
+    jumlah_baris = conn.execute("SELECT COUNT(*) FROM order_status").fetchone()[0]
+    assert jumlah_baris == 1
+
+    # Jendela DCA bulan ini tertutup "confirmed" oleh tombol Setuju (F46).
+    assert dca_window.dca_state(conn, _ts(day=1, hour=9, minute=10))[0] == (
+        "confirmed")
+    # Jawaban ganda berhenti di langkah 0 `on_answer` — order kedua tidak
+    # pernah terkirim (len(transport.posted) di atas dihitung SETELAH
+    # kedua jawaban diproses dalam satu fetch).
