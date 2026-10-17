@@ -127,6 +127,52 @@ def _ctx_kosong():
     )
 
 
+# Harga jujur ketiga pasangan target DCA — angka bulat wajar, pola yang sama
+# dengan tests/test_engine_dca.py (HARGA).
+HARGA_DCA = {"btc_idr": 1600.0, "eth_idr": 1400.0, "sol_idr": 350.0}
+
+
+def _ctx_dca(free_idr=600000.0):
+    """Konteks DCA: tanpa posisi, saldo bebas cukup untuk ketiga pasangan
+    target (btc Rp 275.000 terpotong atap per order, eth Rp 138.000,
+    sol Rp 55.000 — diverifikasi terhadap `rules.dca_actions` di
+    tests/test_engine_dca.py).
+
+    `dca_enabled=True` bawaan hanya dipakai jalur `apply_ulang` langsung;
+    `tick_cycle` menghitung ulang sakelar per siklus dari `boleh_usul_dca`.
+    """
+    return engine.Context(
+        holdings=[], prices=dict(HARGA_DCA), free_idr=free_idr,
+        reserve_idr=0.0, today_counts={}, last_fill_ts={},
+        held_pairs_24h=set(), dca_enabled=True,
+    )
+
+
+def _usulan_dca(now, pair="btc_idr", price=1400.0, amount_idr=100000.0):
+    """Satu usulan DCA SUNGGUHAN: rule `dca_bulanan` + jendela 24 jam.
+
+    Dipakai tes tombol (F46): id tak dikenal tidak boleh menyentuh
+    jendela, jadi tombol ditekan pada proposal yang benar-benar terdaftar.
+    """
+    aksi = rules.Action(
+        kind="BUY", pair=pair, amount_idr=amount_idr,
+        qty=amount_idr / price, price_ref=price,
+        reason="DCA bulanan: beli sesuai bobot target", executable=True,
+    )
+    return proposal.new_proposal(
+        aksi, rule=rules.RULE_DCA, reserve_after=0.0,
+        window_s=proposal.DCA_WINDOW_S, now=now,
+    )
+
+
+def _usulan_take_profit(now):
+    """Satu usulan take-profit sungguhan (rule reaktif, jendela 90 detik)."""
+    return proposal.new_proposal(
+        _act(), rule="take_profit", reserve_after=0.0,
+        window_s=proposal.REACTIVE_WINDOW_S, now=now,
+    )
+
+
 class _TelegramPerekam:
     """Telegram tiruan yang mencatat pesan dan konfirmasi yang dikirim."""
 
@@ -610,27 +656,46 @@ def test_jawaban_kedua_diabaikan_dan_tidak_mengirim_order_lagi(tmp_path):
 
 
 def test_tombol_batal_menolak_tahu_bila_bulan_sudah_selesai(tmp_path):
-    """`mark_batal` menolak (False) → pengguna diberi tahu (kabel Task 13 #8)."""
+    """`mark_batal` menolak (False) → pengguna diberi tahu (kabel Task 13 #8).
+
+    Diperbarui untuk F46: jawaban atas id usulan TIDAK dikenal tidak boleh
+    menyentuh jendela (id tak dikenal = jenis usulan tak diketahui = ragu
+    = tidak menulis), jadi tes ini mendaftarkan usulan DCA SUNGGUHAN lewat
+    `main_loop._ingat` dan menekan tombol pada id itu. Niat aslinya — Batal
+    pada bulan yang sudah selesai menghasilkan pesan penolakan — utuh.
+    """
     conn = _fresh_db(tmp_path)
     telegram = _TelegramPerekam()
     dca_window.mark_pending(conn, _ts(hour=9))
     dca_window.mark_confirmed(conn, _ts(hour=10))
+    p = _usulan_dca(_ts(hour=10))
+    main_loop._ingat([p])
 
-    fetch = _FetchPerekam([_update_tombol("batal", "usulan-tua")])
+    fetch = _FetchPerekam([_update_tombol("batal", p.id)])
     _satu_siklus(conn, telegram=telegram, now=_ts(hour=12),
                  ctx=_ctx_kosong(), fetch=fetch)
 
     assert any("Bulan ini sudah selesai" in b for b in telegram.lines)
+    # Keputusan confirmed tidak terhapus oleh tombol yang ditolak.
+    assert dca_window.dca_state(conn, _ts(hour=12))[0] == "confirmed"
 
 
 def test_jawaban_setuju_menandai_dca_bulan_ini_confirmed(tmp_path):
     """Tanpa `mark_confirmed`, pengingat tetap menyala dan +24 jam tercipta
-    catatan `dca_missed` palsu (kabel Task 13 #7)."""
+    catatan `dca_missed` palsu (kabel Task 13 #7).
+
+    Diperbarui untuk F46 (lihat tes di atas): tombol ditekan pada usulan
+    DCA SUNGGUHAN yang didaftarkan lewat `main_loop._ingat`, bukan pada id
+    tak dikenal yang tidak boleh menyentuh jendela. Niat aslinya — Setuju
+    pada usulan DCA menutup jendela menjadi confirmed — utuh.
+    """
     conn = _fresh_db(tmp_path)
     telegram = _TelegramPerekam()
     dca_window.mark_pending(conn, _ts(hour=9))
+    p = _usulan_dca(_ts(hour=9))
+    main_loop._ingat([p])
 
-    fetch = _FetchPerekam([_update_tombol("setuju", "dca_bulan_ini")])
+    fetch = _FetchPerekam([_update_tombol("setuju", p.id)])
     _satu_siklus(conn, telegram=telegram, now=_ts(hour=12),
                  ctx=_ctx_kosong(), fetch=fetch)
 
@@ -863,3 +928,231 @@ def test_denyut_jantung_diluar_jam_aktif_tidak_menjalankan_siklus(
     assert keluar == 0
     assert telegram.lines == []
     assert telegram.konfirmasi == []
+
+
+# --------------------------------------------------------------------------
+# DCA bulanan per siklus — jendela hanya saat terkirim (F45) + F46
+# --------------------------------------------------------------------------
+
+def test_siklus_pertama_bulan_mengusulkan_dca_dan_membuka_jendela(tmp_path):
+    """Siklus pertama bulan ini (tanggal 1, 09.05) mengusulkan DCA dan
+    BARULAH membuka jendela: `mark_pending` mencatat waktu yang SAMA
+    dengan pengiriman — bukan saat aksi disusun (mekanisme terkunci desain
+    Task 15)."""
+    conn = _fresh_db(tmp_path)
+    telegram = _TelegramPerekam()
+    now = _ts(day=1, hour=9, minute=5)
+
+    keluar = _satu_siklus(conn, telegram=telegram, now=now, ctx=_ctx_dca())
+
+    assert keluar == "proposed"
+    dca = [p for p in telegram.konfirmasi if p.rule == rules.RULE_DCA]
+    assert dca, (
+        "usulan DCA tidak terkirim; konfirmasi: "
+        f"{[(p.rule, p.pair) for p in telegram.konfirmasi]}")
+    assert all(p.window_s == 86400 for p in dca), (
+        f"jendela usulan DCA: {[(p.pair, p.window_s) for p in dca]}")
+    baris = conn.execute(
+        "SELECT last_dca_date, dca_status, dca_sent_ts FROM bot_state "
+        "WHERE id = 1"
+    ).fetchone()
+    assert baris["last_dca_date"] == time.strftime("%Y-%m", time.localtime(now))
+    assert baris["dca_status"] == "awaiting"
+    assert baris["dca_sent_ts"] == now
+
+
+def test_siklus_berikutnya_tidak_mengusulkan_dca_lagi(tmp_path):
+    """Bulan ini sudah tercatat -> sakelar per-siklus mati: siklus 5 menit
+    kemudian tidak mengirim SATU pun usulan baru (percobaan sekali per
+    bulan, putusan pengguna 2026-10-17)."""
+    conn = _fresh_db(tmp_path)
+    telegram = _TelegramPerekam()
+    _satu_siklus(conn, telegram=telegram, now=_ts(day=1, hour=9, minute=5),
+                 ctx=_ctx_dca())
+    sebelum = len(telegram.konfirmasi)
+    assert sebelum > 0, "siklus pertama harus benar-benar mengirim usulan"
+
+    keluar = _satu_siklus(conn, telegram=telegram,
+                          now=_ts(day=1, hour=9, minute=10), ctx=_ctx_dca())
+
+    assert keluar == "kosong"
+    assert telegram.konfirmasi[sebelum:] == [], (
+        "usulan baru terkirim pada siklus kedua: "
+        f"{[(p.rule, p.pair) for p in telegram.konfirmasi[sebelum:]]}")
+
+
+def test_dca_gagal_di_gerbang_menutup_bulan_sekali(tmp_path):
+    """Percobaan pertama gugur di gerbang spread -> `mark_skip` menutup
+    bulan tepat sekali: `dca_status` "batal", `dca_sent_ts` NULL (tidak ada
+    pesan yang pernah terkirim), dan siklus berikutnya TIDAK mengulang
+    percobaan — tidak ada `spread_rejected` baru yang meracuni shadow day."""
+    conn = _fresh_db(tmp_path)
+    telegram = _TelegramPerekam()
+    now = _ts(day=1, hour=9, minute=5)
+
+    keluar = _satu_siklus(conn, telegram=telegram, now=now, ctx=_ctx_dca(),
+                          verdict=lambda pair, **kwargs: (False, 99.0))
+
+    assert keluar == "kosong"          # tidak ada usulan yang terkirim
+    baris = conn.execute(
+        "SELECT last_dca_date, dca_status, dca_sent_ts FROM bot_state "
+        "WHERE id = 1"
+    ).fetchone()
+    assert baris["last_dca_date"] == time.strftime("%Y-%m", time.localtime(now))
+    assert baris["dca_status"] == "batal"
+    assert baris["dca_sent_ts"] is None
+
+    gagal = conn.execute(
+        "SELECT COUNT(*) FROM proposals WHERE outcome = 'spread_rejected'"
+    ).fetchone()[0]
+    assert gagal > 0, "fixture harus benar-benar ditolak gerbang spread"
+
+    _satu_siklus(conn, telegram=telegram, now=_ts(day=1, hour=9, minute=10),
+                 ctx=_ctx_dca(), verdict=lambda pair, **kwargs: (False, 99.0))
+
+    sesudah = conn.execute(
+        "SELECT COUNT(*) FROM proposals WHERE outcome = 'spread_rejected'"
+    ).fetchone()[0]
+    assert sesudah == gagal, (
+        "siklus kedua mengulang percobaan DCA — bulan harusnya sudah tutup")
+
+
+def test_setuju_take_profit_tidak_menutup_jendela_dca(tmp_path):
+    """F46: Setuju pada usulan TAKE-PROFIT tidak boleh menyentuh jendela
+    DCA yang sedang `awaiting` — jendela hanya ditutup oleh jawaban atas
+    usulan DCA sendiri."""
+    conn = _fresh_db(tmp_path)
+    telegram = _TelegramPerekam()
+    dca_window.mark_pending(conn, _ts(hour=9))
+    p = _usulan_take_profit(_ts(hour=12))
+    main_loop._ingat([p])
+
+    fetch = _FetchPerekam([_update_tombol("setuju", p.id)])
+    _satu_siklus(conn, telegram=telegram, now=_ts(hour=12, minute=1),
+                 ctx=_ctx(), fetch=fetch)
+
+    # Jawaban tetap diproses engine (bukan dibuang) ...
+    baris = conn.execute(
+        "SELECT outcome FROM proposals WHERE id = ?", (p.id,)
+    ).fetchone()
+    assert baris[0] == "setuju"
+    # ... tetapi jendela DCA tetap menunggu (F46).
+    assert dca_window.dca_state(conn, _ts(hour=12))[0] == "awaiting"
+
+
+def test_setuju_dca_menutup_jendela(tmp_path):
+    """Setuju pada usulan DCA menutup jendela 24 jam -> "confirmed"
+    (kabel Task 13 #7: tanpa ini pengingat menyala terus dan +24 jam
+    tercipta catatan `dca_missed` palsu)."""
+    conn = _fresh_db(tmp_path)
+    telegram = _TelegramPerekam()
+    dca_window.mark_pending(conn, _ts(hour=9))
+    p = _usulan_dca(_ts(hour=9))
+    main_loop._ingat([p])
+
+    fetch = _FetchPerekam([_update_tombol("setuju", p.id)])
+    _satu_siklus(conn, telegram=telegram, now=_ts(hour=12),
+                 ctx=_ctx(), fetch=fetch)
+
+    assert dca_window.dca_state(conn, _ts(hour=12))[0] == "confirmed"
+
+
+def test_batal_pada_usulan_bukan_dca_tidak_menyentuh_jendela(tmp_path):
+    """F46 untuk Batal: tombol Batal pada usulan take-profit bukan urusan
+    DCA — jendela tetap `awaiting` DAN pengguna tidak dikirimi kabar bohong
+    "Bulan ini sudah selesai" (pesan itu hanya untuk tombol Batal pada
+    usulan DCA)."""
+    conn = _fresh_db(tmp_path)
+    telegram = _TelegramPerekam()
+    dca_window.mark_pending(conn, _ts(hour=9))
+    p = _usulan_take_profit(_ts(hour=12))
+    main_loop._ingat([p])
+
+    fetch = _FetchPerekam([_update_tombol("batal", p.id)])
+    _satu_siklus(conn, telegram=telegram, now=_ts(hour=12, minute=1),
+                 ctx=_ctx(), fetch=fetch)
+
+    assert dca_window.dca_state(conn, _ts(hour=12))[0] == "awaiting"
+    assert not any("Bulan ini sudah selesai" in b for b in telegram.lines), (
+        "pesan 'Bulan ini sudah selesai' hanya untuk Batal pada usulan DCA")
+
+
+def test_siklus_sebelum_jam_usul_tidak_menutup_bulan(tmp_path):
+    """Guard `ctx.dca_enabled`: siklus di luar jendela usul (tanggal 1,
+    08.00 — sebelum `DCA_SEND_HOUR`) tidak boleh menyentuh bulan sama
+    sekali. Tanpa guard itu `_catat_dca` memanggil `mark_skip` jam 08.00
+    dan percobaan yang sah pukul 09.05 mustahil terjadi — bulan sudah
+    ditutup sebelum sempat dicoba."""
+    conn = _fresh_db(tmp_path)
+    telegram = _TelegramPerekam()
+    _satu_siklus(conn, telegram=telegram, now=_ts(day=1, hour=8),
+                 ctx=_ctx_dca())
+
+    baris = conn.execute(
+        "SELECT last_dca_date FROM bot_state WHERE id = 1"
+    ).fetchone()
+    assert baris[0] is None, (
+        "siklus di luar jendela usul tidak boleh menutup bulan")
+
+    # Kontrol: siklus 09.05 sesudahnya MASIH mengusulkan DCA.
+    keluar = _satu_siklus(conn, telegram=telegram,
+                          now=_ts(day=1, hour=9, minute=5), ctx=_ctx_dca())
+    assert keluar == "proposed"
+
+
+def test_ulang_pada_jam_usul_dca_mencatat_jendela(tmp_path):
+    """/ulang pada jam usul: konfirmasi DCA terkirim lewat `apply_ulang`
+    DAN `bot_state` ikut tercatat `awaiting` — `engine.tick` siklus memang
+    dilewati (id kembar), tetapi penanda jendela tetap tertulis."""
+    conn = _fresh_db(tmp_path)
+    telegram = _TelegramPerekam()
+    now = _ts(day=1, hour=9, minute=5)
+    fetch = _FetchPerekam([_update_teks("/ulang")])
+
+    _satu_siklus(conn, telegram=telegram, now=now, ctx=_ctx_dca(), fetch=fetch)
+
+    dca = [p for p in telegram.konfirmasi if p.rule == rules.RULE_DCA]
+    assert dca, "konfirmasi DCA harus terkirim lewat apply_ulang"
+    assert all(p.window_s == 86400 for p in dca), (
+        f"jendela usulan DCA: {[(p.pair, p.window_s) for p in dca]}")
+    assert all(p.created_ts == now for p in dca), (
+        "usulan ulang memakai waktu siklus berjalan")
+    baris = conn.execute(
+        "SELECT last_dca_date, dca_status, dca_sent_ts FROM bot_state "
+        "WHERE id = 1"
+    ).fetchone()
+    assert baris["last_dca_date"] == time.strftime("%Y-%m", time.localtime(now))
+    assert baris["dca_status"] == "awaiting"
+    assert baris["dca_sent_ts"] == now
+
+
+def test_ulang_hanya_mencatat_jendela_satu_kali(tmp_path, monkeypatch):
+    """Guard `not diulang` di `tick_cycle`: `/ulang` sudah mencatat jendela
+    di `apply_ulang` — siklus tidak boleh SEKALI LAGI mencoba mencatat
+    (dua penulis untuk satu keputusan bulan adalah bug, bukan pengaman).
+    Perekam menghitung upaya pencatatan; tanpa guard itu upaya kedua
+    (`mark_skip` dari `tick_cycle` atas daftar kosong) ikut terhitung."""
+    conn = _fresh_db(tmp_path)
+    telegram = _TelegramPerekam()
+    now = _ts(day=1, hour=9, minute=5)
+    panggilan = []
+    asli_pending = dca_window.mark_pending
+    asli_skip = dca_window.mark_skip
+
+    def pending_terhitung(c, ts):
+        panggilan.append(("mark_pending", ts))
+        return asli_pending(c, ts)
+
+    def skip_terhitung(c, ts):
+        panggilan.append(("mark_skip", ts))
+        return asli_skip(c, ts)
+
+    monkeypatch.setattr(dca_window, "mark_pending", pending_terhitung)
+    monkeypatch.setattr(dca_window, "mark_skip", skip_terhitung)
+
+    fetch = _FetchPerekam([_update_teks("/ulang")])
+    _satu_siklus(conn, telegram=telegram, now=now, ctx=_ctx_dca(), fetch=fetch)
+
+    assert panggilan == [("mark_pending", now)], (
+        "siklus /ulang harus mencatat jendela TEPAT satu kali (apply_ulang); "
+        f"upaya tercatat: {panggilan}")

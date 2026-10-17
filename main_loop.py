@@ -37,6 +37,7 @@ Keterbatasan yang disengaja dan perlu diketahui pembaca berikutnya:
   tidak mengusulkan apa pun — diam dan benar, bukan menebak.
 """
 import argparse
+import dataclasses
 import time
 import types
 
@@ -44,6 +45,7 @@ import dca_window
 import engine
 import portfolio_store
 import reconcile
+import rules
 import safeguards
 import scheduler
 import shadow_log
@@ -203,6 +205,20 @@ def _ingat(usulan):
     return usulan
 
 
+def _catat_dca(conn, now, usulan):
+    """Buka atau tutup bulan DCA setelah satu tick — HANYA bila disebut.
+
+    Usulan DCA di daftar berarti pesan benar-benar terkirim (`engine.tick`
+    hanya mengembalikan yang terkirim) -> jendela resmi dibuka. DCA aktif
+    tapi nol usulan terkirim = percobaan sudah habis -> bulan ditutup
+    (keputusan pengguna 2026-10-17: sekali coba, gagal = dilewati).
+    """
+    if any(p.rule == rules.RULE_DCA for p in usulan):
+        dca_window.mark_pending(conn, now)
+    else:
+        dca_window.mark_skip(conn, now)
+
+
 def _jawab(conn, ctx, aksi, id_usulan, *, now, telegram, transport,
            shadow, verdict):
     """Teruskan satu jawaban pengguna ke `engine.on_answer`.
@@ -210,6 +226,10 @@ def _jawab(conn, ctx, aksi, id_usulan, *, now, telegram, transport,
     `ctx.prices` WAJIB terisi dari ticker (kabel Task 12): `on_answer` membacanya
     untuk gerbang geser harga 0,5%. Kosong = setiap konfirmasi berbalik
     "ignored" tanpa alasan yang jujur.
+
+    F46: jendela DCA hanya disentuh bila jawaban rujuk ke usulan DCA yang
+    benar-benar dikenal — id tak dikenal berarti jenis usulan tidak
+    diketahui, jadi ragu dan tidak menulis (lihat tes F46).
     """
     if aksi == "ulang":
         return apply_ulang(conn, ctx, now=now, telegram=telegram,
@@ -217,16 +237,21 @@ def _jawab(conn, ctx, aksi, id_usulan, *, now, telegram, transport,
 
     # Jawaban DCA dicatat terpisah: tombol Setuju pada keyboard konfirmasi DCA
     # harus menutup jendela 24 jam, kalau tidak pengingat tetap menyala dan di
-    # +24 jam tercipta catatan `dca_missed` palsu (kabel Task 13 #7).
-    if aksi == telegram_gate.BUTTON_SETUJU:
-        dca_window.mark_confirmed(conn, now)
-    elif aksi == telegram_gate.BUTTON_BATAL:
-        if not dca_window.mark_batal(conn, now):
-            telegram.line(
-                "Bulan ini sudah selesai, Batal bulan ini tidak berlaku."
-            )
-
+    # +24 jam tercipta catatan `dca_missed` palsu (kabel Task 13 #7). Pencarian
+    # usulan lebih dulu: tombol hanya berarti bila id-nya dikenal DAN
+    # usulannya ber-rule DCA (F46) — Setuju pada take-profit tidak boleh
+    # menutup jendela DCA, dan id tak dikenal tidak boleh menyentuh apa pun.
     usulan = _USULAN_MENUNGGU.get(id_usulan)
+    if aksi == telegram_gate.BUTTON_SETUJU:
+        if usulan is not None and usulan.rule == rules.RULE_DCA:
+            dca_window.mark_confirmed(conn, now)
+    elif aksi == telegram_gate.BUTTON_BATAL:
+        if usulan is not None and usulan.rule == rules.RULE_DCA:
+            if not dca_window.mark_batal(conn, now):
+                telegram.line(
+                    "Bulan ini sudah selesai, Batal bulan ini tidak berlaku."
+                )
+
     if usulan is None:
         telegram.line(
             f"Usulan {id_usulan} sudah tidak dikenal — tidak ada order dikirim."
@@ -308,6 +333,10 @@ def tick_cycle(
     sebelum usulan apa pun.
     """
     ctx = _konteks_kosong() if ctx is None else ctx
+    # Sakelar DCA per siklus (Task 15.4): dihitung SEBELUM polling supaya
+    # `/ulang` pada siklus ini memakai keputusan bulan yang sama.
+    ctx = dataclasses.replace(
+        ctx, dca_enabled=dca_window.boleh_usul_dca(conn, now))
 
     # 1. Rekonsiliasi lebih dulu: buku yang tidak bisa dipercaya tidak boleh
     #    menghasilkan usulan apa pun.
@@ -375,6 +404,12 @@ def tick_cycle(
         # ditelusuri, dan menebak berarti mempertahankan angka yang salah.
         return "halted"
     _ingat(usulan)
+    # Pencatatan jendela DCA (Task 15.4): buka bila usulan DCA benar-benar
+    # terkirim, tutup bulan bila percobaan habis tanpa hasil. Guard
+    # `not diulang`: siklus `/ulang` sudah mencatat di `apply_ulang` —
+    # dua pencatatan untuk satu keputusan bulan adalah bug, bukan pengaman.
+    if ctx.dca_enabled and not diulang:
+        _catat_dca(conn, now, usulan)
 
     # 6. Sakelar mode bayangan.
     apply_shadow_gate(conn, now=now)
@@ -390,9 +425,15 @@ def apply_ulang(conn, ctx, *, now, telegram, shadow,
     jantung berikutnya. Angka diambil dari konteks SEKARANG; usulan lama tidak
     pernah dipakai ulang, karena angkanya bisa sudah bergeser.
     """
-    return _ingat(engine.tick(
+    usulan = _ingat(engine.tick(
         conn, ctx, now=now, telegram=telegram, shadow=shadow, verdict=verdict,
     ))
+    # `/ulang` pada jam usul tetap mencatat jendela (Task 15.4): usulan
+    # terkirim lewat sini = jendela resmi dibuka; nol terkirim = percobaan
+    # habis. `tick_cycle` tidak ikut mencatat (guard `not diulang`).
+    if ctx.dca_enabled:
+        _catat_dca(conn, now, usulan)
+    return usulan
 
 
 def _env(kunci):
