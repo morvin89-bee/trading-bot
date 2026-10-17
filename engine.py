@@ -4,8 +4,9 @@ Modul ini tidak pernah membuka jaringan sendiri — seluruh keluaran (gerbang
 spread, Telegram, transport bursa) disuntikkan pemanggil dan diuji dengan
 tiruan. `tick` murni lokal dan deterministik; `on_answer` mengirim order
 hanya lewat transport yang diberikan pemanggil, tidak pernah membuat kunci,
-dan tidak pernah mengulang kirim. Hanya memproses aksi take-profit dan
-reserve buy (modul v1).
+dan tidak pernah mengulang kirim. Hanya memproses aksi take-profit,
+reserve buy, dan — bila sakelar per-siklus `Context.dca_enabled` menyala —
+DCA bulanan (sumber v1; modul v2 tidak boleh dipanggil dari sini).
 """
 from dataclasses import dataclass
 from typing import List, Callable, Any, Optional
@@ -70,7 +71,8 @@ def rule_name(action: rules.Action) -> str:
     - Aksi keluaran `collect_actions` -> nama yang didaftarkan sumbernya
       lewat `_catat_asal`: reserve buy -> `proposal.RULE_RESERVE_BUY`
       ("reserve_buy", ejaan yang dibaca `safeguards.gates`, ruling F15);
-      take-profit -> `RULE_TAKE_PROFIT` ("take_profit").
+      take-profit -> `RULE_TAKE_PROFIT` ("take_profit"); DCA bulanan
+      (bila `Context.dca_enabled`) -> `rules.RULE_DCA` ("dca_bulanan").
     - Alasan berbahasa Indonesia TIDAK dibaca sama sekali: redaksi alasan
       boleh berubah (Task 13 menulis alasan DCA sendiri) tanpa mengubah
       nama aturan, dan aksi lain yang kebetulan menyebut "cadangan" tidak
@@ -105,29 +107,59 @@ class Context:
     today_counts: dict[str, int]  # pair -> count
     last_fill_ts: dict[str, float]  # pair -> timestamp
     held_pairs_24h: set[str]  # set of pairs
+    # Sakelar per-siklus DCA bulanan — diisi `main_loop` (satu-satunya
+    # lapisan yang punya `conn` untuk membaca `dca_window`); `collect_actions`
+    # tidak menerima koneksi. Default False: konteks lama tetap menghasilkan
+    # perilaku v1 — tanpa sumber DCA. `collect_actions` membacanya lewat
+    # `getattr(..., False)` supaya konteks bertipe `SimpleNamespace` pada tes
+    # lama (yang tidak memasang field ini) tidak AttributeError.
+    dca_enabled: bool = False
 
 
 def collect_actions(ctx: Context) -> List[rules.Action]:
-    """Gabungkan take-profit dan reserve buy, lalu satukan duplikat.
+    """Gabungkan take-profit, DCA bulanan (bila sakelar menyala), dan
+    reserve buy, lalu satukan duplikat.
 
-    Hanya dua sumber aksi yang diperbolehkan v1: take-profit actions
-    dan reserve buy actions. Modul v2 tidak boleh dipanggil di sini.
+    Tiga sumber aksi yang diperbolehkan: take-profit actions, reserve buy
+    actions, dan — hanya bila `ctx.dca_enabled` — DCA bulanan
+    (`rules.dca_actions`). Modul v2 tidak boleh dipanggil di sini.
 
     Tiap aksi didaftarkan ke nama aturan sumbernya SEBELUM digabung
     (F32): `collect_actions` tahu persis aksi keluar dari daftar mana,
     jadi nama aturan dibawa sebagai asal (provenance) — bukan ditebak
-    dari isi alasan. Sumber baru kelak (Task 13, DCA) WAJIB menambahkan
-    pendaftaran namanya di sini; tanpa itu `rule_name` menolak aksinya
-    dengan `ValueError`, bukan diam-diam menamai "unknown".
+    dari isi alasan. Sumber baru kelak WAJIB menambahkan pendaftaran
+    namanya di sini; tanpa itu `rule_name` menolak aksinya dengan
+    `ValueError`, bukan diam-diam menamai "unknown".
     """
     sumber: List[tuple[str, rules.Action]] = [
         (RULE_TAKE_PROFIT, aksi)
         for aksi in rules.take_profit_actions(ctx.holdings)
-    ] + [
+    ]
+    if getattr(ctx, "dca_enabled", False):
+        # Sakelar mati / field absen (konteks lama) = tanpa sumber DCA.
+        # `max_order` wajib diisi dari sini: `rules` tidak boleh mengimpor
+        # `safeguards` (siklus impor).
+        sumber += [
+            (rules.RULE_DCA, aksi)
+            for aksi in rules.dca_actions(
+                ctx.holdings, ctx.free_idr, ctx.prices,
+                max_order=safeguards.MAX_ORDER_IDR)
+        ]
+    # DCA mengklaim lebih dulu (keputusan builder #2, desain Task 15):
+    # kaki reserve buy untuk (kind, pair) yang sudah diklaim DCA dilewati
+    # SEBELUM `_catat_asal` berjalan — dua nama aturan untuk satu pasangan
+    # adalah kebuntuan yang melempar ValueError dan men-halt seluruh tick
+    # (termasuk take-profit yang tidak bersalah). Reserve buy hanya membeli
+    # dari cadangan yang tersisa, jadi dilewati per-pasangan di tick ini
+    # konsisten dengan keputusan itu; `rules.reserve_buy_actions` sendiri
+    # tidak disentuh.
+    dibeli = {(aksi.kind, aksi.pair) for nama, aksi in sumber
+              if nama == rules.RULE_DCA}
+    sumber += [
         (proposal.RULE_RESERVE_BUY, aksi)
         for aksi in rules.reserve_buy_actions(
-            ctx.holdings, idr_reserve=ctx.reserve_idr
-        )
+            ctx.holdings, idr_reserve=ctx.reserve_idr)
+        if (aksi.kind, aksi.pair) not in dibeli
     ]
     peta: dict = {}
     for nama, aksi in sumber:
@@ -304,7 +336,12 @@ def tick(
             action,
             rule=rule,
             reserve_after=reserve_after,
-            window_s=proposal.REACTIVE_WINDOW_S,  # Default window untuk sinyal reaktif
+            # Cabang jendela (keputusan builder #1, desain Task 15): DCA
+            # adalah janji 24 jam (spec §7.2) — 90 detik akan membuat hampir
+            # semua Setuju hangus sebelum sempat ditekan. Sinyal reaktif
+            # lainnya tetap memakai jendela pendek 90 detik.
+            window_s=(proposal.DCA_WINDOW_S if rule == rules.RULE_DCA
+                      else proposal.REACTIVE_WINDOW_S),
             now=now,
         )
         
