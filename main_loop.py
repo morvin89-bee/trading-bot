@@ -402,6 +402,13 @@ def tick_cycle(
         # Aksi tanpa provenance = BERHENTI, diam, tanpa diulang. Satu-satunya
         # arah aman: nama aturan yang hilang berarti keputusan tidak bisa
         # ditelusuri, dan menebak berarti mempertahankan angka yang salah.
+        # Konsekuensi jendela DCA: `_catat_dca` tidak jalan di siklus yang
+        # berhenti ini, jadi bulan DCA TETAP TERBUKA — percobaan bulan ini
+        # belum dihitung habis dan akan diusulkan ulang begitu siklus sehat
+        # kembali (selama jendela 24 jam masih berakhir di bulan yang sama).
+        # Tidak ada belanja ganda: usulan yang pernah benar-benar terkirim
+        # sudah mengunci bulannya sendiri lewat mark_pending (boleh_usul_dca
+        # lalu menolak), dan tombol lama atas id tak dikenal inert lewat F46.
         return "halted"
     _ingat(usulan)
     # Pencatatan jendela DCA (Task 15.4): buka bila usulan DCA benar-benar

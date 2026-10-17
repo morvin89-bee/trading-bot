@@ -1077,6 +1077,34 @@ def test_batal_pada_usulan_bukan_dca_tidak_menyentuh_jendela(tmp_path):
         "pesan 'Bulan ini sudah selesai' hanya untuk Batal pada usulan DCA")
 
 
+def test_jawaban_id_tak_dikenal_tidak_menyentuh_jendela_dca(tmp_path):
+    """F46 jalur "id tak dikenal": lookup gagal = jendela TIDAK disentuh,
+    DAN pengguna tetap diberi kabar — dua jawaban atas id yang tidak
+    terdaftar berbagi satu siklus (Setuju lalu Batal), masing-masing
+    mendapat satu pesan "tidak dikenal". Tanpa pesan itu pengguna hanya
+    menekan tombol yang diam-diam tidak melakukan apa pun; tanpa gerbang
+    jendelanya, tombol basi bisa mengubah bulan yang sedang menunggu.
+    """
+    conn = _fresh_db(tmp_path)
+    telegram = _TelegramPerekam()
+    dca_window.mark_pending(conn, _ts(hour=9))
+
+    fetch = _FetchPerekam([
+        _update_tombol("setuju", "usulan-tak-ada"),
+        _update_tombol("batal", "usulan-juga-tak-ada"),
+    ])
+    _satu_siklus(conn, telegram=telegram, now=_ts(hour=12),
+                 ctx=_ctx_kosong(), fetch=fetch)
+
+    # (a) Jendela DCA tetap menunggu — id tak dikenal tidak menulis apa pun.
+    assert dca_window.dca_state(conn, _ts(hour=12))[0] == "awaiting"
+    # (b) Kedua jawaban dijawab jujur, masing-masing TEPAT sekali.
+    dikenal = [b for b in telegram.lines if "tidak dikenal" in b]
+    assert len(dikenal) == 2, f"pesan 'tidak dikenal': {dikenal}"
+    assert any("usulan-tak-ada" in b for b in dikenal)
+    assert any("usulan-juga-tak-ada" in b for b in dikenal)
+
+
 def test_siklus_sebelum_jam_usul_tidak_menutup_bulan(tmp_path):
     """Guard `ctx.dca_enabled`: siklus di luar jendela usul (tanggal 1,
     08.00 — sebelum `DCA_SEND_HOUR`) tidak boleh menyentuh bulan sama
