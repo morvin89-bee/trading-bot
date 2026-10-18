@@ -7,3 +7,4 @@ deskflow.log*
 .pytest_cache/
 .venv/
 dashboard_shared_state.json
+.ptmp/
