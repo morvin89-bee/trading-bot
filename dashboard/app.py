@@ -721,7 +721,7 @@ def tab_control():
 def main():
     # Navbar sederhana
     st.sidebar.title("Navigasi")
-    tab_names = ["Market", "Pair Detail", "Portfolio", "Portofolio", "History", "Control"]
+    tab_names = ["Market", "Pair Detail", "Portfolio", "Portofolio", "Shadow", "History", "Control"]
     selected_tab = st.sidebar.radio("Pilih Tab", tab_names, index=0)
     
     # Render tab
@@ -734,6 +734,9 @@ def main():
     elif selected_tab == "Portofolio":
         from dashboard.portfolio_tab import render as render_portfolio
         render_portfolio()
+    elif selected_tab == "Shadow":
+        from dashboard.shadow_tab import render as render_shadow
+        render_shadow()
     elif selected_tab == "History":
         tab_history()
     elif selected_tab == "Control":
