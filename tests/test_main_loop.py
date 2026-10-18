@@ -1572,6 +1572,35 @@ def test_banner_tanpa_pabrik_juga_dicetak_sekali(tmp_path, capsys):
     assert "berjalan dalam mode bayangan" not in keluaran
 
 
+def test_denyut_penuh_gagal_tidak_membunuh_loop(tmp_path, monkeypatch, capsys):
+    """Galat jaringan di denyut penuh = denyut dilewati, proses TETAP hidup.
+
+    Nyata 2026-10-18 17.54: satu timeout api.telegram.org membunuh bot lewat
+    handler luar (`return 1`) — task scheduler tidak merestart (hasil 0) dan
+    hitungan G5 berhenti. Kontrak baru: kegagalan denyut dicetak SEKALI per
+    rentetan, ditunggangi bangun berikutnya (15 dtk), penanda denyut tidak
+    maju saat gagal — sama seperti penjaga `pembaca` dan `polling`.
+    """
+    conn = _fresh_db(tmp_path)
+    hitung = {"panggil": 0}
+
+    def denyut_meledak(*_, **__):
+        hitung["panggil"] += 1
+        raise RuntimeError("Read timed out. (read timeout=10)")
+
+    monkeypatch.setattr(main_loop, "tick_cycle", denyut_meledak)
+    keluar = main_loop.main(
+        ["--siklus", "3"], conn=conn, telegram=_TelegramPerekam(),
+        jam=lambda: _ts(hour=12), tidur=lambda s: None)
+
+    assert keluar == 0, "proses harus selamat dari galat denyut"
+    keluaran = capsys.readouterr().out
+    assert keluaran.count("Denyut penuh gagal") == 1
+    assert "Gagal menjalankan loop" not in keluaran
+    # Penanda tidak maju saat gagal → tiap bangun mengulang percobaan.
+    assert hitung["panggil"] == 3
+
+
 # --------------------------------------------------------------------------
 # baca_harga — harga segar saat jawaban diproses (gerbang geser 0,5%)
 # --------------------------------------------------------------------------

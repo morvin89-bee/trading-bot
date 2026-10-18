@@ -639,6 +639,7 @@ def main(argv=None, *, conn=None, db_path=None, telegram=None,
         sapa_terkirim = False
         gagal_pembaca = False
         gagal_polling = False
+        gagal_denyut = False
         while args.siklus is None or siklus < args.siklus:
             sekarang = jam()
             keadaan = load_state(conn)
@@ -703,13 +704,29 @@ def main(argv=None, *, conn=None, db_path=None, telegram=None,
                                     f"tidak ada keputusan: {e}"
                                 )
                     if konteks_baik:
-                        tick_cycle(conn, now=sekarang, telegram=telegram,
-                                   transport=transport, shadow=shadow, ctx=ctx,
-                                   fetch=fetch, baca_harga=baca_harga)
-                        # Hanya denyut SUKSES yang memperbarui penanda: bila
-                        # pembaca gagal, denyut berikutnya adalah percobaan
-                        # baca ulang (15 dtk kemudian), bukan tidur 300 dtk.
-                        denyut_terakhir = sekarang
+                        try:
+                            tick_cycle(conn, now=sekarang, telegram=telegram,
+                                       transport=transport, shadow=shadow,
+                                       ctx=ctx, fetch=fetch,
+                                       baca_harga=baca_harga)
+                        except Exception as e:
+                            # Galat denyut = denyut dilewati, dicoba ulang pada
+                            # bangun berikutnya (15 dtk) — proses TIDAK boleh
+                            # mati (kasus nyata 2026-10-18: timeout Telegram
+                            # membunuh bot dan G5 berhenti menghitung). Cetak
+                            # sekali per rentetan, sama seperti polling.
+                            if not gagal_denyut:
+                                gagal_denyut = True
+                                print(
+                                    f"Denyut penuh gagal — dilewati, dicoba "
+                                    f"lagi: {e}"
+                                )
+                        else:
+                            gagal_denyut = False
+                            # Hanya denyut SUKSES yang memperbarui penanda: bila
+                            # gagal, denyut berikutnya adalah percobaan ulang
+                            # (15 dtk kemudian), bukan tidur 300 dtk.
+                            denyut_terakhir = sekarang
                 elif konteks_baik:
                     # Antar denyut: cukup baca tombol — jendela 90 detik
                     # tidak menunggu denyut penuh berikutnya. Kegagalan jaringan
