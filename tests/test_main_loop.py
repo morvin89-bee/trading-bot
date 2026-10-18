@@ -1903,3 +1903,48 @@ def test_kegagalan_polling_dicetak_ulang_setiap_20_percobaan(tmp_path, capsys):
     assert keluar == 0
     # 20 kegagalan berturut-turut (bangun 2..21): cetak di percobaan 1 dan 20.
     assert keluaran.count("Polling Telegram gagal") == 2
+
+
+# --------------------------------------------------------------------------
+# Review 2026-10-18 — I5: kunci instance tunggal
+# (`MultipleInstances IgnoreNew` hanya menjaga instance lahir dari task;
+# `python main_loop.py` / dobel-klik run_v1.bat = konsumen getUpdates KEDUA.)
+# --------------------------------------------------------------------------
+
+def test_kunci_satu_instance_menolak_pemegang_kedua(tmp_path):
+    jalur = str(tmp_path / "main_loop.lock")
+    pertama = main_loop._kunci_satu_instance(jalur)
+    assert pertama is not None, "proses pertama harus mendapat kunci"
+    try:
+        kedua = main_loop._kunci_satu_instance(jalur)
+        assert kedua is None, "pemegang kedua harus ditolak"
+    finally:
+        pertama.close()
+    # Kunci dilepas OS saat handle/proses pemegang mati — tidak ada kunci basi.
+    ketiga = main_loop._kunci_satu_instance(jalur)
+    assert ketiga is not None, "setelah lepas, instance baru boleh masuk"
+    ketiga.close()
+
+
+def test_kunci_satu_instance_menolak_proses_lain(tmp_path):
+    import subprocess
+    import sys
+
+    jalur = str(tmp_path / "main_loop.lock")
+    pegang = main_loop._kunci_satu_instance(jalur)
+    assert pegang is not None
+    try:
+        skrip = (
+            "import sys; import main_loop; "
+            "h = main_loop._kunci_satu_instance(r'" + jalur + "'); "
+            "sys.exit(0 if h is not None else 1)"
+        )
+        hasil = subprocess.run(
+            [sys.executable, "-c", skrip],
+            cwd=os.path.dirname(os.path.abspath(main_loop.__file__)),
+            capture_output=True, timeout=60,
+        )
+        assert hasil.returncode == 1, (
+            "proses luar harus ditolak kunci — dua getUpdates = bencana")
+    finally:
+        pegang.close()

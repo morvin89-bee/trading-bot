@@ -12,11 +12,20 @@
 '    berstatus GAGAL (bukan sukses semu).
 '
 ' WScript MENUNGGU seluruh rantai selesai, sehingga MultipleInstances
-' IgnoreNew tetap menjaga satu-satunya pemilik getUpdates.
-' Setiap kematian dan ulangan dicatat jujur ke v1_loop.log.
+' IgnoreNew tetap menjaga satu-satunya pemilik getUpdates. Setiap kematian
+' dan ulangan dicatat jujur ke v1_loop.log.
 Const TERMINAL = "C:\Users\KakiTangan\trading-bot"
 logfile = TERMINAL & "\v1_loop.log"
-cmd = "cmd /c pythonw -u """ & TERMINAL & "\main_loop.py"" >> """ & logfile & """ 2>&1"
+' pythonw dipanggil dengan jalur ABSOLUT (M4 review): `pythonw` telanjang
+' bergantung PATH konteks task — bila PATH-nya kosong, cmd error 9009 dan
+' seluruh ulangan terbakar percuma.
+Const PYTHONW = "C:\Users\KakiTangan\AppData\Local\Programs\Python\Python314\pythonw.exe"
+' Pembungkus kutip GANDA: `cmd /c` yang diawali kutip kena aturan pemrosesan
+' kutip cmd.exe (kutip luar dilepas + kutip terakhir dihilangkan). Dengan dua
+' lapis kutip, kutip luar yang terangkat hanya membuka bungkusnya — isi
+' perintah di dalamnya kembali utuh persis.
+dalam = """" & PYTHONW & """ -u """ & TERMINAL & "\main_loop.py"" >> """ & logfile & """ 2>&1"
+cmd = "cmd /c " & """" & dalam & """"
 
 Set sh = CreateObject("WScript.Shell")
 

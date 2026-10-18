@@ -40,6 +40,7 @@ Keterbatasan yang disengaja dan perlu diketahui pembaca berikutnya:
 """
 import argparse
 import dataclasses
+import os
 import time
 import types
 
@@ -616,6 +617,42 @@ def _env(kunci):
     return scheduler._env(kunci)
 
 
+def _kunci_satu_instance(jalur=None):
+    """Kunci file untuk SATU instance bot produksi (I5 review 2026-10-18).
+
+    `MultipleInstances IgnoreNew` dan ulangan VBS hanya menjaga instance yang
+    LAHIR dari Task Scheduler; `python main_loop.py` manual atau dobel-klik
+    `run_v1.bat` tetap bisa membuat KONSUMEN getUpdates kedua — pemrosesan
+    tombol dobel dan perebutan `portfolio.db`.
+
+    Mengunci SATU byte lewat `msvcrt.locking`; Windows melepas kunci begitu
+    handle atau proses pemegang mati, jadi tidak pernah ada kunci basi
+    setelah bot crash (berbeda dengan kunci berbasis keberadaan berkas).
+
+    Mengembalikan handle yang WAJIB tetap terbuka selama proses hidup, atau
+    None bila kunci sudah dipegang — gagal ke arah aman: tanpa kunci, lebih
+    baik bot kedua menolak diri daripada dua pembaca getUpdates.
+    """
+    import msvcrt
+
+    if jalur is None:
+        jalur = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                             "main_loop.lock")
+    handle = None
+    try:
+        handle = open(jalur, "a+b")
+        if os.path.getsize(jalur) == 0:
+            handle.write(b"1")
+            handle.flush()
+        handle.seek(0)
+        msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+    except OSError:
+        if handle is not None:
+            handle.close()
+        return None
+    return handle
+
+
 def main(argv=None, *, conn=None, db_path=None, telegram=None,
          transport_factory=None, ctx=None, fetch=None, jam=None, tidur=None,
          pembaca_konteks=None, baca_harga=None):
@@ -873,6 +910,17 @@ if __name__ == "__main__":
     # Jalur produksi — satu-satunya tempat fetch Telegram, pembaca pasar, dan
     # penyegar harga NYATA disuntikkan. `main()` dipanggil tes tanpa ketiganya
     # supaya tidak satu pun tes bisa menyentuh jaringan (conftest tetap jaga).
+    # Kunci instance dulu (I5 review): tanpa ini, menjalankan berkas ini dua
+    # kali membuat dua konsumen getUpdates — tombol diproses dobel dan kedua
+    # proses berebut `portfolio.db`. Kunci dilepas OS bila proses pemegang
+    # mati, jadi crash tidak meninggalkan penghalang.
+    kunci = _kunci_satu_instance()
+    if kunci is None:
+        print(
+            "Bot sudah berjalan di proses lain — instance kedua ditutup "
+            "(satu-satunya pembaca getUpdates)."
+        )
+        raise SystemExit(1)
     raise SystemExit(main(
         fetch=telegram_gate.live_fetch,
         pembaca_konteks=baca_konteks,

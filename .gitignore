@@ -8,3 +8,4 @@ deskflow.log*
 .venv/
 dashboard_shared_state.json
 .ptmp/
+main_loop.lock
