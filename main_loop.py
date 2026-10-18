@@ -378,17 +378,38 @@ def _jawab(conn, ctx, aksi, id_usulan, *, now, telegram, transport,
     return hasil
 
 
-def _polling(conn, ctx, *, now, telegram, transport, shadow, verdict, fetch,
-             baca_harga=None):
-    """Baca `getUpdates`, teruskan ke `on_answer` (satu-satunya konsumennya).
+def _ambil_update(telegram, fetch):
+    """Ambil batch `getUpdates` TANPA memajukan offset Telegram.
 
-    Mengembalikan True bila ada perintah `/ulang` yang sudah menghasilkan
-    usulan pada siklus ini — pemanggil lalu tidak menjalankan `engine.tick`
-    lagi, karena dua usulan dari aksi dan waktu yang sama persis akan memakai
+    Pemanggil yang memutuskan kapan offset boleh maju: batch yang hanya
+    DIPERIKSA (promosi `/ulang`, lihat `main`) tidak boleh mengonsumsi
+    antrian — `tick_cycle` akan mengambil batch yang sama lagi dengan
+    offset lama dan memprosesnya di denyut yang segar.
+    """
+    return telegram_gate.get_updates(
+        getattr(telegram, "token", ""),
+        offset=_OFFSET_TELEGRAM["offset"],
+        fetch=fetch,
+    )
+
+
+def _ada_perintah_ulang(updates):
+    """True bila batch memuat perintah `/ulang` — sinyal promosi denyut."""
+    for update in updates:
+        parsed = telegram_gate.parse_update(update)
+        if parsed is not None and parsed[0] == "ulang":
+            return True
+    return False
+
+
+def _proses_batch(conn, ctx, updates, *, now, telegram, transport, shadow,
+                  verdict, baca_harga=None):
+    """Proses SATU batch update; offset sudah maju oleh pemanggil.
+
+    Mengembalikan True bila ada perintah `/ulang` di dalamnya — pemanggil
+    (`tick_cycle`) lalu tidak menjalankan `engine.tick` lagi, karena dua
+    usulan dari aksi dan waktu yang sama persis akan memakai
     `client_order_id` yang sama.
-
-    Tanpa `fetch` yang disuntikkan, polling dilewati seluruhnya — berarti
-    TIDAK ADA jalur keluar jaringan di loop ini.
 
     `baca_harga(pair)` (opsional) dipanggil SEBELUM jawaban diproses untuk
     memperbarui `ctx.prices[pair]`: angka di pesan harus diuji terhadap harga
@@ -396,14 +417,6 @@ def _polling(conn, ctx, *, now, telegram, transport, shadow, verdict, fetch,
     §6.3). Gagal membaca = `ctx.prices[pair] = None` → `price_still_valid`
     menolak → konfirmasi hangus. Tidak ada keputusan di atas harga basi.
     """
-    if fetch is None:
-        return False
-    updates, offset_baru = telegram_gate.get_updates(
-        getattr(telegram, "token", ""),
-        offset=_OFFSET_TELEGRAM["offset"],
-        fetch=fetch,
-    )
-    _OFFSET_TELEGRAM["offset"] = offset_baru
     diulang = False
     for update in updates:
         parsed = telegram_gate.parse_update(update)
@@ -424,6 +437,26 @@ def _polling(conn, ctx, *, now, telegram, transport, shadow, verdict, fetch,
             transport=transport, shadow=shadow, verdict=verdict,
         )
     return diulang
+
+
+def _polling(conn, ctx, *, now, telegram, transport, shadow, verdict, fetch,
+             baca_harga=None):
+    """Baca `getUpdates`, teruskan ke `on_answer` (satu-satunya konsumennya).
+
+    Mengembalikan True bila ada perintah `/ulang` yang sudah menghasilkan
+    usulan pada siklus ini — pemanggil lalu tidak menjalankan `engine.tick`
+    lagi.
+
+    Tanpa `fetch` yang disuntikkan, polling dilewati seluruhnya — berarti
+    TIDAK ADA jalur keluar jaringan di loop ini.
+    """
+    if fetch is None:
+        return False
+    updates, offset_baru = _ambil_update(telegram, fetch)
+    _OFFSET_TELEGRAM["offset"] = offset_baru
+    return _proses_batch(conn, ctx, updates, now=now, telegram=telegram,
+                         transport=transport, shadow=shadow, verdict=verdict,
+                         baca_harga=baca_harga)
 
 
 def tick_cycle(
@@ -685,7 +718,29 @@ def main(argv=None, *, conn=None, db_path=None, telegram=None,
                     denyut_terakhir is None
                     or (sekarang - denyut_terakhir) >= HEARTBEAT_S
                 )
-                if denyut_penuh:
+                # Ambil batch TANPA memajukan offset untuk memutuskan irama
+                # (review 2026-10-18, C1/I3/I4): batch berisi `/ulang` = bangun
+                # ini dinaikkan jadi denyut penuh — konteks dibaca ulang, sakelar
+                # DCA dihitung `tick_cycle`, dan `apply_shadow_gate` menutup
+                # denyut yang sama, sehingga penolakan antar-denyut tidak pernah
+                # lolos ke hari berikutnya (C1). Syarat TANPA transport (I4):
+                # jawaban tidak boleh diproses tanpa rekonsiliasi dan cek izin —
+                # saat transport ada, semua jawaban ditahan ke denyut penuh.
+                # Offset hanya maju bila batch yang SAMA benar-benar diproses
+                # sebagai polling antar-denyut.
+                ambil = None
+                promosi = False
+                if (not denyut_penuh and konteks_baik
+                        and transport is None and fetch is not None):
+                    try:
+                        ambil = _ambil_update(telegram, fetch)
+                        promosi = _ada_perintah_ulang(ambil[0])
+                        gagal_polling = False
+                    except Exception as e:
+                        if not gagal_polling:
+                            gagal_polling = True
+                            print(f"Polling Telegram gagal — dilewati: {e}")
+                if denyut_penuh or promosi:
                     if pembaca_konteks is None:
                         konteks_baik = True
                     else:
@@ -727,17 +782,25 @@ def main(argv=None, *, conn=None, db_path=None, telegram=None,
                             # gagal, denyut berikutnya adalah percobaan ulang
                             # (15 dtk kemudian), bukan tidur 300 dtk.
                             denyut_terakhir = sekarang
-                elif konteks_baik:
+                elif konteks_baik and ambil is not None:
                     # Antar denyut: cukup baca tombol — jendela 90 detik
                     # tidak menunggu denyut penuh berikutnya. Kegagalan jaringan
                     # dilewati sekali lalu dicoba lagi pada bangun berikutnya;
                     # offset tidak pernah maju saat gagal, jadi antrian update
                     # di server Telegram tidak hilang.
+                    updates, offset_baru = ambil
                     try:
-                        _polling(conn, ctx, now=sekarang, telegram=telegram,
-                                 transport=transport, shadow=shadow,
-                                 verdict=spread.spread_verdict, fetch=fetch,
-                                 baca_harga=baca_harga)
+                        _OFFSET_TELEGRAM["offset"] = offset_baru
+                        _proses_batch(conn, ctx, updates, now=sekarang,
+                                      telegram=telegram, transport=transport,
+                                      shadow=shadow,
+                                      verdict=spread.spread_verdict,
+                                      baca_harga=baca_harga)
+                        if updates:
+                            # Sabuk C1: batch berisi apa pun = periksa penolakan
+                            # hari ini juga. Batch kosong mustahil meninggalkan
+                            # jejak, jadi denyut lama tidak terganggu.
+                            apply_shadow_gate(conn, now=sekarang)
                         gagal_polling = False
                     except Exception as e:
                         if not gagal_polling:

@@ -1675,3 +1675,91 @@ def test_blokinisialisasi_memuat_jalur_produksi():
     sumber_main = inspect.getsource(main_loop.main)
     assert "live_fetch" not in sumber_main
     assert "pembaca_konteks=None" in sumber_main    # parameter default, bukan bacaan produksi
+
+
+# --------------------------------------------------------------------------
+# Review 2026-10-18 — C1/I3/I4: cabang antar-denyut
+# --------------------------------------------------------------------------
+
+def test_ulang_antar_denyut_dinaikkan_jadi_denyut_penuh(tmp_path):
+    """I3/C1 (review): `/ulang` antar-denyut memakai konteks denyut terakhir
+    (≤300 detik basi) dan `dca_enabled` tak pernah dihitung — usulan bisa
+    lahir dari angka lama dan usulan DCA hilang diam-diam.
+
+    Kontrak baru: bangun berisi `/ulang` DINAIKKAN jadi denyut penuh —
+    pembaca jalan lagi (konteks segar), `tick_cycle` menghitung sakelar DCA,
+    dan `apply_shadow_gate` menutup denyut yang sama (penolakan tidak lolos
+    antar hari, C1).
+    """
+    conn = _fresh_db(tmp_path)
+    panggilan_pembaca = []
+
+    def pembaca(c):
+        panggilan_pembaca.append(c)
+        return main_loop._konteks_kosong()
+
+    fetch = _FetchPerekam([_update_teks("/ulang")])
+    keluar = main_loop.main(
+        ["--siklus", "2"], conn=conn, telegram=_TelegramPerekam(),
+        pembaca_konteks=pembaca, fetch=fetch,
+        jam=lambda: _ts(hour=12), tidur=lambda s: None)
+
+    assert keluar == 0
+    # Bangun 1 = denyut biasa; bangun 2 (antardenyut, berisi /ulang) = denyut
+    # penuh: konteks dibaca ulang dan batch diambil ulang oleh tick_cycle.
+    assert len(panggilan_pembaca) == 2, "pembaca harus jalan di bangun /ulang"
+    assert len(fetch.panggilan) == 3   # denyut + ambil-peek + ambil ulang tick
+
+
+def test_penolakan_antar_denyut_direset_di_bangun_yang_sama(tmp_path):
+    """C1 (review): penolakan yang tercatat SETELAH denyut pagi harus
+    me-reset `shadow_day` di bangun yang sama.
+
+    Skenario nyata: `/ulang` jam 22.57 mencatat `spread_rejected`, denyut
+    berikutnya jatuh ke DND (07.00 besok) — `rejected_count` membaca tanggal
+    BARU, nol penolakan, hari kotor terhitung bersih = G5 palsu lulus.
+    """
+    conn = _fresh_db(tmp_path)
+    main_loop.set_shadow_day(conn, 5)
+    jam = [_ts(hour=12)]
+
+    def tidur(s):
+        jam[0] += main_loop.POLL_GAP_S
+        # Penolakan tercatat di antara denyut (tunggu denyut = tunggu hari
+        # berganti pada skenario 22.57 -> 07.00).
+        shadow_log.record(conn, _usulan_take_profit(jam[0]), "spread_rejected")
+
+    keluar = main_loop.main(
+        ["--siklus", "2"], conn=conn, telegram=_TelegramPerekam(),
+        fetch=_FetchPerekam([_update_tombol("setuju", "usulan-tak-ada")]),
+        jam=lambda: jam[0], tidur=tidur)
+
+    assert keluar == 0
+    assert main_loop.load_state(conn)["shadow_day"] == 0, (
+        "penolakan hari ini harus direset di bangun yang sama")
+
+
+def test_polling_antar_denyut_ditahan_saat_transport_ada(tmp_path):
+    """I4 (review): jawaban antar-denyut pernah diproses tanpa rekonsiliasi
+    dan cek izin — hari ini aman karena transport selalu None, tapi begitu
+    go-live memasang `transport_factory` lubangnya terbuka.
+
+    Kontrak baru: cabang antar-denyut hanya jalan TANPA transport; dengan
+    transport, jawaban ditahan ke denyut penuh yang mendahului rekonsiliasi
+    (langkah 1-2 `tick_cycle`).
+    """
+    conn = _fresh_db(tmp_path)
+    main_loop.set_shadow_day(conn, main_loop.GO_LIVE_SHADOW_DAYS)
+    fetch = _FetchPerekam([])
+
+    def pabrik():
+        return _TransportPerekam()
+
+    keluar = main_loop.main(
+        ["--siklus", "3"], conn=conn, telegram=_TelegramPerekam(),
+        transport_factory=pabrik, fetch=fetch,
+        jam=lambda: _ts(hour=12), tidur=lambda s: None)
+
+    assert keluar == 0
+    assert len(fetch.panggilan) == 1, (
+        "fetch hanya di denyut penuh — polling antar-denyut ditahan")
