@@ -1,5 +1,7 @@
 # Shadow Runner Implementation Plan
 
+> **Status: SELESAI — 5/5 tugas digabung ke `feat/shadow-runner` (2026-10-18).** Shadow berjalan di Task Scheduler `IndodaxV1Shadow`; ledger G5: `.superpowers/sdd/2026-10-18-periode-shadow/progress.md`.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Menjalankan periode shadow sungguhan: bot membangun tiap 15 detik untuk membaca tombol Telegram (jendela 90 dtk realistis), denyut penuh + pembaca pasar tiap 5 menit, dengan fetch Telegram produksi — lalu didaftarkan ke Task Scheduler dan mulai menghitung G5.
