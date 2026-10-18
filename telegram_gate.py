@@ -5,6 +5,8 @@ and simple line notifications.
 import json
 from typing import Optional
 
+import requests
+
 import alerts
 import proposal
 
@@ -29,7 +31,7 @@ def get_updates(token: str, *, offset: int = 0, fetch=None) -> tuple[list[dict],
         # Since we shouldn't make real network calls in tests per constraints,
         # this should be overridden with a mock in tests
         raise NotImplementedError("Fetch function must be provided for production use")
-    
+
     # Call the fetch function with timeout=0 as specified
     response = fetch(token, offset=offset, timeout=0)
     
@@ -42,6 +44,25 @@ def get_updates(token: str, *, offset: int = 0, fetch=None) -> tuple[list[dict],
         next_offset = max(update["update_id"] for update in updates) + 1
     
     return updates, next_offset
+
+
+def live_fetch(token: str, *, offset: int = 0, timeout: int = 0,
+               get=requests.get) -> dict:
+    """Fetch produksi `getUpdates` — satu-satunya pembaca jaringan Telegram.
+
+    Dipanggil HANYA dari blok `__main__` (`main_loop`) sebagai `fetch`;
+    tes selalu menyuntikkan `get`/`fetch` palsu, jadi tidak ada tes yang
+    boleh menyentuh jaringan. Kegagalan jaringan dibiarkan MELEMPAR —
+    pemanggil (`main_loop`) yang menahan dan mencatat, tanpa mengarang
+    balasan (prinsip ragu = tidak kirim).
+
+    `timeout` Telegram 0 = balas segera tanpa long-poll; timeout HTTP
+    minimal 10 detik supaya permintaan tidak diputus lebih dulu.
+    """
+    url = f"https://api.telegram.org/bot{token}/getUpdates"
+    hasil = get(url, params={"offset": offset, "timeout": timeout},
+                timeout=max(timeout, 10))
+    return hasil.json()
 
 
 def parse_update(update: dict) -> tuple[str, str] | None:

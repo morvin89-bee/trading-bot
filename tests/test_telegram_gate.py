@@ -79,3 +79,38 @@ def test_get_updates_advances_offset():
     assert fetched["timeout"] == 0
     assert nxt == 8
     assert len(updates) == 1
+
+
+# --------------------------------------------------------------------------
+# live_fetch — fetch produksi untuk getUpdates (jalur `__main__`, Task 4)
+# --------------------------------------------------------------------------
+
+def test_live_fetch_memanggil_url_telegram_dengan_offset():
+    import telegram_gate
+    panggilan = {}
+
+    class _Respons:
+        def json(self):
+            return {"ok": True, "result": []}
+
+    def get_palsu(url, params=None, timeout=None):
+        panggilan.update(url=url, params=params, timeout=timeout)
+        return _Respons()
+
+    hasil = telegram_gate.live_fetch("TOKEN", offset=7, timeout=0,
+                                     get=get_palsu)
+    assert panggilan["url"] == "https://api.telegram.org/botTOKEN/getUpdates"
+    assert panggilan["params"] == {"offset": 7, "timeout": 0}
+    # timeout HTTP minimal 10 dtk supaya tidak memutus sebelum Telegram balas
+    assert panggilan["timeout"] == 10
+    assert hasil == {"ok": True, "result": []}
+
+
+def test_live_fetch_tanpa_get_memakai_requests_asli():
+    # Koneksi nyata DILARANG di tes (conftest memblokir urlopen/Session);
+    # cukup pastikan bawaannya benar-benar requests.get.
+    import inspect
+    import requests
+    import telegram_gate
+    bawaan = inspect.signature(telegram_gate.live_fetch).parameters["get"].default
+    assert bawaan is requests.get
