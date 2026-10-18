@@ -620,6 +620,11 @@ def main(argv=None, *, conn=None, db_path=None, telegram=None,
         reset_state()
         transport = None
         telah_menyala = False
+        # Banner status dicetak SEKALI per proses, bukan tiap bangun: dengan
+        # irama 15 detik, mencetaknya tiap bangun = ±5.760 baris log per hari
+        # yang menelan perhatian dari baris kegagalan yang asli.
+        sudah_cetak_status = False
+        sudah_cetak_pabrik = False
 
         if ctx is None:
             ctx = _konteks_kosong()
@@ -641,14 +646,16 @@ def main(argv=None, *, conn=None, db_path=None, telegram=None,
 
             if shadow:
                 transport = None
-                if not telah_menyala:
+                if not sudah_cetak_status:
+                    sudah_cetak_status = True
                     print(
                         "Eksekusi belum dinyalakan: berjalan dalam mode bayangan, "
                         "tidak ada order yang bisa dikirim."
                     )
             elif transport_factory is None:
                 transport = None
-                if not telah_menyala:
+                if not sudah_cetak_pabrik:
+                    sudah_cetak_pabrik = True
                     print(
                         "Eksekusi belum dinyalakan: tidak ada pabrik transport, "
                         "tidak ada order yang bisa dikirim."

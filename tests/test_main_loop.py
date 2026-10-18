@@ -1539,6 +1539,39 @@ def test_sapa_awal_hanya_bila_ada_fetch(tmp_path):
     assert "mode bayangan" in telegram.lines[0].lower()
 
 
+def test_banner_mode_bayangan_dicetak_sekali_saja(tmp_path, capsys):
+    """Banner status = sekali per proses, bukan log denyut tiap 15 detik.
+
+    Tanpa penanda sekali-cetak ini, banner tercetak tiap bangun (5.760
+    baris/hari pada irama 15 dtk) dan menelan perhatian dari log kegagalan
+    yang asli. Semua tes lama memakai `--siklus 1` sehingga perilaku lama
+    (sekali per denyut = sekali per proses di sana) tidak berubah.
+    """
+    conn = _fresh_db(tmp_path)
+    keluar = main_loop.main(
+        ["--siklus", "3"], conn=conn, telegram=_TelegramPerekam(),
+        jam=lambda: _ts(hour=12), tidur=lambda s: None)
+
+    assert keluar == 0
+    assert capsys.readouterr().out.count("Eksekusi belum dinyalakan") == 1
+
+
+def test_banner_tanpa_pabrik_juga_dicetak_sekali(tmp_path, capsys):
+    """Sakelar nyala tanpa pabrik transport: peringatan penting — tetap
+    sekali per proses. Keduanya dicetak on-demand saat statusnya BERUBAH,
+    bukan sebagai detak jantung log."""
+    conn = _fresh_db(tmp_path)
+    main_loop.set_shadow_day(conn, main_loop.GO_LIVE_SHADOW_DAYS)
+    keluar = main_loop.main(
+        ["--siklus", "3"], conn=conn, telegram=_TelegramPerekam(),
+        jam=lambda: _ts(hour=12), tidur=lambda s: None)
+
+    assert keluar == 0
+    keluaran = capsys.readouterr().out
+    assert keluaran.count("tidak ada pabrik transport") == 1
+    assert "berjalan dalam mode bayangan" not in keluaran
+
+
 # --------------------------------------------------------------------------
 # baca_harga — harga segar saat jawaban diproses (gerbang geser 0,5%)
 # --------------------------------------------------------------------------
