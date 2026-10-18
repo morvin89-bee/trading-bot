@@ -43,6 +43,8 @@ import types
 
 import dca_window
 import engine
+import indodax_api
+import portfolio
 import portfolio_store
 import reconcile
 import rules
@@ -195,6 +197,85 @@ def _konteks_kosong():
     return engine.Context(
         holdings=[], prices={}, free_idr=0.0, reserve_idr=0.0,
         today_counts={}, last_fill_ts={}, held_pairs_24h=set(),
+    )
+
+
+def baca_konteks(conn, *, now=None, sinkron=portfolio.sync_trades,
+                 ambil_info=indodax_api.account_info,
+                 ambil_harga=portfolio.fetch_price):
+    """Baca konteks pasar SEBENARNYA untuk satu denyut (pembaca produksi).
+
+    Urutan dan kejujuran angkanya, sesuai rancangan periode shadow:
+
+    1. `sinkron(conn)` — tarik riwayat trade terbaru (read-only; kegagalan per
+       pair sudah ditelan di dalam `portfolio.sync_trades`).
+    2. `ambil_info()` — respons MENTAH `account_info`. Hanya bentuk TAPIv2
+       (`balances` list) yang dipercaya; bentuk lain = `ValueError`, karena
+       tanpa bentuk yang dikenal `free` tidak bisa dipastikan (ragu = tidak
+       mengambil keputusan).
+    3. `ambil_harga` untuk SEMUA pair di `portfolio.COIN_PAIRS`; satu pun
+       `None` = `ValueError` — tidak ada angka parsial yang menyusup ke
+       denyut (harga hilang = tidak ada keputusan, spec §6.3).
+    4. `free_idr` dihitung dari field `free` SAJA (bukan `free + locked`):
+       saldo yang terkunci order tidak boleh dianggap tersedia (spec §6.4
+       "free sudah bersih"). `reserve_idr = 0.0` — tidak ada konfigurasi
+       cadangan terkunci di repo; mengarang angkanya akan membuat pesan
+       berbohong.
+    5. `today_counts` / `last_fill_ts` / `held_pairs_24h` diturunkan dari
+       riwayat `trades` dengan WAKTU LOKAL (`time.localtime`) — bukan isi
+       yang dikarang, bukan `utcnow`.
+
+    `dca_enabled` dibiarkan default `False`: yang mengisinya per siklus
+    adalah `main_loop` lewat `dca_window` (satu-satunya pemilik `conn` di
+    lapisan ini).
+    """
+    now = time.time() if now is None else now
+
+    sinkron(conn)
+
+    info = ambil_info()
+    if not (isinstance(info, dict) and isinstance(info.get("balances"), list)):
+        raise ValueError("bentuk saldo tidak dikenal — bukan daftar balances TAPIv2")
+
+    prices = {pair: ambil_harga(pair) for pair in portfolio.COIN_PAIRS.values()}
+    hilang = [pair for pair, harga in prices.items() if harga is None]
+    if hilang:
+        raise ValueError("harga gagal dibaca: " + ", ".join(sorted(hilang)))
+
+    free_idr = 0.0
+    for b in info["balances"]:
+        asset = str(b.get("asset") or "").strip().lower()
+        if asset in ("idr", "rp"):
+            try:
+                free_idr += float(b.get("free") or 0)
+            except (TypeError, ValueError):
+                raise ValueError("nilai free IDR tidak terbaca")
+
+    coins = {k: v for k, v in portfolio.parse_balances(info).items()
+             if k != "IDR"}
+    trades = portfolio_store.list_trades(conn)
+    holdings = portfolio.compute_holdings(trades, coins, prices)
+
+    hari_ini = time.strftime("%Y-%m-%d", time.localtime(now))
+    today_counts: dict = {}
+    last_fill_ts: dict = {}
+    held_pairs_24h: set = set()
+    for t in trades:
+        side = (t.get("side") or "").lower()
+        if side not in ("buy", "sell") or t.get("ts") is None:
+            continue
+        ts = float(t["ts"])
+        pair = t["pair"]
+        last_fill_ts[pair] = max(last_fill_ts.get(pair, ts), ts)
+        if time.strftime("%Y-%m-%d", time.localtime(ts)) == hari_ini:
+            today_counts[pair] = today_counts.get(pair, 0) + 1
+        if now - ts <= 86400:
+            held_pairs_24h.add(pair)
+
+    return engine.Context(
+        holdings=holdings, prices=prices, free_idr=free_idr,
+        reserve_idr=0.0, today_counts=today_counts,
+        last_fill_ts=last_fill_ts, held_pairs_24h=held_pairs_24h,
     )
 
 

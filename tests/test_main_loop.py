@@ -1332,3 +1332,93 @@ def test_dca_konfirmasi_menghasilkan_satuan_order_end_to_end(tmp_path):
     # Jawaban ganda berhenti di langkah 0 `on_answer` — order kedua tidak
     # pernah terkirim (len(transport.posted) di atas dihitung SETELAH
     # kedua jawaban diproses dalam satu fetch).
+
+
+# --------------------------------------------------------------------------
+# Pembaca pasar produksi — baca_konteks (periode shadow)
+# --------------------------------------------------------------------------
+
+def test_baca_konteks_mengisi_konteks_penuh(tmp_path):
+    import portfolio
+    import portfolio_store
+
+    conn = _fresh_db(tmp_path)
+    portfolio_store.init_db(conn)
+
+    panggilan_sinkron = []
+    def sinkron(c):
+        panggilan_sinkron.append(c)
+
+    info = {"balances": [
+        {"asset": "idr", "free": "150000", "locked": "50000"},
+        {"asset": "eth", "free": "0.5", "locked": "0"},
+    ]}
+    now = _ts(hour=12)
+    portfolio_store.insert_trade(conn, {
+        "pair": "eth_idr", "side": "buy", "price": 400000.0, "qty": 0.1,
+        "quote": 40000.0, "fee": 0, "ts": now - 100, "source": "api",
+        "external_id": "e-buy-hari-ini"})
+    portfolio_store.insert_trade(conn, {
+        "pair": "eth_idr", "side": "sell", "price": 450000.0, "qty": 0.05,
+        "quote": 22500.0, "fee": 0, "ts": now - 90000, "source": "api",
+        "external_id": "e-sell-kemarin"})
+    portfolio_store.insert_trade(conn, {
+        "pair": "btc_idr", "side": "buy", "price": 900000000.0, "qty": 0.001,
+        "quote": 900.0, "fee": 0, "ts": now - 7200, "source": "api",
+        "external_id": "b-buy-2jam"})
+
+    ctx = main_loop.baca_konteks(
+        conn, now=now, sinkron=sinkron,
+        ambil_info=lambda: info, ambil_harga=lambda pair: 1000.0)
+
+    assert panggilan_sinkron == [conn]
+    # free = hanya yang bebas; locked (50.000) TIDAK boleh dihitung pakai.
+    assert ctx.free_idr == 150000.0
+    # Tidak ada konfigurasi cadangan terkunci -> 0, tanpa mengarang angka.
+    assert ctx.reserve_idr == 0.0
+    assert set(ctx.prices) == set(portfolio.COIN_PAIRS.values())
+    eth = [h for h in ctx.holdings if h.pair == "eth_idr"]
+    assert len(eth) == 1 and eth[0].qty == 0.5
+    # Hitung hari lokal: buy eth (now-100) dan buy btc (now-7200) sama-sama
+    # hari ini; sell kemarin (now-90000) tidak ikut.
+    assert ctx.today_counts == {"eth_idr": 1, "btc_idr": 1}
+    assert ctx.last_fill_ts["eth_idr"] == now - 100
+    assert ctx.held_pairs_24h == {"eth_idr", "btc_idr"}
+
+
+def test_baca_konteks_harga_satu_pair_gagal_mengangkat(tmp_path):
+    """Satu pair gagal harga = TANPA angka parsial: raise, denyut dilewati."""
+    import portfolio_store
+    conn = _fresh_db(tmp_path)
+    portfolio_store.init_db(conn)
+
+    def ambil_harga(pair):
+        return None if pair == "btc_idr" else 1000.0
+
+    with pytest.raises(ValueError):
+        main_loop.baca_konteks(
+            conn, sinkron=lambda c: None,
+            ambil_info=lambda: {"balances": []}, ambil_harga=ambil_harga)
+
+
+def test_baca_konteks_bentuk_saldo_tak_dikenal_mengangkat(tmp_path):
+    """Bukan bentuk TAPIv2 = tidak ada angka free yang bisa dipercaya."""
+    import portfolio_store
+    conn = _fresh_db(tmp_path)
+    portfolio_store.init_db(conn)
+    with pytest.raises(ValueError):
+        main_loop.baca_konteks(
+            conn, sinkron=lambda c: None, ambil_info=lambda: {},
+            ambil_harga=lambda pair: 1000.0)
+
+
+def test_baca_konteks_idr_dikunci_tidak_dihitung_free(tmp_path):
+    import portfolio_store
+    conn = _fresh_db(tmp_path)
+    portfolio_store.init_db(conn)
+    info = {"balances": [{"asset": "idr", "free": "0", "locked": "70000"}]}
+    ctx = main_loop.baca_konteks(
+        conn, sinkron=lambda c: None, ambil_info=lambda: info,
+        ambil_harga=lambda pair: 1000.0)
+    assert ctx.free_idr == 0.0
+    assert ctx.holdings == []
