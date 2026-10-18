@@ -1,11 +1,12 @@
 """Loop utama: denyut jantung, sakelar mode bayangan, dan integrasi modul.
 
-Modul ini tidak pernah membuka jaringan, tidak pernah membaca `.env` untuk
-kunci dagang, dan tidak memiliki kemampuan menempatkan order. Semua jalur
+Modul ini tidak pernah membuka jaringan dari dalam loop: semua jalur
 keluar — konteks pasar, gerbang spread, Telegram, dan jalur ke bursa —
-disuntikkan pemanggil; `main()` sendiri hanya bisa membangun objek bursa
-lewat `transport_factory` yang diberikan, dan tanpa factories itu ia tidak
-membangun apa pun.
+disuntikkan pemanggil; jaringan nyata hanya lewat blok `__main__` yang
+menyuntik pembaca/fetch produksi. Modul juga tidak pernah membaca `.env`
+untuk kunci dagang dan tidak memiliki kemampuan menempatkan order.
+`main()` sendiri hanya bisa membangun objek bursa lewat `transport_factory`
+yang diberikan, dan tanpa factories itu ia tidak membangun apa pun.
 
 Urutan `tick_cycle` (berhenti di titik pertama yang gagal):
 
@@ -32,9 +33,10 @@ Keterbatasan yang disengaja dan perlu diketahui pembaca berikutnya:
   satu baris yang menyatakan tombolnya tidak berlaku lagi. Pengaman yang
   sesungguhnya ada di `engine.on_answer` langkah 0 (jawaban kedua berhenti
   sebelum menyentuh bursa) — sudah dipatok tesnya sendiri di sana.
-- `main()` tidak membangun konteks pasar: repo ini belum punya pembaca data
-  pasar yang disuntikkan ke `engine.Context`. Tanpa `ctx`, loop berjalan dan
-  tidak mengusulkan apa pun — diam dan benar, bukan menebak.
+- `main()` membangun konteks pasar HANYA bila pemanggil menyuntikkan
+  `pembaca_konteks` (jalur CLI `__main__` menyuntik `baca_konteks`).
+  Tanpanya loop memakai `_konteks_kosong()` dan tidak mengusulkan apa pun —
+  diam dan benar, bukan menebak.
 """
 import argparse
 import dataclasses
@@ -733,4 +735,11 @@ def main(argv=None, *, conn=None, db_path=None, telegram=None,
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    # Jalur produksi — satu-satunya tempat fetch Telegram, pembaca pasar, dan
+    # penyegar harga NYATA disuntikkan. `main()` dipanggil tes tanpa ketiganya
+    # supaya tidak satu pun tes bisa menyentuh jaringan (conftest tetap jaga).
+    raise SystemExit(main(
+        fetch=telegram_gate.live_fetch,
+        pembaca_konteks=baca_konteks,
+        baca_harga=portfolio.fetch_price,
+    ))

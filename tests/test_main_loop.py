@@ -1592,3 +1592,24 @@ def test_baca_harga_gagal_konfirmasi_hangus(tmp_path):
         "SELECT outcome FROM proposals WHERE id = ?", (p.id,)).fetchone()
     assert baris is not None and baris[0] == "proposed"
     assert any("hangus" in b for b in telegram.lines)
+
+
+# --------------------------------------------------------------------------
+# Blok __main__ — satu-satunya tempat jalur produksi disuntikkan
+# --------------------------------------------------------------------------
+
+def test_blokinisialisasi_memuat_jalur_produksi():
+    """Jalur produksi hanya di blok `__main__`, tidak pernah di dalam `main()`.
+
+    `main()` dipanggil berkali-kali oleh tes tanpa fetch/pembaca (perilaku
+    lama persis); bila `live_fetch` masuk ke dalamnya, setiap pemanggilan tes
+    akan mengarah ke jaringan dan conftest menjerit. Pola tes sumber R-2.
+    """
+    sumber_modul = inspect.getsource(main_loop)
+    assert "live_fetch" in sumber_modul
+    assert "pembaca_konteks=baca_konteks" in sumber_modul
+    assert "baca_harga=portfolio.fetch_price" in sumber_modul
+
+    sumber_main = inspect.getsource(main_loop.main)
+    assert "live_fetch" not in sumber_main
+    assert "pembaca_konteks=None" in sumber_main    # parameter default, bukan bacaan produksi
