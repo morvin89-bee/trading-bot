@@ -1948,3 +1948,97 @@ def test_kunci_satu_instance_menolak_proses_lain(tmp_path):
             "proses luar harus ditolak kunci — dua getUpdates = bencana")
     finally:
         pegang.close()
+
+
+# --------------------------------------------------------------------------
+# Review 2026-10-18 — M2/M6: sapa awal dan banner harus mencerminkan
+# KENYATAAN (bukti poll pertama sukses; status yang benar-benar berubah).
+# --------------------------------------------------------------------------
+
+def test_sapa_awal_tidak_terkirim_bila_polling_gagal(tmp_path):
+    """M2 (review): sapa "polling Telegram aktif" dicetak SEBELUM getUpdates
+    pertama — token mati pun terlihat sehat. Kontrak baru: sapa hanya SETELAH
+    poll pertama sukses; kalau gagal terus, tidak ada satu pun baris yang
+    mengklaim polling aktif.
+    """
+    conn = _fresh_db(tmp_path)
+    telegram = _TelegramPerekam()
+
+    def fetch_gagal(token, *, offset, timeout):
+        raise ConnectionError("token/jaringan mati")
+
+    keluar = main_loop.main(
+        ["--siklus", "2"], conn=conn, telegram=telegram,
+        fetch=fetch_gagal, jam=lambda: _ts(hour=12), tidur=lambda s: None)
+
+    assert keluar == 0
+    assert telegram.lines == [], (
+        "tanpa poll sukses, tidak boleh ada klaim 'sudah berjalan'")
+
+
+def test_sapa_awal_mengikuti_mode_sebenarnya(tmp_path):
+    """M2: kata sapa harus diturunkan dari `shadow` — bukan hardcode
+    "mode bayangan" padahal sakelar v1 sudah menyala."""
+    conn = _fresh_db(tmp_path)
+    main_loop.set_shadow_day(conn, main_loop.GO_LIVE_SHADOW_DAYS)
+    telegram = _TelegramPerekam()
+
+    keluar = main_loop.main(
+        ["--siklus", "1"], conn=conn, telegram=telegram,
+        fetch=_FetchPerekam([]), jam=lambda: _ts(hour=12),
+        tidur=lambda s: None)
+
+    assert keluar == 0
+    assert telegram.lines, "sapa tetap wajib begitu poll pertama sukses"
+    assert "mode bayangan" not in telegram.lines[0].lower()
+    assert "eksekusi menyala" in telegram.lines[0].lower()
+
+
+def test_sapa_awal_gagal_kirim_dicatat_jujur(tmp_path, capsys):
+    """M2: hasil boolean `telegram.line` dulu diabaikan — kegagalan kirim
+    tak terlihat siapa pun. Kontrak baru: kegagalannya dicatat ke log."""
+    conn = _fresh_db(tmp_path)
+
+    class _TelegramGagal:
+        token = "token-uji"
+
+        def line(self, text):
+            return False
+
+        def confirmation(self, p):
+            return None
+
+    keluar = main_loop.main(
+        ["--siklus", "1"], conn=conn, telegram=_TelegramGagal(),
+        fetch=_FetchPerekam([]), jam=lambda: _ts(hour=12),
+        tidur=lambda s: None)
+
+    keluaran = capsys.readouterr().out
+    assert keluar == 0
+    assert "Pesan sapa awal tidak terkirim" in keluaran
+
+
+def test_banner_dicetak_ulang_setelah_status_berubah(tmp_path, capsys):
+    """M6 (review): komentar/docstring bilang banner dicetak "saat statusnya
+    BERUBAH" — tapi penanda tak pernah direset, jadi transisi mode bayangan
+    -> v1 -> bayangan tidak pernah mencetak apa pun lagi. Kompas harus sama
+    dengan kenyataan: reset penanda saat status benar-benar berubah.
+    """
+    conn = _fresh_db(tmp_path)
+    jam = [_ts(hour=12)]
+
+    def tidur(s):
+        jam[0] += main_loop.POLL_GAP_S
+        if jam[0] == _ts(hour=12) + main_loop.POLL_GAP_S:
+            main_loop.set_shadow_day(conn, main_loop.GO_LIVE_SHADOW_DAYS)
+        elif jam[0] == _ts(hour=12) + 2 * main_loop.POLL_GAP_S:
+            main_loop.set_shadow_day(conn, 0)
+
+    keluar = main_loop.main(
+        ["--siklus", "3"], conn=conn, telegram=_TelegramPerekam(),
+        jam=lambda: jam[0], tidur=tidur)
+
+    keluaran = capsys.readouterr().out
+    assert keluar == 0
+    assert keluaran.count("berjalan dalam mode bayangan") == 2, (
+        "status bayangan -> v1 -> bayangan = banner dicetak di tiap keadaan")

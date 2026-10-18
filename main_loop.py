@@ -709,11 +709,13 @@ def main(argv=None, *, conn=None, db_path=None, telegram=None,
         reset_state()
         transport = None
         telah_menyala = False
-        # Banner status dicetak SEKALI per proses, bukan tiap bangun: dengan
-        # irama 15 detik, mencetaknya tiap bangun = ±5.760 baris log per hari
-        # yang menelan perhatian dari baris kegagalan yang asli.
+        # Banner status dicetak SATU KALI PER KEADAAN — bukan tiap bangun
+        # (irama 15 detik = ±5.760 baris/hari yang menelan baris kegagalan
+        # asli), dan bukan sekali-per-proses yang membeku: perubahan status
+        # wajib tercatat (M6). Penanda direset saat status BERUBAH.
         sudah_cetak_status = False
         sudah_cetak_pabrik = False
+        status_lama = None
 
         if ctx is None:
             ctx = _konteks_kosong()
@@ -734,10 +736,43 @@ def main(argv=None, *, conn=None, db_path=None, telegram=None,
         gagal_pembaca_coba = 0
         gagal_polling_coba = 0
         gagal_denyut_coba = 0
+
+        def _sapa_awal():
+            """Sapa awal SETELAH poll pertama sukses (M2 review 2026-10-18).
+
+            Klaim "polling Telegram aktif" yang dicetak sebelum getUpdates
+            pertama adalah bukti palsu: token mati pun akan terlihat sehat.
+            Boolean hasil `telegram.line` dicek — kegagalan pengiriman
+            dicatat jujur ke log, bukan diabaikan. Kata sapa diturunkan dari
+            mode `shadow` yang sedang berjalan, bukan hardcode.
+            """
+            nonlocal sapa_terkirim
+            if fetch is None or sapa_terkirim:
+                return
+            sapa_terkirim = True
+            mode = ("mode bayangan, tanpa order yang bisa dikirim" if shadow
+                    else "eksekusi menyala — pantau dengan teliti")
+            print(f"Bot siap: polling Telegram aktif — {mode}.")
+            if not telegram.line(f"Bot semi-otomatis berjalan — {mode}."):
+                print("Pesan sapa awal tidak terkirim — polling tetap jalan.")
+
         while args.siklus is None or siklus < args.siklus:
             sekarang = jam()
             keadaan = load_state(conn)
             shadow = not keadaan["v1_enabled"]
+
+            # M6 (review 2026-10-18): penanda banner direset HANYA saat status
+            # benar-benar berubah — persis seperti yang diklaim komentar dan
+            # docstring ("dicetak saat statusnya BERUBAH"). Tanpa ini penanda
+            # membeku di keadaan pertama dan transisi mode bayangan -> v1 ->
+            # bayangan tidak pernah tercatat lagi di log.
+            status = ("bayangan" if shadow else
+                      ("tanpa-pabrik" if transport_factory is None
+                       else "menyala"))
+            if status != status_lama:
+                status_lama = status
+                sudah_cetak_status = False
+                sudah_cetak_pabrik = False
 
             if shadow:
                 transport = None
@@ -760,19 +795,9 @@ def main(argv=None, *, conn=None, db_path=None, telegram=None,
                     transport = transport_factory()
                 telah_menyala = True
 
-            # Sapa awal — bukti nyata token + chat hidup sejak detik pertama.
-            # Hanya bila `fetch` ada: tes tanpa fetch tidak boleh menerima
-            # baris apa pun (kontrak `lines == []` yang sudah ada).
-            if fetch is not None and not sapa_terkirim:
-                sapa_terkirim = True
-                print(
-                    "Bot siap: polling Telegram aktif — mode bayangan, "
-                    "tanpa order yang bisa dikirim."
-                )
-                telegram.line(
-                    "Bot semi-otomatis berjalan — mode bayangan, tidak ada "
-                    "order yang bisa dikirim."
-                )
+            # Sapa awal TIDAK lagi dicetak di sini: klaim "polling aktif"
+            # sebelum getUpdates pertama adalah bukti palsu (M2 review).
+            # Lihat `_sapa_awal` — dipanggil hanya setelah poll sukses.
 
             if should_run_habitual(sekarang):
                 denyut_penuh = (
@@ -801,6 +826,7 @@ def main(argv=None, *, conn=None, db_path=None, telegram=None,
                                 "Polling Telegram sudah pulih — jalan kembali.")
                         gagal_polling = False
                         gagal_polling_coba = 0
+                        _sapa_awal()
                     except Exception as e:
                         gagal_polling_coba += 1
                         if (not gagal_polling or
@@ -861,6 +887,7 @@ def main(argv=None, *, conn=None, db_path=None, telegram=None,
                                     "Denyut penuh sudah pulih — jalan kembali.")
                             gagal_denyut = False
                             gagal_denyut_coba = 0
+                            _sapa_awal()
                             # Hanya denyut SUKSES yang memperbarui penanda: bila
                             # gagal, denyut berikutnya adalah percobaan ulang
                             # (15 dtk kemudian), bukan tidur 300 dtk.
