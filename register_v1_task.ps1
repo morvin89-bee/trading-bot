@@ -1,13 +1,12 @@
-$py = "C:\Users\KakiTangan\AppData\Local\Programs\Python\Python314\pythonw.exe"
 $botDir = "C:\Users\KakiTangan\trading-bot"
 
-# Pola identik dengan register_task.ps1 (IndodaxTradeMonitor) yang sudah
-# terbukti: AtLogOn, tanpa batas waktu eksekusi, MultipleInstances IgnoreNew
-# (SATU pemilik getUpdates — dua proses berebut Telegram = konfirmasi hilang),
-# restart 3x per menit bila proses mati.
+# Peluncur wscript + VBS tersembunyi: cmd.exe langsung membuat jendela
+# kosong yang membingungkan ("boleh ditutup atau tidak?"). wscript berjalan
+# tanpa jendela dan MENUNGGU bot selesai (VBS pakai wait=True), jadi task
+# tetap tercatat berjalan — IgnoreNew tetap menjaga satu pemilik getUpdates.
 $action = New-ScheduledTaskAction `
-    -Execute "cmd.exe" `
-    -Argument "/c `"$py`" -u main_loop.py >> v1_loop.log 2>&1" `
+    -Execute "wscript.exe" `
+    -Argument "`"$botDir\run_v1_hidden.vbs`"" `
     -WorkingDirectory $botDir
 
 $trigger = New-ScheduledTaskTrigger -AtLogOn
