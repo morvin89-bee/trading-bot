@@ -58,6 +58,14 @@ import telegram_gate
 # Denyut jantung: lima menit (plan:1116).
 HEARTBEAT_S = 300
 
+# Jarak bangun antar pembacaan tombol Telegram. Jendela konfirmasi reaktif
+# 90 detik (`proposal.REACTIVE_WINDOW_S`) harus BISA dipenuhi pengguna:
+# kalau `getUpdates` hanya dibaca per denyut (300 dtk), setiap tekanan tombol
+# terbaca ±5 menit sesudahnya dan selalu berstatus hangus — tombol Setuju
+# jadi tidak berguna sama sekali. 15 detik memberi pengguna sisa ±60 detik
+# setelah pesan diterima (rancangan periode shadow, keputusan "dua irama").
+POLL_GAP_S = 15
+
 # Jam aktif DITURUNKAN dari `dca_window.DND` (23, 7) — bukan daftar jam kedua.
 # Menyalinnya berarti dua sumber kebenaran yang bisa melenceng satu jam.
 ACTIVE_HOURS = (dca_window.DND[1], dca_window.DND[0])   # (7, 23)
@@ -368,7 +376,8 @@ def _jawab(conn, ctx, aksi, id_usulan, *, now, telegram, transport,
     return hasil
 
 
-def _polling(conn, ctx, *, now, telegram, transport, shadow, verdict, fetch):
+def _polling(conn, ctx, *, now, telegram, transport, shadow, verdict, fetch,
+             baca_harga=None):
     """Baca `getUpdates`, teruskan ke `on_answer` (satu-satunya konsumennya).
 
     Mengembalikan True bila ada perintah `/ulang` yang sudah menghasilkan
@@ -378,6 +387,12 @@ def _polling(conn, ctx, *, now, telegram, transport, shadow, verdict, fetch):
 
     Tanpa `fetch` yang disuntikkan, polling dilewati seluruhnya — berarti
     TIDAK ADA jalur keluar jaringan di loop ini.
+
+    `baca_harga(pair)` (opsional) dipanggil SEBELUM jawaban diproses untuk
+    memperbarui `ctx.prices[pair]`: angka di pesan harus diuji terhadap harga
+    SAAT INI, bukan harga denyut lima menit lalu (gerbang geser 0,5%, spec
+    §6.3). Gagal membaca = `ctx.prices[pair] = None` → `price_still_valid`
+    menolak → konfirmasi hangus. Tidak ada keputusan di atas harga basi.
     """
     if fetch is None:
         return False
@@ -395,6 +410,13 @@ def _polling(conn, ctx, *, now, telegram, transport, shadow, verdict, fetch):
         aksi, id_usulan = parsed
         if aksi == "ulang":
             diulang = True
+        if baca_harga is not None:
+            pair = getattr(_USULAN_MENUNGGU.get(id_usulan), "pair", None)
+            if pair is not None:
+                try:
+                    ctx.prices[pair] = baca_harga(pair)
+                except Exception:
+                    ctx.prices[pair] = None
         _jawab(
             conn, ctx, aksi, id_usulan, now=now, telegram=telegram,
             transport=transport, shadow=shadow, verdict=verdict,
@@ -414,6 +436,7 @@ def tick_cycle(
     verdict=spread.spread_verdict,
     ctx=None,
     fetch=None,
+    baca_harga=None,
 ):
     """Satu denyut jantung. Mengembalikan "halted" | "proposed" | "kosong".
 
@@ -464,7 +487,7 @@ def tick_cycle(
     # 3. Polling Telegram — wajib, bukan pelengkap (F6).
     diulang = _polling(conn, ctx, now=now, telegram=telegram,
                        transport=transport, shadow=shadow, verdict=verdict,
-                       fetch=fetch)
+                       fetch=fetch, baca_harga=baca_harga)
 
     # 4. Pengingat pasif DCA, maksimal satu pesan per slot jam (T-13.1).
     if dca_window.should_remind(conn, now):
@@ -540,19 +563,30 @@ def _env(kunci):
 
 
 def main(argv=None, *, conn=None, db_path=None, telegram=None,
-         transport_factory=None, ctx=None, fetch=None, jam=None, tidur=None):
+         transport_factory=None, ctx=None, fetch=None, jam=None, tidur=None,
+         pembaca_konteks=None, baca_harga=None):
     """Jalankan loop. 0 = berhenti wajar, 1 = gagal (konsisten `scheduler.py`).
 
     `transport_factory` adalah satu-satunya jalan yang MUNGKIN menyentuh
     bursa, dan hanya dipanggil bila sakelar sudah menyala. Tanpa factories
     apa pun, `main()` tidak membangun objek apa pun ke bursa, mencetak satu
     baris berbahasa Indonesia yang jelas, lalu melanjutkan dalam mode bayangan.
+
+    Dua irama (rancangan periode shadow): setiap bangun (`POLL_GAP_S`)
+    membaca tombol Telegram; denyut penuh (`HEARTBEAT_S`) menjalankan
+    `tick_cycle` setelah konteks pasar dibaca ulang lewat `pembaca_konteks`
+    (bawaan `None` = konteks disuntik pemanggil, perilaku lama persis).
+    `baca_harga(pair)` menyegarkan harga pasangan yang sedang dijawab.
+    Pembaca gagal = denyut dilewati dan polling ditahan: tanpa bacaan yang
+    utuh tidak ada satu pun keputusan (ragu = tidak kirim).
     """
     parser = argparse.ArgumentParser(
         prog="main_loop",
         description="Loop utama bot semi-otomatis (mode bayangan secara bawaan).")
     parser.add_argument("--siklus", type=int, default=None,
-                        help="Jumlah denyut jantung lalu keluar (bawaan: terus).")
+                        help="Jumlah bangun tidur (tiap POLL_GAP_S) lalu "
+                             "keluar; denyut penuh jalan tiap HEARTBEAT_S "
+                             "(bawaan: terus).")
     args = parser.parse_args(argv)
 
     jam = time.time if jam is None else jam
@@ -589,6 +623,15 @@ def main(argv=None, *, conn=None, db_path=None, telegram=None,
             ctx = _konteks_kosong()
 
         siklus = 0
+        denyut_terakhir = None
+        # Tanpa pembaca (konteks disuntik pemanggil) konteks selalu dianggap
+        # sah; dengan pembaca, status inilah yang menahan polling sampai
+        # bacaan pasar berikutnya berhasil — tidak ada keputusan di atas data
+        # yang gagal dibaca.
+        konteks_baik = pembaca_konteks is None
+        sapa_terkirim = False
+        gagal_pembaca = False
+        gagal_polling = False
         while args.siklus is None or siklus < args.siklus:
             sekarang = jam()
             keadaan = load_state(conn)
@@ -613,13 +656,70 @@ def main(argv=None, *, conn=None, db_path=None, telegram=None,
                     transport = transport_factory()
                 telah_menyala = True
 
+            # Sapa awal — bukti nyata token + chat hidup sejak detik pertama.
+            # Hanya bila `fetch` ada: tes tanpa fetch tidak boleh menerima
+            # baris apa pun (kontrak `lines == []` yang sudah ada).
+            if fetch is not None and not sapa_terkirim:
+                sapa_terkirim = True
+                print(
+                    "Bot siap: polling Telegram aktif — mode bayangan, "
+                    "tanpa order yang bisa dikirim."
+                )
+                telegram.line(
+                    "Bot semi-otomatis berjalan — mode bayangan, tidak ada "
+                    "order yang bisa dikirim."
+                )
+
             if should_run_habitual(sekarang):
-                tick_cycle(conn, now=sekarang, telegram=telegram,
-                           transport=transport, shadow=shadow, ctx=ctx,
-                           fetch=fetch)
+                denyut_penuh = (
+                    denyut_terakhir is None
+                    or (sekarang - denyut_terakhir) >= HEARTBEAT_S
+                )
+                if denyut_penuh:
+                    if pembaca_konteks is None:
+                        konteks_baik = True
+                    else:
+                        try:
+                            ctx = pembaca_konteks(conn)
+                            gagal_pembaca = False
+                            konteks_baik = True
+                        except Exception as e:
+                            konteks_baik = False
+                            # Cetak sekali per rentetan kegagalan — bukan
+                            # banjir log tiap 15 detik selama jaringan putus.
+                            if not gagal_pembaca:
+                                gagal_pembaca = True
+                                print(
+                                    "Pembaca pasar gagal — denyut dilewatkan, "
+                                    f"tidak ada keputusan: {e}"
+                                )
+                    if konteks_baik:
+                        tick_cycle(conn, now=sekarang, telegram=telegram,
+                                   transport=transport, shadow=shadow, ctx=ctx,
+                                   fetch=fetch, baca_harga=baca_harga)
+                        # Hanya denyut SUKSES yang memperbarui penanda: bila
+                        # pembaca gagal, denyut berikutnya adalah percobaan
+                        # baca ulang (15 dtk kemudian), bukan tidur 300 dtk.
+                        denyut_terakhir = sekarang
+                elif konteks_baik:
+                    # Antar denyut: cukup baca tombol — jendela 90 detik
+                    # tidak menunggu denyut penuh berikutnya. Kegagalan jaringan
+                    # dilewati sekali lalu dicoba lagi pada bangun berikutnya;
+                    # offset tidak pernah maju saat gagal, jadi antrian update
+                    # di server Telegram tidak hilang.
+                    try:
+                        _polling(conn, ctx, now=sekarang, telegram=telegram,
+                                 transport=transport, shadow=shadow,
+                                 verdict=spread.spread_verdict, fetch=fetch,
+                                 baca_harga=baca_harga)
+                        gagal_polling = False
+                    except Exception as e:
+                        if not gagal_polling:
+                            gagal_polling = True
+                            print(f"Polling Telegram gagal — dilewati: {e}")
             # Tidur selalu, termasuk di luar jam aktif: hitungan denyut harus tetap
             # berjalan supaya perubahan jam lokal langsung diikuti.
-            tidur(HEARTBEAT_S)
+            tidur(POLL_GAP_S)
             siklus += 1
         return 0
     except KeyboardInterrupt:

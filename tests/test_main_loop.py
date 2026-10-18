@@ -839,7 +839,9 @@ def test_main_tanpa_pabrik_transport_melcatat_eksekusi_mati(tmp_path, capsys):
     assert keluar == 0
     assert "eksekusi" in keluaran.lower()
     assert "belum dinyalakan" in keluaran.lower()
-    assert tidur == [main_loop.HEARTBEAT_S]
+    # Kontrak dua-irama (Task shadow runner): bangun loop kini tiap POLL_GAP_S;
+    # denyut penuh (tick) tetap per HEARTBEAT_S — lihat tes dua irama.
+    assert tidur == [main_loop.POLL_GAP_S]
 
 
 def test_main_tidak_pernah_memanggil_pabrik_transport_saat_sakelar_mati(
@@ -1422,3 +1424,171 @@ def test_baca_konteks_idr_dikunci_tidak_dihitung_free(tmp_path):
         ambil_harga=lambda pair: 1000.0)
     assert ctx.free_idr == 0.0
     assert ctx.holdings == []
+
+
+# --------------------------------------------------------------------------
+# Loop dua irama — bangun 15 dtk (polling tombol), denyut penuh 300 dtk
+# --------------------------------------------------------------------------
+
+def test_dua_irama_tick_tiap_heartbeat_polling_tiap_bangun(tmp_path, monkeypatch):
+    conn = _fresh_db(tmp_path)
+    denyut = []
+    monkeypatch.setattr(main_loop, "apply_shadow_gate",
+                        lambda c, *, now=None: denyut.append(now))
+    fetch = _FetchPerekam([])
+    jam = [_ts(hour=12)]
+    tidur_panggilan = []
+
+    def tidur(s):
+        tidur_panggilan.append(s)
+        jam[0] += s
+
+    keluar = main_loop.main(
+        ["--siklus", "3"], conn=conn, telegram=_TelegramPerekam(),
+        fetch=fetch, jam=lambda: jam[0], tidur=tidur)
+
+    assert keluar == 0
+    # Tick penuh HANYA di bangun pertama; dua bangun berikutnya (< 300 dtk)
+    # cukup polling tombol — itulah inti dua irama.
+    assert len(denyut) == 1
+    assert len(fetch.panggilan) == 3       # denyut + 2 inter-denyut
+    assert tidur_panggilan == [main_loop.POLL_GAP_S] * 3
+
+
+def test_pembaca_gagal_denyut_dilewati_polling_ditahan(
+        tmp_path, monkeypatch, capsys):
+    conn = _fresh_db(tmp_path)
+    denyut = []
+    monkeypatch.setattr(main_loop, "apply_shadow_gate",
+                        lambda c, *, now=None: denyut.append(now))
+    fetch = _FetchPerekam([])
+    panggilan_pembaca = []
+
+    def pembaca(c):
+        panggilan_pembaca.append(c)
+        if len(panggilan_pembaca) >= 2:
+            raise RuntimeError("jaringan putus")
+        return main_loop._konteks_kosong()
+
+    dasar = _ts(hour=12)
+    urutan = [dasar, dasar + 15, dasar + 300, dasar + 315]
+    indeks = [0]
+
+    def jam():
+        nilai = urutan[min(indeks[0], len(urutan) - 1)]
+        indeks[0] += 1
+        return nilai
+
+    keluar = main_loop.main(
+        ["--siklus", "4"], conn=conn, telegram=_TelegramPerekam(),
+        pembaca_konteks=pembaca, fetch=fetch, jam=jam, tidur=lambda s: None)
+
+    keluaran = capsys.readouterr().out
+    assert keluar == 0
+    # Pembaca gagal di denyut 2 -> TANPA tick tambahan, TANPA polling lanjutan.
+    assert len(denyut) == 1
+    assert len(fetch.panggilan) == 2       # denyut + satu inter sebelum gagal
+    # Dua kegagalan beruntun = SATU baris log, bukan banjir.
+    assert keluaran.count("Pembaca pasar gagal") == 1
+    assert "Gagal menjalankan loop" not in keluaran
+
+
+def test_polling_antar_denyut_gagal_loop_tetap_hidup(
+        tmp_path, monkeypatch, capsys):
+    conn = _fresh_db(tmp_path)
+    denyut = []
+    monkeypatch.setattr(main_loop, "apply_shadow_gate",
+                        lambda c, *, now=None: denyut.append(now))
+    panggilan = {"n": 0}
+
+    def fetch(token, *, offset, timeout):
+        panggilan["n"] += 1
+        if panggilan["n"] == 2:
+            raise ConnectionError("jaringan putus")
+        return {"result": []}
+
+    jam = [_ts(hour=12)]
+
+    def tidur(s):
+        jam[0] += main_loop.POLL_GAP_S
+
+    keluar = main_loop.main(
+        ["--siklus", "3"], conn=conn, telegram=_TelegramPerekam(),
+        fetch=fetch, jam=lambda: jam[0], tidur=tidur)
+
+    keluaran = capsys.readouterr().out
+    # Gagal baca Telegram = dilewati sekali, loop tetap hidup, lalu pulih.
+    assert keluar == 0
+    assert panggilan["n"] == 3
+    assert keluaran.count("Polling Telegram gagal") == 1
+    assert len(denyut) == 1
+    assert "Gagal menjalankan loop" not in keluaran
+
+
+def test_sapa_awal_hanya_bila_ada_fetch(tmp_path):
+    conn = _fresh_db(tmp_path)
+    telegram = _TelegramPerekam()
+    fetch = _FetchPerekam([])
+
+    keluar = main_loop.main(
+        ["--siklus", "1"], conn=conn, telegram=telegram, fetch=fetch,
+        jam=lambda: _ts(hour=12), tidur=lambda s: None)
+
+    assert keluar == 0
+    assert telegram.lines, "sapa awal harus terkirim begitu fetch ada"
+    assert "mode bayangan" in telegram.lines[0].lower()
+
+
+# --------------------------------------------------------------------------
+# baca_harga — harga segar saat jawaban diproses (gerbang geser 0,5%)
+# --------------------------------------------------------------------------
+
+def test_baca_harga_menyegarkan_harga_sebelum_jawaban(tmp_path):
+    conn = _fresh_db(tmp_path)
+    telegram = _TelegramPerekam()
+    now = _ts(hour=12)
+    p = _usulan_take_profit(now)              # price_ref = 1400
+    shadow_log.record(conn, p, "proposed", "")
+    main_loop._ingat([p])
+
+    ctx = _ctx(price=900.0)                   # harga basi: 35% dari pesan
+    panggilan = []
+
+    def baca_harga(pair):
+        panggilan.append(pair)
+        return 1400.0                         # harga segar saat tombol ditekan
+
+    fetch = _FetchPerekam([_update_tombol("setuju", p.id)])
+    main_loop._polling(
+        conn, ctx, now=now, telegram=telegram, transport=None, shadow=True,
+        verdict=_ok_verdict, fetch=fetch, baca_harga=baca_harga)
+
+    assert panggilan == ["btc_idr"]
+    assert ctx.prices["btc_idr"] == 1400.0
+    baris = conn.execute(
+        "SELECT outcome FROM proposals WHERE id = ?", (p.id,)).fetchone()
+    # Tanpa penyegaran: harga 900 vs pesan 1400 = hangus, outcome tetap
+    # "proposed". Dengan penyegaran: konfirmasi tercatat.
+    assert baris is not None and baris[0] == "setuju"
+
+
+def test_baca_harga_gagal_konfirmasi_hangus(tmp_path):
+    conn = _fresh_db(tmp_path)
+    telegram = _TelegramPerekam()
+    now = _ts(hour=12)
+    p = _usulan_take_profit(now)
+    shadow_log.record(conn, p, "proposed", "")
+    main_loop._ingat([p])
+
+    ctx = _ctx(price=1400.0)
+    fetch = _FetchPerekam([_update_tombol("setuju", p.id)])
+    main_loop._polling(
+        conn, ctx, now=now, telegram=telegram, transport=None, shadow=True,
+        verdict=_ok_verdict, fetch=fetch, baca_harga=lambda pair: None)
+
+    # Harga tak terbaca = tidak ada keputusan: hangus, outcome tak berubah.
+    assert ctx.prices["btc_idr"] is None
+    baris = conn.execute(
+        "SELECT outcome FROM proposals WHERE id = ?", (p.id,)).fetchone()
+    assert baris is not None and baris[0] == "proposed"
+    assert any("hangus" in b for b in telegram.lines)
