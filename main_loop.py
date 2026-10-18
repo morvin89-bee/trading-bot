@@ -68,6 +68,14 @@ HEARTBEAT_S = 300
 # setelah pesan diterima (rancangan periode shadow, keputusan "dua irama").
 POLL_GAP_S = 15
 
+# Cetak ulang log kegagalan: tiap ke-N percobaan GAGAL BERTURUT-TURUT
+# (I1 review 2026-10-18). Baris pertama tetap muncul di percobaan pertama.
+# Tanpa syarat ini kegagalan permanen menyisakan SATU baris lalu sunyi
+# selamanya; mencetak tiap bangun justru banjir (5.760 baris/hari pada
+# irama 15 detik). Pemulihan dicetak terpisah saat penanda kembali turun
+# (Review Focus #2: "pemulihan dicetak sekali").
+ULANG_LOG_KEGAGALAN = 20
+
 # Jam aktif DITURUNKAN dari `dca_window.DND` (23, 7) — bukan daftar jam kedua.
 # Menyalinnya berarti dua sumber kebenaran yang bisa melenceng satu jam.
 ACTIVE_HOURS = (dca_window.DND[1], dca_window.DND[0])   # (7, 23)
@@ -684,6 +692,11 @@ def main(argv=None, *, conn=None, db_path=None, telegram=None,
         gagal_pembaca = False
         gagal_polling = False
         gagal_denyut = False
+        # Penghitung percobaan gagal berturut-turut per penanda — direset
+        # saat pemulihan (lihat ULANG_LOG_KEGAGALAN).
+        gagal_pembaca_coba = 0
+        gagal_polling_coba = 0
+        gagal_denyut_coba = 0
         while args.siklus is None or siklus < args.siklus:
             sekarang = jam()
             keadaan = load_state(conn)
@@ -746,9 +759,15 @@ def main(argv=None, *, conn=None, db_path=None, telegram=None,
                     try:
                         ambil = _ambil_update(telegram, fetch)
                         promosi = _ada_perintah_ulang(ambil[0])
+                        if gagal_polling:
+                            print(
+                                "Polling Telegram sudah pulih — jalan kembali.")
                         gagal_polling = False
+                        gagal_polling_coba = 0
                     except Exception as e:
-                        if not gagal_polling:
+                        gagal_polling_coba += 1
+                        if (not gagal_polling or
+                                gagal_polling_coba % ULANG_LOG_KEGAGALAN == 0):
                             gagal_polling = True
                             print(f"Polling Telegram gagal — dilewati: {e}")
                 if denyut_penuh or promosi:
@@ -757,13 +776,22 @@ def main(argv=None, *, conn=None, db_path=None, telegram=None,
                     else:
                         try:
                             ctx = pembaca_konteks(conn)
+                            if gagal_pembaca:
+                                print(
+                                    "Pembaca pasar sudah pulih — denyut jalan "
+                                    "kembali.")
                             gagal_pembaca = False
+                            gagal_pembaca_coba = 0
                             konteks_baik = True
                         except Exception as e:
                             konteks_baik = False
-                            # Cetak sekali per rentetan kegagalan — bukan
-                            # banjir log tiap 15 detik selama jaringan putus.
-                            if not gagal_pembaca:
+                            # Cetak di percobaan pertama lalu tiap ke-20
+                            # percobaan berturut-turut — bukan banjir log tiap
+                            # 15 detik, tapi juga bukan sunyi selamanya bila
+                            # kegagalan ternyata permanen (I1 review).
+                            gagal_pembaca_coba += 1
+                            if (not gagal_pembaca or
+                                    gagal_pembaca_coba % ULANG_LOG_KEGAGALAN == 0):
                                 gagal_pembaca = True
                                 print(
                                     "Pembaca pasar gagal — denyut dilewatkan, "
@@ -780,15 +808,22 @@ def main(argv=None, *, conn=None, db_path=None, telegram=None,
                             # bangun berikutnya (15 dtk) — proses TIDAK boleh
                             # mati (kasus nyata 2026-10-18: timeout Telegram
                             # membunuh bot dan G5 berhenti menghitung). Cetak
-                            # sekali per rentetan, sama seperti polling.
-                            if not gagal_denyut:
+                            # pertama + tiap ke-20 percobaan berturut-turut,
+                            # sama seperti penjaga pembaca dan polling (I1).
+                            gagal_denyut_coba += 1
+                            if (not gagal_denyut or
+                                    gagal_denyut_coba % ULANG_LOG_KEGAGALAN == 0):
                                 gagal_denyut = True
                                 print(
                                     f"Denyut penuh gagal — dilewati, dicoba "
                                     f"lagi: {e}"
                                 )
                         else:
+                            if gagal_denyut:
+                                print(
+                                    "Denyut penuh sudah pulih — jalan kembali.")
                             gagal_denyut = False
+                            gagal_denyut_coba = 0
                             # Hanya denyut SUKSES yang memperbarui penanda: bila
                             # gagal, denyut berikutnya adalah percobaan ulang
                             # (15 dtk kemudian), bukan tidur 300 dtk.
@@ -814,7 +849,9 @@ def main(argv=None, *, conn=None, db_path=None, telegram=None,
                             apply_shadow_gate(conn, now=sekarang)
                         gagal_polling = False
                     except Exception as e:
-                        if not gagal_polling:
+                        gagal_polling_coba += 1
+                        if (not gagal_polling or
+                                gagal_polling_coba % ULANG_LOG_KEGAGALAN == 0):
                             gagal_polling = True
                             print(f"Polling Telegram gagal — dilewati: {e}")
             # Tidur selalu, termasuk di luar jam aktif: hitungan denyut harus tetap

@@ -1792,3 +1792,114 @@ def test_update_beracun_tidak_membuang_saudaranya(tmp_path, capsys):
         "kegagalan satu update harus tercatat, bukan sunyi")
     assert any("tidak dikenal" in b for b in telegram.lines), (
         "saudara sebatch harus tetap diproses")
+
+
+# --------------------------------------------------------------------------
+# Review 2026-10-18 — I1: kegagalan terus-menerus tidak boleh berakhir sunyi
+# (Review Focus #2 rencana: "pemulihan dicetak sekali" — selama ini tidak
+# pernah dicetak, dan kegagalan permanen hanya menghasilkan SATU baris).
+# --------------------------------------------------------------------------
+
+def test_pemulihan_polling_dicetak_setelah_gagal(tmp_path, capsys):
+    """Sewaktu `gagal_polling` turun kembali, PEMULIHAN harus terlihat —
+    tanpa itu kegagalan singkat dan kegagalan permanen sama-sama sunyi."""
+    conn = _fresh_db(tmp_path)
+    panggilan = {"n": 0}
+
+    def fetch(token, *, offset, timeout):
+        panggilan["n"] += 1
+        if panggilan["n"] == 2:
+            raise ConnectionError("jaringan putus")
+        return {"result": []}
+
+    jam = [_ts(hour=12)]
+
+    def tidur(s):
+        jam[0] += main_loop.POLL_GAP_S
+
+    keluar = main_loop.main(
+        ["--siklus", "3"], conn=conn, telegram=_TelegramPerekam(),
+        fetch=fetch, jam=lambda: jam[0], tidur=tidur)
+
+    keluaran = capsys.readouterr().out
+    assert keluar == 0
+    assert keluaran.count("Polling Telegram gagal") == 1
+    assert "Polling Telegram sudah pulih" in keluaran, (
+        "pemulihan harus dicetak — Review Focus #2")
+
+
+def test_pemulihan_pembaca_dicetak_setelah_gagal(tmp_path, monkeypatch, capsys):
+    conn = _fresh_db(tmp_path)
+    denyut = []
+    monkeypatch.setattr(main_loop, "apply_shadow_gate",
+                        lambda c, *, now=None: denyut.append(now))
+    panggilan_pembaca = []
+
+    def pembaca(c):
+        panggilan_pembaca.append(c)
+        if len(panggilan_pembaca) == 2:
+            raise RuntimeError("jaringan putus")
+        return main_loop._konteks_kosong()
+
+    dasar = _ts(hour=12)
+    urutan = [dasar, dasar + 15, dasar + 300, dasar + 315]
+    indeks = [0]
+
+    def jam():
+        nilai = urutan[min(indeks[0], len(urutan) - 1)]
+        indeks[0] += 1
+        return nilai
+
+    keluar = main_loop.main(
+        ["--siklus", "4"], conn=conn, telegram=_TelegramPerekam(),
+        pembaca_konteks=pembaca, fetch=_FetchPerekam([]),
+        jam=jam, tidur=lambda s: None)
+
+    keluaran = capsys.readouterr().out
+    assert keluar == 0
+    assert keluaran.count("Pembaca pasar gagal") == 1
+    assert "Pembaca pasar sudah pulih" in keluaran
+
+
+def test_pemulihan_denyut_dicetak_setelah_gagal(tmp_path, monkeypatch, capsys):
+    conn = _fresh_db(tmp_path)
+    hitung = {"panggil": 0}
+
+    def denyut_semicoba(*_, **__):
+        hitung["panggil"] += 1
+        if hitung["panggil"] == 1:
+            raise RuntimeError("Read timed out. (read timeout=10)")
+        return "kosong"
+
+    monkeypatch.setattr(main_loop, "tick_cycle", denyut_semicoba)
+    keluar = main_loop.main(
+        ["--siklus", "2"], conn=conn, telegram=_TelegramPerekam(),
+        fetch=_FetchPerekam([]), jam=lambda: _ts(hour=12),
+        tidur=lambda s: None)
+
+    keluaran = capsys.readouterr().out
+    assert keluar == 0
+    assert keluaran.count("Denyut penuh gagal") == 1
+    assert "Denyut penuh sudah pulih" in keluaran
+
+
+def test_kegagalan_polling_dicetak_ulang_setiap_20_percobaan(tmp_path, capsys):
+    """Kegagalan permanen: baris pertama + cetak ulang ke-20 — bukan SUNYI
+    selamanya setelah satu baris, dan bukan banjir 5.760 baris per hari."""
+    conn = _fresh_db(tmp_path)
+    panggilan = {"n": 0}
+
+    def fetch(token, *, offset, timeout):
+        panggilan["n"] += 1
+        if panggilan["n"] == 1:
+            return {"result": []}          # denyut pertama sehat
+        raise ConnectionError("jaringan putus")
+
+    keluar = main_loop.main(
+        ["--siklus", "21"], conn=conn, telegram=_TelegramPerekam(),
+        fetch=fetch, jam=lambda: _ts(hour=12), tidur=lambda s: None)
+
+    keluaran = capsys.readouterr().out
+    assert keluar == 0
+    # 20 kegagalan berturut-turut (bangun 2..21): cetak di percobaan 1 dan 20.
+    assert keluaran.count("Polling Telegram gagal") == 2
