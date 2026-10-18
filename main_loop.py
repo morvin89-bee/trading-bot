@@ -419,23 +419,34 @@ def _proses_batch(conn, ctx, updates, *, now, telegram, transport, shadow,
     """
     diulang = False
     for update in updates:
-        parsed = telegram_gate.parse_update(update)
-        if parsed is None:
-            continue
-        aksi, id_usulan = parsed
-        if aksi == "ulang":
-            diulang = True
-        if baca_harga is not None:
-            pair = getattr(_USULAN_MENUNGGU.get(id_usulan), "pair", None)
-            if pair is not None:
-                try:
-                    ctx.prices[pair] = baca_harga(pair)
-                except Exception:
-                    ctx.prices[pair] = None
-        _jawab(
-            conn, ctx, aksi, id_usulan, now=now, telegram=telegram,
-            transport=transport, shadow=shadow, verdict=verdict,
-        )
+        try:
+            parsed = telegram_gate.parse_update(update)
+            if parsed is None:
+                continue
+            aksi, id_usulan = parsed
+            if aksi == "ulang":
+                diulang = True
+            if baca_harga is not None:
+                pair = getattr(_USULAN_MENUNGGU.get(id_usulan), "pair", None)
+                if pair is not None:
+                    try:
+                        ctx.prices[pair] = baca_harga(pair)
+                    except Exception:
+                        ctx.prices[pair] = None
+            _jawab(
+                conn, ctx, aksi, id_usulan, now=now, telegram=telegram,
+                transport=transport, shadow=shadow, verdict=verdict,
+            )
+        except Exception as e:
+            # I2 (review 2026-10-18): offset sudah maju untuk SELURUH batch,
+            # jadi satu update beracun tidak boleh membuang saudaranya
+            # diam-diam (tombol Setuju/Batal yang hilang tanpa jejak).
+            # Dicatat jujur SEKALI — offset maju berarti update ini tidak
+            # diantar ulang, sehingga barisnya tidak pernah jadi banjir —
+            # lalu antrian dilanjutkan ke update berikutnya.
+            print(
+                f"Satu update Telegram gagal diproses — dilewati, tidak "
+                f"dikirim ulang: {e}")
     return diulang
 
 

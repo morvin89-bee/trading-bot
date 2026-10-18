@@ -1763,3 +1763,32 @@ def test_polling_antar_denyut_ditahan_saat_transport_ada(tmp_path):
     assert keluar == 0
     assert len(fetch.panggilan) == 1, (
         "fetch hanya di denyut penuh — polling antar-denyut ditahan")
+
+
+def test_update_beracun_tidak_membuang_saudaranya(tmp_path, capsys):
+    """I2 (review): offset Telegram dimajukan SEBELUM batch diproses — tanpa
+    guard per update, satu balasan tak terduga di tengah antrian membuang
+    sisa update diam-diam (tombol Setuju/Batal hilang tanpa jejak, pengguna
+    mengira sudah terjawab).
+
+    Kontrak baru: update beracun dicatat jujur SEKALI (offset maju = tidak
+    diulang, jadi bukan banjir log) lalu dilewati; saudara sebatch tetap
+    diproses.
+    """
+    conn = _fresh_db(tmp_path)
+    telegram = _TelegramPerekam()
+    fetch = _FetchPerekam([
+        {"update_id": 9, "callback_query": 42},   # rusak: "data" in 42 -> TypeError
+        _update_tombol("tunda", "usulan-tak-ada"),
+    ])
+
+    keluar = main_loop.main(
+        ["--siklus", "1"], conn=conn, telegram=telegram, fetch=fetch,
+        jam=lambda: _ts(hour=12), tidur=lambda s: None)
+
+    keluaran = capsys.readouterr().out
+    assert keluar == 0
+    assert "update" in keluaran.lower() and "gagal" in keluaran.lower(), (
+        "kegagalan satu update harus tercatat, bukan sunyi")
+    assert any("tidak dikenal" in b for b in telegram.lines), (
+        "saudara sebatch harus tetap diproses")
