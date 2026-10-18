@@ -62,7 +62,20 @@ def live_fetch(token: str, *, offset: int = 0, timeout: int = 0,
     url = f"https://api.telegram.org/bot{token}/getUpdates"
     hasil = get(url, params={"offset": offset, "timeout": timeout},
                 timeout=max(timeout, 10))
-    return hasil.json()
+    # `requests.get` TIDAK melempar pada status 4xx/5xx, dan Telegram balas
+    # {"ok": false} untuk 401 (token mati), 404, 409 (getUpdates ganda),
+    # 429, dan 5xx. Tanpa dua pemeriksaan ini balasan gagal dianggap
+    # "tanpa update" oleh `get_updates` — polling terlihat sehat tanpa satu
+    # baris log (kontrak §3.1: gagal = melempar, pemanggil yang mencatat).
+    periksa = getattr(hasil, "raise_for_status", None)
+    if periksa is not None:  # fake bertest sengaja tidak punya metode ini
+        periksa()
+    data = hasil.json()
+    if not data.get("ok"):
+        raise RuntimeError(
+            f"Telegram menolak: {data.get('error_code')} "
+            f"{data.get('description')}")
+    return data
 
 
 def parse_update(update: dict) -> tuple[str, str] | None:

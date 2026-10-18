@@ -114,3 +114,68 @@ def test_live_fetch_tanpa_get_memakai_requests_asli():
     import telegram_gate
     bawaan = inspect.signature(telegram_gate.live_fetch).parameters["get"].default
     assert bawaan is requests.get
+
+
+# --------------------------------------------------------------------------
+# C2 (review 2026-10-18): galat API Telegram TIDAK boleh disamarkan jadi
+# "tanpa update" — requests.get tidak melempar pada status 4xx/5xx, dan
+# Telegram balas {"ok": false} untuk 401/404/409/429/5xx.
+# --------------------------------------------------------------------------
+
+def test_live_fetch_balasan_ok_false_melempar_bukan_diam():
+    """Token mati / rate limit / getUpdates ganda (409) = lempar, bukan [].
+
+    Tanpa pemeriksaan ini kegagalan API tampil sebagai polling sehat tanpa
+    satu baris log pun — melanggar kontrak §3.1 (gagal = melempar,
+    pemanggil yang menahan dan mencatat) dan menyembunyikan sinyal 409
+    (dua pemilik getUpdates) dari Review Focus #5.
+    """
+    import pytest
+    import telegram_gate
+
+    class _ResponsApi:
+        status_code = 401
+
+        def json(self):
+            return {"ok": False, "error_code": 401,
+                    "description": "Unauthorized"}
+
+    def get_palsu(url, params=None, timeout=None):
+        return _ResponsApi()
+
+    with pytest.raises(RuntimeError, match="Telegram menolak: 401 Unauthorized"):
+        telegram_gate.live_fetch("TOKEN", get=get_palsu)
+
+
+def test_live_fetch_galat_status_http_dibawa_melempar():
+    """Bila objeknya respons `requests` sungguhan, status 4xx/5xx ikut naik."""
+    import pytest
+    import requests
+    import telegram_gate
+
+    class _ResponsHttp:
+        status_code = 500
+
+        def raise_for_status(self):
+            raise requests.HTTPError("500 Server Error")
+
+        def json(self):  # tak akan sempat dipanggil
+            return {}
+
+    def get_palsu(url, params=None, timeout=None):
+        return _ResponsHttp()
+
+    with pytest.raises(requests.HTTPError):
+        telegram_gate.live_fetch("TOKEN", get=get_palsu)
+
+
+def test_live_fetch_balasan_ok_true_tetap_dikembalikan():
+    """Jalur sehat tidak berubah: ok=true diteruskan apa adanya."""
+    import telegram_gate
+
+    class _Respons:
+        def json(self):
+            return {"ok": True, "result": [{"update_id": 5}]}
+
+    hasil = telegram_gate.live_fetch("TOKEN", get=lambda *a, **k: _Respons())
+    assert hasil == {"ok": True, "result": [{"update_id": 5}]}
