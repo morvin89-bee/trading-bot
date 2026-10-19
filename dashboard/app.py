@@ -48,6 +48,14 @@ st_cfg = cfg["strategy"]
 
 SHARED_STATE_FILE = "dashboard_shared_state.json"
 
+# Fallback interval pengambilan data (ms) bila config tidak menyebutnya.
+#
+# Dulu 3000 ms — dan itu pemicu HTTP 429 nyata (2026-10-19): 13 pair x 2
+# exchange = 26 request per siklus, 3000 ms = 8.67 request/detik, padahal
+# pemakaian yang dianggap scanner.py sendiri aman ~ 2.6/detik. 10000 ms
+# mengembalikan laju ke pola yang sudah terbukti tidak memicu 429.
+FALLBACK_REFRESH_MS = 10_000
+
 def init_app_state():
     """Initialize all app state - call this once at startup."""
     if "app_initialized" not in st.session_state:
@@ -64,7 +72,7 @@ def init_app_state():
             shared_state=st.session_state.shared_state,
             strategy=st.session_state.strategy,
             pairs=pairs,
-            interval=st_cfg.get("refresh_interval", 3000) // 1000,
+            interval=st_cfg.get("refresh_interval", FALLBACK_REFRESH_MS) // 1000,
             db_path="trades.db"
         )
         st.session_state.bg_updater.start()
@@ -173,13 +181,35 @@ def fetch_market_data_sync():
     return market_data
 
 
+def _harga_habis(data, umur_maks=90):
+    """True bila data pasar hilang, error, atau basi (> umur_maks detik).
+
+    Menampung kasus nyata 2026-10-19: saat API menolak (HTTP 429), data basi
+    dipakai ulang supaya dashboard tetap hidup — tapi jangan sampai dipakai
+    sebagai harga "baru".
+    """
+    if not data:
+        return True
+    if any("error" in d for d in data.values()):
+        return True
+    if any(d.get("basi") for d in data.values()):
+        return True
+    return time.time() - (max((d.get("timestamp", 0) for d in data.values()), default=0)) > umur_maks
+
+
 def ensure_market_data():
     """Ensure market data is available, fetching synchronously if needed."""
     market_data = shared_state.get("market_data", {})
     last_update = shared_state.get("last_update", 0)
     
-    # If no market data or data is stale (> 30 seconds), fetch synchronously
-    if not market_data or (time.time() - last_update > 30):
+    # Jangan panggil API kalau BackgroundUpdater sudah menyiapkan data.
+    # Data basi (rate limit) tetap dipakai — lebih baik harga tua yang jelas
+    # berumur daripada menembak API lagi dan memperparah HTTP 429.
+    if market_data and not _harga_habis(market_data):
+        return market_data
+
+    # Fallback sinkron hanya bila benar-benar belum ada data.
+    if not market_data:
         with st.spinner("Fetching market data..."):
             market_data = fetch_market_data_sync()
             shared_state.update({
@@ -187,8 +217,9 @@ def ensure_market_data():
                 "last_update": time.time(),
                 "last_error": None
             })
-    
-    return shared_state.get("market_data", {})
+        return shared_state.get("market_data", {})
+
+    return market_data
 
 
 # --- Helper Functions ---
@@ -248,6 +279,22 @@ def tab_market_overview():
     with col_status2:
         if last_error:
             st.error(f"⚠️ Error: {last_error}")
+
+    # Ringkasan kesehatan data — supaya angka tua tidak disangka harga baru.
+    n = len(market_data)
+    n_basi = sum(1 for d in market_data.values() if d.get("basi"))
+    n_gagal = sum(1 for d in market_data.values() if "error" in d)
+    if market_data:
+        if n_gagal:
+            st.warning(
+                f"⚠️ {n_gagal} dari {n} pair gagal diambil (kemungkinan HTTP 429 "
+                f"atau koneksi). Data lama dipakai ulang untuk pair sisanya.")
+        if n_basi and not n_gagal:
+            st.info(
+                f"ℹ️ {n_basi} dari {n} pair memakai harga terakhir (basi) — menunggu "
+                f"pembaruan berikutnya. Buka tab Control untuk melihat Last Error.")
+        if n_basi and n_gagal:
+            st.caption(f"ℹ️ {n_basi} pair basi, {n_gagal} pair gagal, {n - n_basi - n_gagal} pair segar.")
     
     # All pairs from scanner
     pairs_list = [p[1] for p in scanner.PAIRS]

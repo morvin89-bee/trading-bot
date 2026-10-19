@@ -32,4 +32,4 @@ strategy:
 
   # App settings (for dashboard display)
   version: "1.0.0"
-  refresh_interval: 3000        # ms, otomatis refresh dashboard
+  refresh_interval: 10000        # ms, otomatis refresh dashboard

@@ -89,27 +89,31 @@ class BackgroundUpdater:
         logger.info("BackgroundUpdater stopped")
 
     def _run(self) -> None:
-        """Main loop background thread."""
+        """Main loop background thread.
+
+        Sengaja tidak pernah melempar keluar: kegagalan mengambil harga (mis.
+        HTTP 429) harus terlihat di SharedState, bukan mematikan thread diam-
+        diam — kasus nyata 2026-10-19: backoff 429 di dalam loop pair membuat
+        iterasi memakan belasan menit dan terminal hanya memunculkan "HTTP
+        429".
+        """
         print("[DEBUG] BackgroundUpdater _run started")
         while self._running:
             start_time = time.time()
-            
+
             try:
                 market_data = self._fetch_all_pairs()
-                print("[DEBUG] Fetched market data for {} pairs".format(len(market_data)))
-                
-                # Update SharedState atomically
                 self.state.update({
                     "market_data": market_data,
                     "last_update": time.time(),
                     "last_error": None
                 })
-                
+
             except Exception as e:
-                error_msg = str(e)
+                error_msg = f"{type(e).__name__}: {e}"
                 logger.error("BackgroundUpdater error: {0}".format(error_msg))
                 self.state.set("last_error", error_msg)
-            
+
             # Sleep hingga interval selesai
             elapsed = time.time() - start_time
             sleep_time = max(0, self.interval - elapsed)
@@ -117,22 +121,34 @@ class BackgroundUpdater:
                 time.sleep(sleep_time)
 
     def _fetch_all_pairs(self) -> Dict[str, Any]:
+        """Ambil data untuk semua pairs; pair gagal pakai harga lama + tanda basi.
+
+        Tanpa penyimpanan ini, satu pair gagal karena rate limit lenyap dari
+        dashboard dan tombolnya berubah jadi "Error" — walau harga lama masih
+        layak ditampilkan sambil menunggu.
         """
-        Ambil data untuk semua pairs.
-        Returns dict: {pair: {z_I, z_T, spread_I, spread_T, signal, prices...}}
-        """
-        market_data = {}
-        
+        hasil_baru: Dict[str, Any] = {}
         for pair in self.pairs:
             try:
                 data = self._fetch_pair_data(pair)
-                if data:
-                    market_data[pair] = data
-                    
             except Exception as e:
                 logger.warning(f"Error fetching {pair}: {e}")
-                market_data[pair] = {"error": str(e)}
-        
+                data = None
+            if data:
+                hasil_baru[pair] = data
+
+        market_data: Dict[str, Any] = {}
+        for pair in self.pairs:
+            if pair in hasil_baru:
+                market_data[pair] = hasil_baru[pair]
+                continue
+            lama = self.state.get("market_data", {}).get(pair)
+            if lama and "error" not in lama:
+                lama["basi"] = True   # harga terakhir, tapi sudah kadaluarsa
+                market_data[pair] = lama
+            else:
+                market_data[pair] = {"error": "gagal mengambil harga (rate limit/koneksi)"}
+
         return market_data
 
     def _fetch_pair_data(self, pair: str) -> Optional[Dict[str, Any]]:
@@ -149,6 +165,13 @@ class BackgroundUpdater:
             bid_t, ask_t = scanner.tokocrypto_price(symbol)
         except Exception as e:
             logger.warning(f"Failed to fetch prices for {pair}: {e}")
+            return None
+
+        # Kedua harga wajib ada sebelum dihitung; `None` berarti rate limit /
+        # koneksi gagal — kembalikan None supaya _fetch_all_pairs pakai data
+        # lama, jangan sampai memicu TypeError yang mematikan seluruh iterasi.
+        if bid_i is None or bid_t is None:
+            logger.warning(f"Harga tidak lengkap untuk {pair} (rate limit/koneksi)")
             return None
         
         # 2. Hitung spread

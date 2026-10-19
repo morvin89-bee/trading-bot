@@ -50,6 +50,27 @@ def bahasa_hasil(outcome):
     return _KODE.get(outcome, outcome)
 
 
+def basis_data_kosong(pesan):
+    """True HANYA bila galat = skema/kolom belum pernah dibuat (M1 review).
+
+    Galat lain — "database is locked", "disk image is malformed" — BUKAN
+    kabar baik: memakainya sebagai "belum ada catatan" menampilkan angka
+    "nol penolakan" palsu tepat pada tab yang dipercaya untuk G5. Jujur:
+    bila tidak bisa dibaca, katakan tidak bisa dibaca.
+    """
+    return "no such table" in pesan or "no such column" in pesan
+
+
+def peringatan_ditolak(rekap):
+    """True bila rekap memuat penolakan — memakai KODE ASLI (M5 review).
+
+    Substring terjemahan "ditolak" membosan: hasil asing yang gagal
+    diterjemahkan (mis. "blok_rejected") tidak pernah berisi kata itu, lalu
+    tampil HIJAU seolah nol penolakan padahal penolakan.
+    """
+    return any("_rejected" in k for k in rekap)
+
+
 def rekap_hasil(baris):
     """`baris` pasangan (outcome, jumlah) → dict penghitungan per jenis."""
     rekap = {}
@@ -119,12 +140,18 @@ def _rekap_hari_ini(conn):
         baris = conn.execute(
             "SELECT outcome, COUNT(*) FROM proposals WHERE day = ? "
             "GROUP BY outcome", (hari_ini,)).fetchall()
-    except sqlite3.OperationalError:
-        # Tabel proposals belum pernah dibuat = belum ada usulan sama sekali.
-        st.info("Belum ada catatan usulan hari ini — nol penolakan.")
+    except sqlite3.OperationalError as e:
+        if basis_data_kosong(str(e)):
+            # Skema belum pernah dibuat = memang belum ada usulan sama sekali.
+            st.info("Belum ada catatan usulan hari ini — nol penolakan.")
+            return
+        # Galat lain BUKAN "nol penolakan" (M1): tampilkan ketidakmampuan
+        # membaca apa adanya, jangan menutupinya dengan angka karangan.
+        st.error(f"Gagal membaca basis data — angka hari ini tidak diketahui: {e}")
         return
-    teks = teks_rekap(rekap_hasil(baris))
-    if "ditolak" in teks:
+    rekap = rekap_hasil(baris)
+    teks = teks_rekap(rekap)
+    if peringatan_ditolak(rekap):
         st.warning(teks)
     else:
         st.success(teks)
@@ -136,8 +163,13 @@ def _log_terakhir(conn, batas=20):
         baris = conn.execute(
             "SELECT ts, kind, pair, amount_idr, outcome, note "
             "FROM proposals ORDER BY ts DESC LIMIT ?", (batas,)).fetchall()
-    except sqlite3.OperationalError:
-        st.info("Belum ada log sama sekali.")
+    except sqlite3.OperationalError as e:
+        if basis_data_kosong(str(e)):
+            st.info("Belum ada log sama sekali.")
+            return
+        # Galat nyata ≠ log kosong (M1): jangan menutupi ketidakmampuan
+        # membaca dengan "belum ada" yang menenangkan tapi palsu.
+        st.error(f"Gagal membaca basis data — log tidak diketahui: {e}")
         return
     if not baris:
         st.info("Belum ada usulan yang tercatat.")
