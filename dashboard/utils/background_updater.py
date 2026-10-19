@@ -221,6 +221,14 @@ class BackgroundUpdater:
         return self._running
 
 
+# SATU updater per proses. Kasus nyata 14-19 Okt 2026 (errors.log: ribuan
+# HTTP 429 per jam): tiap sesi Streamlit (tab baru / reload) membangun
+# BackgroundUpdater BARU dan thread lama tidak pernah mati — beban request
+# berlipat sebanyak jumlah sesi, dan riwayat z-score strategi (yang singleton
+# global di strategy_wrapper) terganda tiap siklus.
+_UPDATER_SATUAN: Optional["BackgroundUpdater"] = None
+
+
 def create_background_updater(
     shared_state: SharedState,
     strategy: mr.MeanReversionStrategy,
@@ -230,14 +238,24 @@ def create_background_updater(
 ) -> BackgroundUpdater:
     """
     Factory function untuk membuat BackgroundUpdater dengan default pairs.
+
+    Mengembalikan instance SATUAN per proses: sesi baru (tab/reload) menerima
+    updater yang sama selama masih hidup. Updater mati (thread berhenti)
+    otomatis diganti yang baru. Params dari pemanggilan pertama yang dipakai.
     """
+    global _UPDATER_SATUAN
+    lama = _UPDATER_SATUAN
+    if lama is not None and (lama.is_running() or lama._thread is None):
+        return lama
+
     if pairs is None:
         pairs = [p[1] for p in scanner.PAIRS]
-    
-    return BackgroundUpdater(
+
+    _UPDATER_SATUAN = BackgroundUpdater(
         shared_state=shared_state,
         strategy=strategy,
         pairs=pairs,
         interval=interval,
         db_path=db_path
     )
+    return _UPDATER_SATUAN

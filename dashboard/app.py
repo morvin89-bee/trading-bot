@@ -75,7 +75,10 @@ def init_app_state():
             interval=st_cfg.get("refresh_interval", FALLBACK_REFRESH_MS) // 1000,
             db_path="trades.db"
         )
-        st.session_state.bg_updater.start()
+        # Updater adalah SATUAN per proses (tab baru/reload memakai yang sama);
+        # start() hanya bila belum berjalan supaya tidak memicu peringatan.
+        if not st.session_state.bg_updater.is_running():
+            st.session_state.bg_updater.start()
         
         st.session_state.app_initialized = True
         st.session_state.last_data_timestamp = 0
@@ -96,11 +99,9 @@ def get_bg_updater():
 if "app_initialized" not in st.session_state:
     init_app_state()
 
-# Ensure BackgroundUpdater is started (lazy start)
-if "bg_started" not in st.session_state:
-    bg_updater = get_bg_updater()
-    bg_updater.start()
-    st.session_state.bg_started = True
+# Updater sudah dijalankan sekali di init_app_state (singleton per proses).
+# Blok "lazy start" lama memanggil start() KEDUA kali tiap sesi baru —
+# tiap reload mengeluarkan peringatan "sudah berjalan" tanpa guna.
 
 # Get references
 shared_state = get_shared_state_obj()
