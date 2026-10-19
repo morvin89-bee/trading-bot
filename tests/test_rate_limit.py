@@ -31,6 +31,93 @@ class _Respon:
             raise requests.exceptions.HTTPError(f"{self.status_code}")
 
 
+def _buat_updater(pairs):
+    """Bangun BackgroundUpdater tanpa __init__ (yang menyentuh jaringan)."""
+    import dashboard.utils.background_updater as bu
+    updater = object.__new__(bu.BackgroundUpdater)
+    updater.state = _Palsu({})
+    updater.pairs = pairs
+    updater.strategy = _StrategiPalsu()
+    return updater
+
+
+def _pasang_harga_gagal(monkeypatch):
+    """sol_idr gagal di kedua exchange; pasangan lain sehat."""
+    import dashboard.utils.background_updater as bu
+    monkeypatch.setattr(
+        bu.scanner, "indodax_price",
+        lambda pair: None if pair == "sol_idr" else (100.0, 101.0))
+    monkeypatch.setattr(
+        bu.scanner, "tokocrypto_price",
+        lambda sym: None if sym == "SOLIDR" else (200.0, 201.0))
+    monkeypatch.setattr(
+        bu.mr.MeanReversionStrategy, "calculate_spread",
+        lambda *a, **k: (1.0, 2.0))
+
+
+def test_harga_none_pakai_jalur_data_lama_bukan_jalur_kegagalan(
+        monkeypatch, caplog):
+    """Kasus nyata 2026-10-19 (errors.log): `sol_idr` gagal diambil.
+
+    Kode rusak: `a, b = None` -> TypeError -> "Failed to fetch prices".
+    Kode benar : `None` dicek dulu  -> "Harga tidak lengkap".
+
+    Keduanya mengembalikan None, jadi TIDAK bisa dibedakan lewat nilai
+    kembalian — yang membedakan adalah JALUR yang ditempuh, dan itu
+    terlihat di log. Menguji log = menguji perilaku yang benar-benar
+    membedakan.
+    """
+    import logging
+    updater = _buat_updater(["sol_idr", "btc_idr"])
+    _pasang_harga_gagal(monkeypatch)
+
+    with caplog.at_level(logging.WARNING):
+        updater._fetch_all_pairs()
+
+    pesan = "\n".join(r.message for r in caplog.records)
+    assert "sol_idr" in updater.pairs, "prasyarat: sol_idr memang dipantau"
+    assert "Harga tidak lengkap" in pesan, (
+        "pair gagal harus lewat jalur 'data lama', bukan jalur kegagalan")
+    assert "Failed to fetch prices" not in pesan, (
+        "jalur 'Failed to fetch' berarti None sempat di-unpack (kode rusak)")
+    assert "cannot unpack" not in pesan
+
+
+def test_pair_lain_tetap_sukses_saat_satu_pair_gagal(monkeypatch):
+    """Satu pair gagal TIDAK menggugurkan pasangan lain (siklus tetap penuh)."""
+    updater = _buat_updater(["sol_idr", "btc_idr", "eth_idr"])
+    _pasang_harga_gagal(monkeypatch)
+
+    hasil = updater._fetch_all_pairs()
+
+    sehat = [p for p in ("btc_idr", "eth_idr") if p in hasil
+             and "error" not in hasil[p]]
+    assert len(sehat) == 2, f"pair sehat hilang dari hasil: {list(hasil)}"
+
+
+class _Palsu:
+    """SharedState tiruan — cukup untuk _fetch_all_pairs."""
+
+    def __init__(self, isi):
+        self._isi = isi
+
+    def get(self, kunci, awal=None):
+        return self._isi.get(kunci, awal)
+
+
+class _StrategiPalsu:
+    """Strategi tiruan — metode yang dipakai _fetch_pair_data."""
+
+    def update_history(self, *a, **k):
+        pass
+
+    def compute_zscore(self, *a, **k):
+        return 0.0
+
+    def check_signal(self, *a, **k):
+        return None
+
+
 def _pasang(monkeypatch, respon):
     """Ganti requests.get agar selalu mengembalikan `respon`."""
     import requests

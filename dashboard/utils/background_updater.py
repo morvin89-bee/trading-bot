@@ -156,23 +156,22 @@ class BackgroundUpdater:
         Ambil data untuk satu pair.
         """
         # 1. Dapatkan harga dari kedua exchange
+        # 1. Dapatkan harga dari kedua exchange. `scanner.*_price` mengembalikan
+        #    None bila gagal (rate limit/koneksi) — jadi jangan langsung di-unpack:
+        #    `a, b = None` melempar TypeError dan melempar keluar pair ini lewat
+        #    jalur kegagalan, bukan lewat jalur "pakai data lama" yang benar.
         symbol = PAIR_TO_SYMBOL.get(pair)
         if not symbol:
             return None
-        
-        try:
-            bid_i, ask_i = scanner.indodax_price(pair)
-            bid_t, ask_t = scanner.tokocrypto_price(symbol)
-        except Exception as e:
-            logger.warning(f"Failed to fetch prices for {pair}: {e}")
-            return None
 
-        # Kedua harga wajib ada sebelum dihitung; `None` berarti rate limit /
-        # koneksi gagal — kembalikan None supaya _fetch_all_pairs pakai data
-        # lama, jangan sampai memicu TypeError yang mematikan seluruh iterasi.
-        if bid_i is None or bid_t is None:
-            logger.warning(f"Harga tidak lengkap untuk {pair} (rate limit/koneksi)")
+        harga_i = scanner.indodax_price(pair)
+        harga_t = scanner.tokocrypto_price(symbol)
+        if harga_i is None or harga_t is None:
+            logger.warning(
+                f"Harga tidak lengkap untuk {pair} (rate limit/koneksi)")
             return None
+        bid_i, ask_i = harga_i
+        bid_t, ask_t = harga_t
         
         # 2. Hitung spread
         spread_I_to_T, spread_T_to_I = mr.MeanReversionStrategy.calculate_spread(
