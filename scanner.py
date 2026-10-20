@@ -84,7 +84,7 @@ def _get_json(url, params=None, max_retries=3):
         with _ANTAR_REQUEST:
             _tunggu_giliran(url)
             try:
-                r = requests.get(url, params=params, timeout=10)
+                r = requests.get(url, params=params, timeout=15)
                 if r.status_code == 429:
                     _catat_429(url)
                     retry_after = r.headers.get("Retry-After")
