@@ -227,6 +227,21 @@ class BackgroundUpdater:
 # berlipat sebanyak jumlah sesi, dan riwayat z-score strategi (yang singleton
 # global di strategy_wrapper) terganda tiap siklus.
 _UPDATER_SATUAN: Optional["BackgroundUpdater"] = None
+# Kunci pemeriksaan-cek-lalu-tulis (review 2026-10-20): tanpa kunci, dua sesi
+# Streamlit yang lahir bersamaan bisa sama-sama lolos syarat dan membangun
+# dua updater — beban request berganda lagi, persis akar 429 yang mau dihapus.
+_KUNCI_SATUAN = threading.Lock()
+
+
+def _masih_hidup(u: "BackgroundUpdater") -> bool:
+    """Thread updater-nya benar-benar jalan — bukan cuma flag `_running`.
+
+    Review 2026-10-20: `is_running()` hanya membaca `_running`, dan `_running`
+    cuma turun lewat `stop()`. Bila thread crash DI LUAR blok try (mis. di
+    `time.sleep`), `_running` tetap True selamanya dan sesi berikutnya
+    menerima updater mayat — dashboard berhenti diam-diam tanpa pengganti.
+    """
+    return u._thread is not None and u._thread.is_alive()
 
 
 def create_background_updater(
@@ -244,18 +259,21 @@ def create_background_updater(
     otomatis diganti yang baru. Params dari pemanggilan pertama yang dipakai.
     """
     global _UPDATER_SATUAN
-    lama = _UPDATER_SATUAN
-    if lama is not None and (lama.is_running() or lama._thread is None):
-        return lama
+    with _KUNCI_SATUAN:
+        lama = _UPDATER_SATUAN
+        # `lama._thread is None` = sudah dibuat tapi belum pernah dijalankan;
+        # tetap dikembalikan supaya sesi kedua tidak membangun saingan.
+        if lama is not None and (_masih_hidup(lama) or lama._thread is None):
+            return lama
 
-    if pairs is None:
-        pairs = [p[1] for p in scanner.PAIRS]
+        if pairs is None:
+            pairs = [p[1] for p in scanner.PAIRS]
 
-    _UPDATER_SATUAN = BackgroundUpdater(
-        shared_state=shared_state,
-        strategy=strategy,
-        pairs=pairs,
-        interval=interval,
-        db_path=db_path
-    )
-    return _UPDATER_SATUAN
+        _UPDATER_SATUAN = BackgroundUpdater(
+            shared_state=shared_state,
+            strategy=strategy,
+            pairs=pairs,
+            interval=interval,
+            db_path=db_path
+        )
+        return _UPDATER_SATUAN
