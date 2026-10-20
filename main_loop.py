@@ -40,7 +40,9 @@ Keterbatasan yang disengaja dan perlu diketahui pembaca berikutnya:
 """
 import argparse
 import dataclasses
+import logging
 import os
+import re
 import time
 import types
 
@@ -56,6 +58,24 @@ import scheduler
 import shadow_log
 import spread
 import telegram_gate
+
+
+def _samarkan_pesan_galat(pesan):
+    """Samarkan token Telegram di pesan galat jaringan sebelum keluar.
+
+    `requests` menyisipkan URL lengkap (termasuk `bot<id>:<rahasia>`) ke dalam
+    pesan pemutusan koneksi. Cetak kasarnya = mencetak token ke `v1_loop.log`.
+    """
+    return re.sub(r"bot\d[\w:-]{10,}", "bot<disamarkan>", str(pesan))
+
+
+def _catat_denyut_dilewatkan(pesan):
+    """Catat denyut yang dilewati (tanpa keputusan) ke `errors.log` dengan cap waktu.
+
+    Baris cetak `v1_loop.log` tidak punya cap waktu, jadi tidak bisa dihitung
+    per hari untuk kejujuran hitungan periode shadow G5.
+    """
+    logging.warning("%s", _samarkan_pesan_galat(pesan))
 
 
 # Denyut jantung: lima menit (plan:1116).
@@ -455,7 +475,7 @@ def _proses_batch(conn, ctx, updates, *, now, telegram, transport, shadow,
             # lalu antrian dilanjutkan ke update berikutnya.
             print(
                 f"Satu update Telegram gagal diproses — dilewati, tidak "
-                f"dikirim ulang: {e}")
+                f"dikirim ulang: {_samarkan_pesan_galat(e)}")
     return diulang
 
 
@@ -680,6 +700,12 @@ def main(argv=None, *, conn=None, db_path=None, telegram=None,
                              "(bawaan: terus).")
     args = parser.parse_args(argv)
 
+    logging.basicConfig(
+        filename="errors.log",
+        level=logging.WARNING,
+        format="%(asctime)s %(levelname)s %(message)s",
+    )
+
     jam = time.time if jam is None else jam
     tidur = time.sleep if tidur is None else tidur
     conn_milik = False
@@ -691,7 +717,7 @@ def main(argv=None, *, conn=None, db_path=None, telegram=None,
             conn_milik = True
         dca_window.ensure_bot_state(conn)
     except Exception as e:
-        print(f"Gagal menyiapkan basis data: {e}")
+        print(f"Gagal menyiapkan basis data: {_samarkan_pesan_galat(e)}")
         return 1
 
     try:
@@ -832,7 +858,7 @@ def main(argv=None, *, conn=None, db_path=None, telegram=None,
                         if (not gagal_polling or
                                 gagal_polling_coba % ULANG_LOG_KEGAGALAN == 0):
                             gagal_polling = True
-                            print(f"Polling Telegram gagal — dilewati: {e}")
+                            print(f"Polling Telegram gagal — dilewati: {_samarkan_pesan_galat(e)}")
                 if denyut_penuh or promosi:
                     if pembaca_konteks is None:
                         konteks_baik = True
@@ -856,10 +882,13 @@ def main(argv=None, *, conn=None, db_path=None, telegram=None,
                             if (not gagal_pembaca or
                                     gagal_pembaca_coba % ULANG_LOG_KEGAGALAN == 0):
                                 gagal_pembaca = True
-                                print(
+                                _pesan_gagal = (
                                     "Pembaca pasar gagal — denyut dilewatkan, "
-                                    f"tidak ada keputusan: {e}"
+                                    f"tidak ada keputusan: "
+                                    f"{_samarkan_pesan_galat(e)}"
                                 )
+                                print(_pesan_gagal)
+                                _catat_denyut_dilewatkan(_pesan_gagal)
                     if konteks_baik:
                         try:
                             tick_cycle(conn, now=sekarang, telegram=telegram,
@@ -877,10 +906,12 @@ def main(argv=None, *, conn=None, db_path=None, telegram=None,
                             if (not gagal_denyut or
                                     gagal_denyut_coba % ULANG_LOG_KEGAGALAN == 0):
                                 gagal_denyut = True
-                                print(
+                                _pesan_gagal = (
                                     f"Denyut penuh gagal — dilewati, dicoba "
-                                    f"lagi: {e}"
+                                    f"lagi: {_samarkan_pesan_galat(e)}"
                                 )
+                                print(_pesan_gagal)
+                                _catat_denyut_dilewatkan(_pesan_gagal)
                         else:
                             if gagal_denyut:
                                 print(
@@ -917,7 +948,7 @@ def main(argv=None, *, conn=None, db_path=None, telegram=None,
                         if (not gagal_polling or
                                 gagal_polling_coba % ULANG_LOG_KEGAGALAN == 0):
                             gagal_polling = True
-                            print(f"Polling Telegram gagal — dilewati: {e}")
+                            print(f"Polling Telegram gagal — dilewati: {_samarkan_pesan_galat(e)}")
             # Tidur selalu, termasuk di luar jam aktif: hitungan denyut harus tetap
             # berjalan supaya perubahan jam lokal langsung diikuti.
             tidur(POLL_GAP_S)
@@ -926,7 +957,7 @@ def main(argv=None, *, conn=None, db_path=None, telegram=None,
     except KeyboardInterrupt:
         return 0
     except Exception as e:
-        print(f"Gagal menjalankan loop: {e}")
+        print(f"Gagal menjalankan loop: {_samarkan_pesan_galat(e)}")
         return 1
     finally:
         if conn_milik and conn is not None:
