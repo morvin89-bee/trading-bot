@@ -57,11 +57,14 @@ def live_fetch(token: str, *, offset: int = 0, timeout: int = 0,
     balasan (prinsip ragu = tidak kirim).
 
     `timeout` Telegram 0 = balas segera tanpa long-poll; timeout HTTP
-    minimal 10 detik supaya permintaan tidak diputus lebih dulu.
+    minimal 20 detik. Dulu 10 detik — lalu terukur (2026-10-20) latensi
+    api.telegram.org menyentuh 11,6 dtk: poll yang sebenarnya sehat diputus
+    dan menghasilkan flap 119 gagal/119 pulih dalam 5,5 jam. Pemanggil boleh
+    meminta lebih besar; tidak pernah diturunkan.
     """
     url = f"https://api.telegram.org/bot{token}/getUpdates"
     hasil = get(url, params={"offset": offset, "timeout": timeout},
-                timeout=max(timeout, 10))
+                timeout=max(timeout, 20))
     # `requests.get` TIDAK melempar pada status 4xx/5xx, dan Telegram balas
     # {"ok": false} untuk 401 (token mati), 404, 409 (getUpdates ganda),
     # 429, dan 5xx. Tanpa dua pemeriksaan ini balasan gagal dianggap

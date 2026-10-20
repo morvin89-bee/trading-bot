@@ -90,6 +90,12 @@ def _v2_get(path, params=None):
     """TAPI v2: GET dengan tanda tangan HMAC-SHA256."""
     key, secret = _creds()
     data = dict(params or {})
+    # recvWindow eksplisit 15 dtk (2026-10-20): dua penolakan
+    # "Invalid timestamp ... outside of the recvWindow" terjadi saat jam mesin
+    # hanya meleset 0,8 dtk — permintaan bertanda tertahan di jalur lambat
+    # (telegram_gate sempat tidur 10 dtk). Tanpa parameter ini validitas
+    # sepenuhnya diserahkan ke bawaan server yang tidak terdokumentasi.
+    data["recvWindow"] = 15000
     data["timestamp"] = int(time.time() * 1000)
     query = urllib.parse.urlencode(data)
     sign = hmac.new(secret.encode(), query.encode(),

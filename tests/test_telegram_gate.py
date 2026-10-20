@@ -101,8 +101,10 @@ def test_live_fetch_memanggil_url_telegram_dengan_offset():
                                      get=get_palsu)
     assert panggilan["url"] == "https://api.telegram.org/botTOKEN/getUpdates"
     assert panggilan["params"] == {"offset": 7, "timeout": 0}
-    # timeout HTTP minimal 10 dtk supaya tidak memutus sebelum Telegram balas
-    assert panggilan["timeout"] == 10
+    # timeout HTTP minimal 20 dtk. Dulu 10 dtk — lalu terukur (2026-10-20)
+    # latensi api.telegram.org menyentuh 11,6 dtk: poll yang sebenarnya sehat
+    # diputus dan menghasilkan flap 119 gagal/119 pulih dalam 5,5 jam.
+    assert panggilan["timeout"] == 20
     assert hasil == {"ok": True, "result": []}
 
 
