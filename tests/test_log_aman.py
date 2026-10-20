@@ -10,6 +10,7 @@ Dua masalah nyata dari `v1_loop.log`:
 Tanpa jaringan, tanpa token asli.
 """
 import logging
+import os
 
 import main_loop
 from test_main_loop import _fresh_db, _TelegramPerekam, _ts
@@ -111,3 +112,52 @@ def test_token_denyut_penuh_tidak_dicetak_ke_log(tmp_path, monkeypatch,
     assert "Denyut penuh gagal" in keluaran
     assert "123456789" not in keluaran
     assert "bot<disamarkan>" in keluaran
+
+
+def test_pembaca_gagal_juga_tercatat_bertimestamp(tmp_path, monkeypatch,
+                                                  caplog):
+    """Cacat nyata 2026-10-20 21:40: 'Denyut penuh gagal' tercatat di
+    errors.log, tapi 'Pembaca pasar gagal — denyut dilewatkan' TIDAK walau
+    tercetak ke v1_loop.log. Keduanya wajib tercatat — denyut yang dilewatkan
+    adalah bahan jujur hitungan hari G5."""
+    conn = _fresh_db(tmp_path)
+    monkeypatch.setattr(main_loop, "apply_shadow_gate",
+                        lambda c, *, now=None: None)
+    panggilan_pembaca = {"n": 0}
+
+    def pembaca(c):
+        panggilan_pembaca["n"] += 1
+        if panggilan_pembaca["n"] >= 2:
+            raise RuntimeError("jaringan putus")
+        return main_loop._konteks_kosong()
+
+    dasar = _ts(hour=12)
+    urutan = [dasar, dasar + 15, dasar + 300, dasar + 315]
+    indeks = [0]
+
+    def jam():
+        nilai = urutan[min(indeks[0], len(urutan) - 1)]
+        indeks[0] += 1
+        return nilai
+
+    with caplog.at_level(logging.WARNING):
+        main_loop.main(
+            ["--siklus", "4"], conn=conn, telegram=_TelegramPerekam(),
+            pembaca_konteks=pembaca,
+            fetch=lambda token, *, offset, timeout: {"result": []},
+            jam=jam, tidur=lambda s: None)
+
+    teks = "\n".join(r.getMessage() for r in caplog.records)
+    assert "denyut dilewatkan" in teks, (
+        "pembaca pasar gagal harus tercatat bertimestamp ke errors.log")
+
+
+def test_errors_log_absolut_ikut_folder_modul(tmp_path, monkeypatch):
+    """Cacat nyata 2026-10-20 21:40: auto-revive VBS mewarisi cwd = home,
+    sehingga denyut bot jatuh ke C:\\Users\\KakiTangan\\errors.log sementara
+    hitungan G5 membaca trading-bot\\errors.log. Log kegagalan wajib ABSOLUT
+    ke folder modul — bukan relatif terhadap cwd yang tak diketahui."""
+    monkeypatch.chdir(tmp_path)
+    assert os.path.isabs(main_loop.ERRORS_LOG)
+    assert os.path.dirname(main_loop.ERRORS_LOG) == os.path.dirname(
+        os.path.abspath(main_loop.__file__))

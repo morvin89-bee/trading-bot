@@ -4,13 +4,17 @@ Fase 1: memantau harga & mendeteksi peluang arbitrase (BELUM trading otomatis).
 """
 
 import logging
+import os
 import time
 import threading
 
 import requests
 
 logging.basicConfig(
-    filename="errors.log",
+    # ABSOLUT agar tetap menunjuk folder modul walau cwd berbeda (lihat
+    # catatan main_loop.ERRORS_LOG — cacat 2026-10-20).
+    filename=os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                          "errors.log"),
     level=logging.WARNING,
     format="%(asctime)s %(levelname)s %(message)s",
 )

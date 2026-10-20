@@ -59,6 +59,13 @@ import shadow_log
 import spread
 import telegram_gate
 
+# ABSOLUT: log kegagalan harus selalu jatuh ke folder modul, apa pun cwd
+# proses. Cacat nyata 2026-10-20 21:40: auto-revive VBS mewarisi cwd = home,
+# sehingga denyut bot tercatat ke C:\Users\KakiTangan\errors.log sementara
+# hitungan jujur G5 membaca trading-bot\errors.log (dua file, satu kebenaran).
+ERRORS_LOG = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                          "errors.log")
+
 
 def _samarkan_pesan_galat(pesan):
     """Samarkan token Telegram di pesan galat jaringan sebelum keluar.
@@ -700,8 +707,9 @@ def main(argv=None, *, conn=None, db_path=None, telegram=None,
                              "(bawaan: terus).")
     args = parser.parse_args(argv)
 
+    # ABSOLUT — lihat catatan main_loop.ERRORS_LOG (cacat 2026-10-20).
     logging.basicConfig(
-        filename="errors.log",
+        filename=ERRORS_LOG,
         level=logging.WARNING,
         format="%(asctime)s %(levelname)s %(message)s",
     )
