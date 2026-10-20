@@ -9,3 +9,6 @@ deskflow.log*
 dashboard_shared_state.json
 .ptmp/
 main_loop.lock
+
+# Keluaran MCP graphify (graf pengetahuan, dibuat ulang kapan saja)
+graphify-out/
