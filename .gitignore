@@ -4,6 +4,7 @@ __pycache__/
 *.db
 deskflow.log*
 *.log
+*.log.*
 .pytest_cache/
 .venv/
 dashboard_shared_state.json
