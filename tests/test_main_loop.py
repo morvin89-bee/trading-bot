@@ -896,6 +896,25 @@ def test_main_tidak_pernah_membangun_transport_bfisik():
     assert "transport_factory" in sumber
 
 
+def test_blok_main_produksi_suntik_pabrik_transport_indodax():
+    """Blok `__main__` menyuntik `transport_factory` Indodax sungguhan.
+
+    Jalur produksi adalah satu-satunya tempat pabrik disuntik; tanpa ini
+    go-live mustahil (temuan 2026-10-21: `main()` tanpa pabrik selalu
+    cetak "tidak ada pabrik transport" dan tetap mode bayangan). Menyuntik
+    BUKAN berarti order terkirim — pabrik hanya dipanggil setelah sakelar v1
+    menyala (7 hari bersih) DAN `permissions_ok` lolos (butuh deklarasi
+    `INDODAX_CAN_TRADE=1` di .env), dan order tetap butuh tombol Setuju
+    pengguna. Tiga gerbang itu diuji terpisah; tes ini hanya memastikan
+    kabelnya benar-benar terpasang.
+    """
+    sumber = inspect.getsource(main_loop)
+    blok = sumber.split('if __name__ == "__main__":', 1)[1]
+    assert "transport_factory=indodax_transport.transport_factory" in blok
+    # Adapter harus diimpor modul, supaya nama itu benar-benar ada.
+    assert "import indodax_transport" in sumber
+
+
 def test_main_kembali_satu_bila_gagal_benar(tmp_path):
     """Kegagalan buka basis data = keluar 1, sama seperti `scheduler.main`."""
     # `conn` sengaja TIDAK diberikan: kalau yang diuji adalah kegagalan membuka

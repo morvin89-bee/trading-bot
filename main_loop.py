@@ -49,6 +49,7 @@ import types
 import dca_window
 import engine
 import indodax_api
+import indodax_transport
 import portfolio
 import portfolio_store
 import reconcile
@@ -987,8 +988,13 @@ if __name__ == "__main__":
             "(satu-satunya pembaca getUpdates)."
         )
         raise SystemExit(1)
+    # transport_factory disuntik di sini, dan HANYA di sini. Pabriknya hanya
+    # dipanggil `main()` bila sakelar v1 sudah menyala (7 hari bayangan bersih);
+    # selama mode bayangan transport tetap None dan `permissions_ok` menghentikan
+    # apa pun sebelum menyentuh bursa (spec 6.6/6.7, review 2026-10-18).
     raise SystemExit(main(
         fetch=telegram_gate.live_fetch,
         pembaca_konteks=baca_konteks,
         baca_harga=portfolio.fetch_price,
+        transport_factory=indodax_transport.transport_factory,
     ))
