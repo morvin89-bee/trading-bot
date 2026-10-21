@@ -29,8 +29,22 @@ def fmt_idr(x):
         return "Rp 0"
 
 
-def _holdings_rows(holdings):
+def _holdings_rows(holdings, kas_idr=0.0):
+    """Baris tabel kepemilikan; `kas_idr` = saldo IDR (uang tunai).
+
+    Uang IDR tidak pernah jadi `Holding` (`portfolio.compute_holdings`
+    melewati koin IDR) tapi tetap bagian portofolio — tanpa barisnya tabel
+    tak penjumlah: jumlah kolom "Nilai (Rp)" ≠ caption total portofolio.
+    """
     rows = []
+    if kas_idr:
+        rows.append({
+            "Koin": "IDR",
+            "Jumlah": fmt_idr(kas_idr),
+            "Harga rata-rata": "tidak berlaku (uang tunai)",
+            "Nilai (Rp)": round(kas_idr, 2),
+            "Untung/Rugi belum terealisasi (Rp)": None,
+        })
     for h in holdings:
         rows.append({
             "Koin": h.coin.upper(),
@@ -87,7 +101,8 @@ def render():
 
     try:
         st.markdown("### Kepemilikan")
-        rows = _holdings_rows(out["holdings"])
+        kas_idr = out["total_idr"] - sum(h.value_idr for h in out["holdings"])
+        rows = _holdings_rows(out["holdings"], kas_idr)
         if rows:
             st.dataframe(rows, use_container_width=True)
         else:
@@ -108,8 +123,7 @@ def render():
 
         st.markdown("### Progres DCA Bulan Ini")
         values = {h.pair: h.value_idr for h in out["holdings"]}
-        values["IDR"] = out["total_idr"] - sum(h.value_idr
-                                               for h in out["holdings"])
+        values["IDR"] = kas_idr
         saran = rules.dca_split(MONTHLY_IDR, values)
         deps = portfolio_store.list_deposits(conn)
         nyata = growth_report.month_contributions(deps, time.time())
