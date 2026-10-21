@@ -15,6 +15,7 @@ Set-Location $dir
 # Bersihkan instance yatim monitor.py: dua monitor menulis trades.db bersamaan
 # (INSERT OR IGNORE menjaga tabel trades, tapi depth_snapshotsdoUBLE baris).
 $lama = @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object { $_.CommandLine -like "*monitor.py*" })
+"guard: found $($lama.Count) monitor.py process(es) [pid: $($lama.ProcessId -join ',')]" | Out-File -FilePath "$dir\monitor_guard.log" -Append -Encoding utf8
 foreach ($p in $lama) {
     taskkill /F /T /PID $p.ProcessId 2>&1 | Out-Null
 }

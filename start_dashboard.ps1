@@ -21,6 +21,7 @@ Set-Location $dir
 # bind. Task ini satu-satunya pemilik yang sah, jadi lethalkan +
 # taskkill /T (tree) supaya anak cmd/python ikut mati.
 $kreis = Get-NetTCPConnection -LocalPort 8501 -State Listen -ErrorAction SilentlyContinue
+"guard: port 8501 listener(s) [pid: $($kreis.OwningProcess -join ',')]" | Out-File -FilePath "$dir\dashboard_guard.log" -Append -Encoding utf8
 foreach ($k in $kreis) {
     if ($k.OwningProcess -gt 0) {
         taskkill /F /T /PID $k.OwningProcess 2>&1 | Out-Null
