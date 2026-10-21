@@ -33,7 +33,7 @@ Bahan untuk #3 sudah ada dan terbukti jalan produksi (snapshot harian 21.00):
 | Harga saat jawaban diproses | `_polling` menerima `baca_harga` opsional; bila gagal → `ctx.prices[pair] = None` → `price_still_valid` = False → konfirmasi hangus | Angka di pesan harus mewakili harga saat ini (R-E); harga tak terbaca = tidak ada keputusan |
 | Fetch produksi | `telegram_gate.live_fetch` (GET `api.telegram.org/bot…/getUpdates`, pola `alerts.send_telegram`), disuntik **hanya** dari blok `__main__` | Tes tak pernah menyentuh jaringan (conftest tetap jaga); `main()` dalam tes tak berubah perilaku |
 | Baris sapa awal | `telegram.line(...)` hanya bila `fetch is not None` | Membuktikan token+chat hidup sejak detik pertama; tes sengaja tanpa fetch tetap `lines == []` |
-| Peluncur | `run_v1.bat` + `register_v1_task.ps1` → tugas "IndodaxV1Shadow" (AtLogOn, `pythonw`, restart 3×, log `v1_loop.log`) | Mengikuti pola `register_task.ps1` yang sudah terbukti |
+| Peluncur | `run_v1_hidden.vbs` + `register_v1_task.ps1` → tugas "IndodaxV1Shadow" (S4U, `pythonw`, restart 3×, log `v1_loop.log`) | S4U = jalan tanpa login; At startup + Event 41 + At logon (lihat catatan 2026-10-22) |
 
 ## 3. Bentuk perubahan kode
 
@@ -100,8 +100,40 @@ Tes akar `test_*.py` (46) tidak disentuh.
 - Mulai: **2026-10-18**, `shadow_day = 0`, kunci View-Only, tanpa transport.
 - Cek harian: `SELECT shadow_day, v1_enabled FROM bot_state WHERE id=1;` dan
   `SELECT COUNT(*) FROM shadow_log WHERE status='rejected' AND hari=tanggal_hari_ini;`
-  (penolakan = shadow_day reset ke 0; `shadow_day >= 7` menyalakan `v1_enabled`
-  otomatis — AMAN karena transport tetap `None`: order mustahil keluar, dan guard F40
-  menjawab Setuju tanpa transport dengan pesan jujur).
+  (penolakan = shadow_day reset ke 0).
+- **Go-live manual (keputusan 2026-10-22):** `shadow_day >= 7` TIDAK menyalakan
+  sakelar sendiri. Satu-satunya jalan `v1_enabled=1` adalah `aktifkan_live(conn)`,
+  dan fungsi itu menolak bila `shadow_day < 7`. Transport juga tetap `None` sampai
+  go-live, jadi order mustahil keluar selama shadow.
 - Lolos G5 = 7–14 hari tanpa penolakan → baru keputusan pengguna: kunci trade-only,
   runner dengan `transport_factory`, sakelar eksekusi.
+
+## 7. Task Scheduler: S4U (2026-10-22)
+
+Kejadian nyata: mesin mati 19:20, dinyalakan 23:31 → bot mati **4 jam 11 menit**
+karena task memicu "At logon" dan tak ada yang login. Snapshot 21:00 juga terlewat.
+
+| Task | Logon type | Trigger | Isi |
+|---|---|---|---|
+| `IndodaxV1Shadow` | S4U | At startup (1 mnt) + Event 41 (1 mnt) + At logon (30 dtk) | `run_v1_hidden.vbs` → `main_loop.py` |
+| `IndodaxDashboard` | S4U | At startup (1 mnt) + At logon (30 dtk) | `start_dashboard.ps1` → streamlit `0.0.0.0:8501` |
+| `IndodaxMonitor` | S4U | At startup (1 mnt) + At logon (30 dtk) | `start_monitor.ps1` → `monitor.py` → `trades.db` |
+| `Portofolio Snapshot` | S4U | Harian 21:00 + StartWhenAvailable | `run_snapshot.bat` → `scheduler.py --telegram` |
+
+- **S4U** = jalan apakah user login atau tidak, tanpa menyimpan password.
+  Semua task: `MultipleInstancesPolicy=IgnoreNew`, `RestartOnFailure` 3×/1 mnt,
+  `ExecutionTimeLimit=PT0S`, `StartWhenAvailable=true`.
+- Sumber definisi: `register_v1_task.ps1` (bot) + `register_support_tasks.ps1`
+  (dashboard, monitor, snapshot). Keduanya **wajib elevated** — Principal S4U
+  ditolak tanpa hak admin ("Access is denied").
+- Skrip `.ps1` yang dijalankan elevated **wajib ASCII polos** (PowerShell 5.1
+  membaca `.ps1` tanpa BOM sebagai ANSI; em-dash UTF-8 → smart-quote → parse error).
+- Prinsip pendaftaran: **gagal = berhenti, produksi dipulihkan** — backup XML →
+  probe → apply; kalau apply gagal, XML lama di-restore.
+- Verifikasi yang sah: proses di **session 0** + kunci satu-instance dipegang +
+  log file dipegang terbuka untuk tulis + egress terukur (probe S4U:
+  `curl -I https://api.telegram.org/` → HTTP 302; `requests` Python → 200 ke
+  `api.telegram.org` dan `indodax.com`).
+- Bot **tidak mem-poll Telegram saat DND 23:00–07:00** (`should_run_habitual`
+  membungkus seluruh polling tanpa cabang `else`) → log diam di malam hari itu
+  perilaku lama, bukan tanda matinya bot.
