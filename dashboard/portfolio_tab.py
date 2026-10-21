@@ -61,8 +61,13 @@ def _render_growth(conn):
         "Bulan": df["month"],
         "Setoran (Rp)": df["contributions_idr"],
         "Hasil Pasar (Rp)": df["market_idr"],
+        "Nilai Awal (Rp)": df["opening_value_idr"],
         "Nilai Akhir (Rp)": df["end_value_idr"],
     }), use_container_width=True)
+    if not bool(df["opening_known"].all()):
+        st.caption("Bulan tanpa snapshot SEBELUM setoran pertama: 'Hasil Pasar' "
+                   "dihitung sejak setoran pertama (nilai awal 0, asumsi "
+                   "portofolio kosong sebelum uang masuk).")
 
 
 def render():
