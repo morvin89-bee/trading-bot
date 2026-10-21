@@ -155,17 +155,48 @@ def set_shadow_day(conn, day):
     """TETAPKAN `shadow_day` ke `day` — sifatnya menetapkan, bukan menambah.
 
     Panggilan kedua dengan angka lain MENGGANTI, bukan menambah: fungsi ini
-    menetapkan keadaan, bukan menghitungnya. `v1_enabled` ikut mengikuti aturan
-    yang sama di satu tempat saja, supaya tidak ada dua tempat yang memutuskan
-    syarat sakelar.
+    menetapkan keadaan, bukan menghitungnya.
+
+    LIVE MANUAL (putusan 2026-10-21): fungsi ini TIDAK PERNAH menyalakan
+    `v1_enabled` — walau `day >= GO_LIVE_SHADOW_DAYS`. Mencapai lantai 7 hanya
+    membuka JENDELA keputusan; tombol hidup ditekan manusia lewat
+    `aktifkan_live`. Satu-satunya pengaruh pada sakelar: MEMATIKAN, bila
+    `day < 7` (reset penolakan harus tetap mematikan eksekusi — keselamatan
+    ini tidak boleh hilang).
     """
     dca_window.ensure_bot_state(conn)
-    nyalakan = 1 if int(day) >= GO_LIVE_SHADOW_DAYS else 0
-    conn.execute(
-        "UPDATE bot_state SET shadow_day = ?, v1_enabled = ? WHERE id = 1",
-        (int(day), nyalakan),
-    )
+    if int(day) < GO_LIVE_SHADOW_DAYS:
+        conn.execute(
+            "UPDATE bot_state SET shadow_day = ?, v1_enabled = 0 WHERE id = 1",
+            (int(day),),
+        )
+    else:
+        conn.execute(
+            "UPDATE bot_state SET shadow_day = ? WHERE id = 1", (int(day),)
+        )
     conn.commit()
+
+
+def aktifkan_live(conn):
+    """NYALAKAN sakelar eksekusi — SATU-SATUNYA jalan ke `v1_enabled = 1`.
+
+    Syarat keras: `shadow_day >= GO_LIVE_SHADOW_DAYS`. Di bawah lantai 7,
+    fungsi ini MENOLAK (False) dan tidak menyentuh sakelar sama sekali —
+    periode bayangan tidak bisa dipotong. Bila lolos, nyalakan dan True.
+
+    Sengaja terpisah dari `set_shadow_day`: menghitung hari adalah mesin
+    (otomatis), menyalakan eksekusi adalah manusia (sadar). Dua hal ini tidak
+    boleh lagi menjadi satu baris — di situlah keputusan go-live hidup.
+    """
+    dca_window.ensure_bot_state(conn)
+    baris = conn.execute(
+        "SELECT shadow_day FROM bot_state WHERE id = 1"
+    ).fetchone()
+    if int(baris[0]) < GO_LIVE_SHADOW_DAYS:
+        return False
+    conn.execute("UPDATE bot_state SET v1_enabled = 1 WHERE id = 1")
+    conn.commit()
+    return True
 
 
 def _hari_lokal(now_ts):
@@ -221,7 +252,8 @@ def apply_shadow_gate(conn, *, now=None):
     ).fetchone()
     if baris[1] == hari_ini:
         return   # hari ini sudah dihitung — denyut berikutnya tidak menambah
-    # `set_shadow_day` satu-satunya tempat yang memutuskan `v1_enabled`.
+    # Mesin MENGHITUNG hari saja. Menyalakan `v1_enabled` di luar fungsi ini —
+    # itu pekerjaan `aktifkan_live`, yang dipanggil manusia (live manual).
     set_shadow_day(conn, int(baris[0]) + 1)
     conn.execute(
         "UPDATE bot_state SET shadow_checked_day = ? WHERE id = 1", (hari_ini,)

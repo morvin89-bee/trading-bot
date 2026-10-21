@@ -310,11 +310,56 @@ def test_set_shadow_day_menamai_nilai_absolut_bukan_menambah(tmp_path):
     assert main_loop.load_state(conn)["shadow_day"] == 9
 
 
+def test_set_shadow_day_tidak_pernah_menyalakan_sakelar(tmp_path):
+    """Live manual: walau menembus lantai 7, `set_shadow_day` tak menekan
+    tombol. Hanya `aktifkan_live` yang boleh menyalakan (putusan 2026-10-21).
+    """
+    conn = _fresh_db(tmp_path)
+    for hari in (1, 7, 8, 99):
+        main_loop.set_shadow_day(conn, hari)
+        assert main_loop.load_state(conn)["v1_enabled"] is False
+
+
+def test_aktifkan_live_menolak_sebelum_hari_7(tmp_path):
+    """GERBANG: `shadow_day < 7` -> `aktifkan_live` MENOLAK, tak menyentuh
+    sakelar. Tanpa ini bayangan bisa dipotong seenaknya.
+    """
+    conn = _fresh_db(tmp_path)
+    main_loop.set_shadow_day(conn, 6)
+    assert main_loop.aktifkan_live(conn) is False
+    assert main_loop.load_state(conn)["v1_enabled"] is False
+
+    main_loop.set_shadow_day(conn, 0)   # status reset penolakan
+    assert main_loop.aktifkan_live(conn) is False
+    assert main_loop.load_state(conn)["v1_enabled"] is False
+
+
+def test_set_shadow_day_di_bawah_7_tetap_mematikan_sakelar(tmp_path):
+    """Keselamatan yang TIDAK boleh hilang: reset penolakan (`day=0`) MEMATIKAN
+    sakelar walaupun sebelumnya menyala — walau aturan lama auto-nyala dihapus.
+    """
+    conn = _fresh_db(tmp_path)
+    main_loop.set_shadow_day(conn, 7)
+    main_loop.aktifkan_live(conn)
+    assert main_loop.load_state(conn)["v1_enabled"] is True
+
+    main_loop.set_shadow_day(conn, 0)   # penolakan -> reset
+    assert main_loop.load_state(conn)["v1_enabled"] is False
+
+
 def test_sambutan_batas_hari_naik_kelas(tmp_path):
+    """Hari-7 membuka JENDELA; sakelar menyala HANYA lewat `aktifkan_live`.
+
+    Live manual (putusan 2026-10-21): `set_shadow_day` tidak lagi menekan
+    tombol di hari-7. Hanya manusia yang menekan.
+    """
     conn = _fresh_db(tmp_path)
     main_loop.set_shadow_day(conn, 6)
     assert main_loop.load_state(conn)["v1_enabled"] is False
     main_loop.set_shadow_day(conn, 7)
+    # Hari-7 TIDAK menyalakan sendiri — jendela keputusan terbuka, bukan hidup.
+    assert main_loop.load_state(conn)["v1_enabled"] is False
+    assert main_loop.aktifkan_live(conn) is True
     assert main_loop.load_state(conn)["v1_enabled"] is True
     # Setelah menyala tidak boleh berkedip mati-mati.
     main_loop.set_shadow_day(conn, 8)
@@ -328,6 +373,9 @@ def test_ambang_naik_kelas_adalah_konstanta_yang_dinamai(tmp_path):
     main_loop.set_shadow_day(conn, main_loop.GO_LIVE_SHADOW_DAYS - 1)
     assert main_loop.load_state(conn)["v1_enabled"] is False
     main_loop.set_shadow_day(conn, main_loop.GO_LIVE_SHADOW_DAYS)
+    # Menembus lantai membuka jendela, TIDAK menekan tombol (live manual).
+    assert main_loop.load_state(conn)["v1_enabled"] is False
+    assert main_loop.aktifkan_live(conn) is True
     assert main_loop.load_state(conn)["v1_enabled"] is True
 
 
@@ -446,14 +494,21 @@ def test_penolakan_setelah_hari_dihitung_tetap_mereset(tmp_path):
 
 
 def test_tujuh_hari_bersih_menyalakan_sakelar(tmp_path):
-    """Jalan penuh: 7 hari tanpa penolakan menyalakan sakelar (spec §9)."""
+    """Jalan penuh: 7 hari bersih membuka jendela; sakelar MENUNGGU manusia.
+
+    Live manual (2026-10-21): `apply_shadow_gate` menghitung hari sampai
+    lantai 7, lalu BERHENTI — tidak pernah menekan tombol hidup.
+    """
     conn = _fresh_db(tmp_path)
     for hari in range(10, 17):
         main_loop.apply_shadow_gate(conn, now=_ts(day=hari, hour=9))
         main_loop.apply_shadow_gate(conn, now=_ts(day=hari, hour=20))
     keadaan = main_loop.load_state(conn)
     assert keadaan["shadow_day"] == 7
-    assert keadaan["v1_enabled"] is True
+    # Hari-7 tercapai tapi sakelar tetap MATI sampai `aktifkan_live` dipanggil.
+    assert keadaan["v1_enabled"] is False
+    assert main_loop.aktifkan_live(conn) is True
+    assert main_loop.load_state(conn)["v1_enabled"] is True
 
 
 # --------------------------------------------------------------------------
@@ -865,11 +920,16 @@ def test_main_tidak_pernah_memanggil_pabrik_transport_saat_sakelar_mati(
 
 def test_main_di_nyalakan_setelah_7_hari_memanggil_pabrik_transport(
         tmp_path, capsys):
-    """7 hari tanpa penolakan menyala: pabrik dipanggil, keluar 0."""
+    """7 hari + `aktifkan_live` (manusia): pabrik dipanggil, keluar 0.
+
+    Live manual: hari-7 sendirian TIDAK cukup — tombol ditekan manusia.
+    """
     conn = _fresh_db(tmp_path)
     dipanggil = []
 
-    main_loop.set_shadow_day(conn, 7)  # v1_enabled = True
+    main_loop.set_shadow_day(conn, 7)
+    assert main_loop.load_state(conn)["v1_enabled"] is False  # belum menyala
+    assert main_loop.aktifkan_live(conn) is True              # manusia menekan
 
     def pabrik():
         dipanggil.append(1)
@@ -1581,6 +1641,7 @@ def test_banner_tanpa_pabrik_juga_dicetak_sekali(tmp_path, capsys):
     bukan sebagai detak jantung log."""
     conn = _fresh_db(tmp_path)
     main_loop.set_shadow_day(conn, main_loop.GO_LIVE_SHADOW_DAYS)
+    main_loop.aktifkan_live(conn)  # manusia menekan tombol (live manual)
     keluar = main_loop.main(
         ["--siklus", "3"], conn=conn, telegram=_TelegramPerekam(),
         jam=lambda: _ts(hour=12), tidur=lambda s: None)
@@ -1769,6 +1830,7 @@ def test_polling_antar_denyut_ditahan_saat_transport_ada(tmp_path):
     """
     conn = _fresh_db(tmp_path)
     main_loop.set_shadow_day(conn, main_loop.GO_LIVE_SHADOW_DAYS)
+    main_loop.aktifkan_live(conn)  # live manual: manusia menekan tombol
     fetch = _FetchPerekam([])
 
     def pabrik():
@@ -2000,6 +2062,7 @@ def test_sapa_awal_mengikuti_mode_sebenarnya(tmp_path):
     "mode bayangan" padahal sakelar v1 sudah menyala."""
     conn = _fresh_db(tmp_path)
     main_loop.set_shadow_day(conn, main_loop.GO_LIVE_SHADOW_DAYS)
+    main_loop.aktifkan_live(conn)  # live manual: manusia menekan tombol
     telegram = _TelegramPerekam()
 
     keluar = main_loop.main(
@@ -2050,6 +2113,7 @@ def test_banner_dicetak_ulang_setelah_status_berubah(tmp_path, capsys):
         jam[0] += main_loop.POLL_GAP_S
         if jam[0] == _ts(hour=12) + main_loop.POLL_GAP_S:
             main_loop.set_shadow_day(conn, main_loop.GO_LIVE_SHADOW_DAYS)
+            main_loop.aktifkan_live(conn)  # live manual: tombol manusia
         elif jam[0] == _ts(hour=12) + 2 * main_loop.POLL_GAP_S:
             main_loop.set_shadow_day(conn, 0)
 
