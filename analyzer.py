@@ -20,11 +20,11 @@ prediksi nyata. Proyek edukasi, bukan sinyal trading.
 """
 
 import math
-import sqlite3
 from collections import defaultdict
 from datetime import datetime
 
-DB_FILE = "trades.db"
+import trades_store
+
 WINDOW_SEC = 300          # window analisis: 5 menit
 BUY_RATIO_THRESHOLD = 0.55
 MIN_DATA = 500            # minimal transaksi sebelum analisis
@@ -292,10 +292,27 @@ def live_signal(conn):
         )
 
 
-def main():
-    conn = sqlite3.connect(DB_FILE)
-    count = conn.execute("SELECT COUNT(*) FROM trades").fetchone()[0]
+def main(argv=None):
+    import argparse
+    parser = argparse.ArgumentParser(
+        description="Analisis statistik data pemantau (per hari)")
+    parser.add_argument(
+        "--tanggal", default=None,
+        help="rentang hari: 2026-10-22 atau 2026-10-18..2026-10-22 "
+             "(default: semua hari yang ada)")
+    args = parser.parse_args(argv)
+
+    awal, akhir = trades_store.rentang(args.tanggal)
+    hari = [t for t in trades_store.daftar_hari()
+            if (awal is None or t >= awal) and (akhir is None or t <= akhir)]
     print("=== Analisis & Prediksi Statistik ===")
+    print("Hari terpakai:", ", ".join(hari) or "(belum ada file harian)")
+    if not hari:
+        print("Belum ada data. Jalankan monitor.py dulu (task IndodaxMonitor).")
+        return
+
+    conn = trades_store.buka(awal, akhir)
+    count = conn.execute("SELECT COUNT(*) FROM trades").fetchone()[0]
     print(f"Transaksi tersimpan: {count}")
     if count < MIN_DATA:
         print(f"\nData masih sedikit (< {MIN_DATA} transaksi).")

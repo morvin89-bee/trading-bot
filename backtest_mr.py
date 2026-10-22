@@ -82,9 +82,16 @@ class BacktestMR:
         self.win_trades = 0
         self.daily_pnl = {}
 
-    def run(self, db_path="trades.db"):
-        """Jalankan walk-forward backtest."""
-        conn = sqlite3.connect(db_path)
+    def run(self, db_path="trades.db", conn=None):
+        """Jalankan walk-forward backtest.
+
+        `conn` dipakai bila data dibaca lintas hari lewat `trades_store.buka`
+        (rentang tanggal); kalau kosong, `db_path` dibuka seperti biasa.
+        """
+        if conn is None:
+            conn = sqlite3.connect(db_path)
+        else:
+            db_path = "file harian (gabungan)"
 
         # Ambil data total
         total_rows = conn.execute(
@@ -277,17 +284,30 @@ class BacktestMR:
 
 def main():
     import argparse
+    import trades_store
     parser = argparse.ArgumentParser(description="Backtest Mean-Reversion Z-Score Strategy")
     parser.add_argument("--pair", type=str, default="btc_idr", help="pair to monitor, e.g. btc_idr")
     parser.add_argument("--train", type=int, default=200, help="training window size")
     parser.add_argument("--test", type=int, default=100, help="test window size")
     parser.add_argument("--lookback", type=int, default=48, help="window history untuk z-score")
-    parser.add_argument("--db", type=str, default="trades.db", help="path database")
+    parser.add_argument("--db", type=str, default="trades.db",
+                        help="path database (dipakai bila --tanggal tidak diisi)")
+    parser.add_argument("--tanggal", type=str, default=None,
+                        help="rentang hari: 2026-10-22 atau 2026-10-18..2026-10-22")
     args = parser.parse_args()
+
+    awal, akhir = trades_store.rentang(args.tanggal)
 
     print(f"Backtest Mean-Reversion Z-Score")
     print(f"Pair: {args.pair} | Train: {args.train} | Test: {args.test} | Lookback: {args.lookback}")
-    print(f"DB: {args.db}\n")
+    if args.tanggal:
+        hari = [t for t in trades_store.daftar_hari()
+                if (awal is None or t >= awal) and (akhir is None or t <= akhir)]
+        print(f"Hari: {', '.join(hari) or '(belum ada)'}\n")
+        conn = trades_store.buka(awal, akhir)
+    else:
+        print(f"DB: {args.db}\n")
+        conn = None
 
     backtest = BacktestMR(
         pair=args.pair,
@@ -295,7 +315,7 @@ def main():
         test_size=args.test,
         lookback=args.lookback
     )
-    folds = backtest.run(db_path=args.db)
+    folds = backtest.run(db_path=args.db, conn=conn)
 
 
 if __name__ == "__main__":

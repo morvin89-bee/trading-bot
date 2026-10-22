@@ -1,23 +1,23 @@
 """
 Data Loader untuk Streamlit Dashboard.
-Bertugas: load data dari trades.db + depth_snapshots + signals.csv,
-hitung z-score, dan siapkan untuk strategy wrapper.
+Bertugas: load data pemantauan per hari (trades_YYYY-MM-DD.db via
+trades_store.py) + signals.csv, hitung z-score, dan siapkan untuk strategy
+wrapper.
 Semua fungsi thread-safe (dapat dipanggil dari background thread).
 """
 
 import csv
-import sqlite3
 import math
 import os
 import time
 from collections import deque
 from datetime import datetime, timedelta
 
+import trades_store
 import yaml
 
 # Inisialisasi global (akan di-set saat app dimulai)
 CFG = None
-DB_PATH = "trades.db"
 SIGNALS_PATH = "signals.csv"
 STRATEGY = None  # MeanReversionStrategy instance
 
@@ -35,23 +35,28 @@ def get_config():
     return CFG
 
 
-def get_spread_history(conn, pair, lookback_windows):
+def get_spread_history(pair, lookback_windows):
     """
-    Ambil history imbalance dari depth_snapshots.
-    Returns list float [-1.0 .. +1.0].
+    Ambil `lookback_windows` imbalance TERBARU dari depth_snapshots, per hari
+    (mundur dari hari terbaru sampai cukup). Returns list float [-1.0 .. +1.0]
+    urut kronologis.
     """
     try:
-        rows = conn.execute(
-            "SELECT pair, date, imbalance, bid_vol, ask_vol "
-            "FROM depth_snapshots WHERE pair = ? ORDER BY date ASC",
-            (pair,)
-        ).fetchall()
+        rows = trades_store.terakhir(
+            tabel="depth_snapshots",
+            kolom="pair, date, imbalance, bid_vol, ask_vol",
+            pair=pair,
+            limit=lookback_windows,
+        )
         spreads = []
         for pair_r, date, imb, bid_vol, ask_vol in rows:
             if imb is not None and (bid_vol + ask_vol) > 0:
                 spreads.append(float(imb))
-        # Return terbaru sampai lookback_windows
-        return spreads[-lookback_windows:] if len(spreads) >= lookback_windows else spreads
+        # `terakhir()` mengembalikan terbaru-dulu; balik jadi kronologis
+        return spreads[::-1]
+    except FileNotFoundError:
+        # hari yang belum punya file dilewati; kalau semua kosong, riwayat kosong
+        return []
     except Exception as e:
         print(f"[data_loader] Error fetch spread {pair}: {e}")
         return []
@@ -177,12 +182,12 @@ def get_tailscale_ip():
 # REAL Z-SCORE FUNCTIONS (untuk integrasi database real)
 # ============================================================
 
-def get_latest_imbalance_history(conn, pair: str, lookback: int = 48) -> list:
+def get_latest_imbalance_history(pair: str, lookback: int = 48) -> list:
     """
-    Ambil history imbalance terbaru dari depth_snapshots.
+    Ambil history imbalance terbaru dari depth_snapshots, per hari (mundur
+    dari hari terbaru sampai `lookback` terpenuhi).
     
     Args:
-        conn: SQLite connection
         pair: Pair symbol (e.g., 'btc_idr')
         lookback: Jumlah window lookback (default 48 = 4 jam)
         
@@ -190,13 +195,14 @@ def get_latest_imbalance_history(conn, pair: str, lookback: int = 48) -> list:
         List imbalance values (chronological order, oldest first)
     """
     try:
-        rows = conn.execute(
-            "SELECT imbalance FROM depth_snapshots WHERE pair = ? ORDER BY date DESC LIMIT ?",
-            (pair, lookback)
-        ).fetchall()
+        rows = trades_store.terakhir(
+            tabel="depth_snapshots",
+            kolom="imbalance",
+            pair=pair,
+            limit=lookback,
+        )
         # Reverse to chronological order (oldest first)
-        imbalances = [float(r[0]) for r in rows if r[0] is not None]
-        return imbalances[::-1]
+        return [float(r[0]) for r in rows if r[0] is not None][::-1]
     except Exception as e:
         print(f"[data_loader] Error fetch imbalance history {pair}: {e}")
         return []
@@ -225,12 +231,11 @@ def compute_zscore_from_history(current_value: float, history: list) -> tuple:
     return round(z, 4), round(mean, 6), round(std, 6)
 
 
-def get_real_zscore_db(conn, pair: str, strategy, lookback: int = 48) -> tuple:
+def get_real_zscore_db(pair: str, strategy, lookback: int = 48) -> tuple:
     """
     Hitung z-score real dari database menggunakan strategy's rolling window.
     
     Args:
-        conn: SQLite connection
         pair: Pair symbol
         strategy: MeanReversionStrategy instance
         lookback: Lookback windows
@@ -239,7 +244,7 @@ def get_real_zscore_db(conn, pair: str, strategy, lookback: int = 48) -> tuple:
         (z_I_to_T, z_T_to_I, mean_I, mean_T, std_I, std_T)
     """
     # Get imbalance history
-    history = get_latest_imbalance_history(conn, pair, lookback)
+    history = get_latest_imbalance_history(pair, lookback)
     
     if len(history) < 2:
         return 0.0, 0.0, 0.0, 0.0, 1.0, 1.0

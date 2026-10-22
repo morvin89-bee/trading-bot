@@ -1,7 +1,10 @@
 """
 Pemantau transaksi (metode baru).
-Mengumpulkan data transaksi (trades) publik dari Indodax ke SQLite (trades.db).
+Mengumpulkan data transaksi (trades) publik dari Indodax ke SQLite.
 Data ini dipakai analyzer.py untuk belajar & prediksi statistik.
+
+Sejak 2026-10-22 datanya per HARI: satu file `trades_YYYY-MM-DD.db`
+(lihat trades_store.py). File lama `trades.db` jadi arsip setelah migrasi.
 
 Catatan: endpoint /api/trades/{pair} hanya mengembalikan transaksi TERBARU
 (500 terakhir), jadi data harus dikumpulkan dari sekarang (tidak bisa mundur
@@ -9,44 +12,19 @@ ke masa lalu). Semakin lama berjalan, semakin bagus analisisnya.
 Endpoint ini pakai format pair LAMA (btcidr), bukan btc_idr.
 """
 
-import sqlite3
 import time
 from datetime import datetime
 
 import scanner
+import trades_store
 
 PAIRS = [pair_id for _, pair_id in scanner.PAIRS]
 INTERVAL = 10
-DB_FILE = "trades.db"
 
 
 def init_db():
-    conn = sqlite3.connect(DB_FILE)
-    conn.execute(
-        """CREATE TABLE IF NOT EXISTS trades (
-            pair TEXT,
-            tid INTEGER,
-            date INTEGER,
-            price REAL,
-            amount REAL,
-            type TEXT,
-            fetched_at TEXT,
-            PRIMARY KEY (pair, tid)
-        )"""
-    )
-    conn.execute(
-        """CREATE TABLE IF NOT EXISTS depth_snapshots (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            pair TEXT,
-            date INTEGER,
-            bid_vol REAL,
-            ask_vol REAL,
-            imbalance REAL,
-            fetched_at TEXT
-        )"""
-    )
-    conn.commit()
-    return conn
+    """Koneksi tulis ke file HARI INI (trades_YYYY-MM-DD.db)."""
+    return trades_store.koneksi_hari(tulis=True)
 
 
 def fetch_trades(conn, pair_id):
@@ -112,16 +90,23 @@ def fetch_depth(conn, pair_id, levels=10):
 
 def main():
     conn = init_db()
+    hari = trades_store.hari_ini()
     total = conn.execute("SELECT COUNT(*) FROM trades").fetchone()[0]
     start = datetime.now()
     print("Pemantau transaksi Indodax (Ctrl+C untuk berhenti)")
-    print(f"Pair: {len(PAIRS)} | Database: {DB_FILE} ({total} transaksi tersimpan)")
+    print(f"Pair: {len(PAIRS)} | Database: {trades_store.path_hari(hari)} ({total} transaksi hari ini)")
     print(f"Mulai: {start:%d %b %Y %H:%M}\n")
 
     crash = 0
     cycle = 0
     while True:
         try:
+            # ganti file saat hari berpindah; data lama tetap di file harinya
+            if trades_store.hari_ini() != hari:
+                conn.close()
+                hari = trades_store.hari_ini()
+                conn = init_db()
+                print(f"[{datetime.now():%H:%M:%S}] ganti hari -> {trades_store.path_hari(hari)}")
             new_total = 0
             for pair_id in PAIRS:
                 try:
@@ -137,7 +122,7 @@ def main():
                     except Exception as e:
                         print(f"  depth {pair_id}: gagal -> {str(e)[:70]}")
             total = conn.execute("SELECT COUNT(*) FROM trades").fetchone()[0]
-            print(f"[{datetime.now():%H:%M:%S}] +{new_total} baru | total {total}")
+            print(f"[{datetime.now():%H:%M:%S}] +{new_total} baru | total hari ini {total}")
             time.sleep(INTERVAL)
         except KeyboardInterrupt:
             print(f"\nBerhenti. Total transaksi tersimpan: {total}")
@@ -151,6 +136,7 @@ def main():
             except Exception:
                 pass
             conn = init_db()
+            hari = trades_store.hari_ini()
             time.sleep(INTERVAL)
 
 
