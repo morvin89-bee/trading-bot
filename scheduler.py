@@ -38,11 +38,21 @@ def take_snapshot(conn):
 
 
 def _summary(out):
-    lines = [f"Snapshot portofolio: {_rp(out.get('total_idr', 0))}"]
-    for h in out.get("holdings", []):
+    """Teks ringkasan snapshot (dikirim ke Telegram bila `--telegram`).
+
+    IDR diturunkan dari total - nilai aset, sama seperti tab Portofolio:
+    `portfolio.compute_holdings` sengaja melewati IDR, jadi tanpa baris ini
+    komposisi uang tunai tidak terlihat di Telegram.
+    """
+    holdings = out.get("holdings", [])
+    total = float(out.get("total_idr", 0) or 0)
+    idr = total - sum(float(h.value_idr or 0) for h in holdings)
+    lines = [f"Snapshot portofolio: {_rp(total)}"]
+    if idr:
+        lines.append(f"  {'IDR':<4} {_rp(idr)}")
+    for h in holdings:
         lines.append(f"  {h.coin.upper():<4} {_rp(h.value_idr)}")
-    for m in alerts.build_alerts(out.get("holdings", []),
-                                 out.get("actions", [])):
+    for m in alerts.build_alerts(holdings, out.get("actions", [])):
         lines.append(f"  * {m}")
     return "\n".join(lines)
 
