@@ -16,6 +16,7 @@ import growth_report
 import portfolio
 import portfolio_store
 import rules
+import safeguards
 
 MONTHLY_IDR = rules.MONTHLY_IDR
 READ_ONLY_BANNER = "Read-only — sistem ini tidak bisa mengirim order."
@@ -125,6 +126,14 @@ def render():
         values = {h.pair: h.value_idr for h in out["holdings"]}
         values["IDR"] = kas_idr
         saran = rules.dca_split(MONTHLY_IDR, values)
+        # Batas per order (safeguards.MAX_ORDER_IDR) juga berlaku di sini,
+        # sama seperti engine: kelebihan TIDAK dibagikan ulang, tetap cadangan
+        # IDR. Tanpa ini dasbor menampilkan 305.000 (mentah) padahal bot akan
+        # mengirim 275.000 (terpotong) -> ketidakcocokan.
+        for _k in list(saran):
+            if _k != "IDR" and saran[_k] > safeguards.MAX_ORDER_IDR:
+                saran["IDR"] = saran.get("IDR", 0) + (saran[_k] - safeguards.MAX_ORDER_IDR)
+                saran[_k] = safeguards.MAX_ORDER_IDR
         deps = portfolio_store.list_deposits(conn)
         nyata = growth_report.month_contributions(deps, time.time())
         sisa = max(0.0, MONTHLY_IDR - nyata)
