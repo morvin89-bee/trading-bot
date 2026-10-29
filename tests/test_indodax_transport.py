@@ -17,6 +17,7 @@ yang menjadi alasan rancangan di bawah:
 """
 import pytest
 
+import indodax_api
 import executor
 import proposal
 import rules
@@ -117,15 +118,17 @@ def test_izin_default_amankan():
     assert t.can_withdraw is False
 
 
-def test_factory_membangun_transport_lengkap():
+def test_factory_membangun_transport_lengkap(monkeypatch):
+    monkeypatch.setattr(indodax_api, "_load_env", lambda: {})
     p = indodax_transport.transport_factory()
     assert hasattr(p, "post_order") and hasattr(p, "get_order_status")
     assert hasattr(p, "can_trade") and hasattr(p, "can_withdraw")
-    # Default aman sampai .env menyatakan lain.
+    # Default aman (tanpa .env/env var) -> False/False.
     assert p.can_trade is False and p.can_withdraw is False
 
 
 def test_env_bool_hanya_1_yang_mengaktifkan(monkeypatch):
+    monkeypatch.setattr(indodax_api, "_load_env", lambda: {})
     # Keamanan: hanya "1" (persis) = izin. Salah ketik/nilai aneh = TIDAK
     # pernah berubah jadi izin; ketiadaan = aman (False).
     monkeypatch.setenv("INDODAX_CAN_TRADE", "1")
