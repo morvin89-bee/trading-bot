@@ -88,6 +88,14 @@ def fetch_depth(conn, pair_id, levels=10):
     return imbalance
 
 
+def _touch_heartbeat():
+    try:
+        with open("monitor.heartbeat", "w", encoding="utf-8") as f:
+            f.write(str(time.time()))
+    except Exception:
+        pass
+
+
 def main():
     conn = init_db()
     hari = trades_store.hari_ini()
@@ -101,6 +109,7 @@ def main():
     cycle = 0
     while True:
         try:
+            _touch_heartbeat()
             # ganti file saat hari berpindah; data lama tetap di file harinya
             if trades_store.hari_ini() != hari:
                 conn.close()
