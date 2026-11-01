@@ -67,23 +67,31 @@ def _http_error(e):
 
 
 def _v1_call(method, **params):
-    """TAPI v1: POST dengan tanda tangan HMAC-SHA512."""
+    """TAPI v1 POST with HMAC‑SHA512.
+    Implements up to 3 retries with exponential back‑off (+ jitter).
+    Returns ``None`` on total failure so caller can halt or use cached price.
+    """
     key, secret = _creds()
     data = {"method": method, "timestamp": int(time.time() * 1000)}
     data.update(params)
     body = urllib.parse.urlencode(data)
-    sign = hmac.new(secret.encode(), body.encode(),
-                    hashlib.sha512).hexdigest()
+    sign = hmac.new(secret.encode(), body.encode(), hashlib.sha512).hexdigest()
     req = urllib.request.Request(
         V1_URL, data=body.encode(),
-        headers={"Key": key,
-                 "Sign": sign,
-                 "User-Agent": UA})
-    try:
-        with urllib.request.urlopen(req, timeout=30) as r:
-            return json.loads(r.read().decode())
-    except urllib.error.HTTPError as e:
-        raise RuntimeError(f"v1 {_http_error(e)}")
+        headers={"Key": key, "Sign": sign, "User-Agent": UA})
+    max_tries = 3
+    delay = 1.0
+    import random
+    for attempt in range(1, max_tries + 1):
+        try:
+            with urllib.request.urlopen(req, timeout=30) as r:
+                return json.loads(r.read().decode())
+        except Exception as e:
+            _http_error(e)  # log via helper
+            if attempt < max_tries:
+                time.sleep(delay + random.random() * 0.5)
+                delay *= 2
+    return None
 
 
 def _v2_get(path, params=None):
