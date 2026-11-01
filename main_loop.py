@@ -316,7 +316,18 @@ def baca_konteks(conn, *, now=None, sinkron=portfolio.sync_trades,
     if not (isinstance(info, dict) and isinstance(info.get("balances"), list)):
         raise ValueError("bentuk saldo tidak dikenal — bukan daftar balances TAPIv2")
 
-    prices = {pair: ambil_harga(pair) for pair in portfolio.COIN_PAIRS.values()}
+    prices = {}
+    for pair in portfolio.COIN_PAIRS.values():
+        harga = ambil_harga(pair)
+        if harga is None:
+            # Fallback to price cache if network failed
+            cache = getattr(portfolio, '_PRICE_CACHE', {})
+            if pair in cache:
+                ts, cached = cache[pair]
+                # Use cached price if less than 24h old
+                if time.time() - ts < 86400:
+                    harga = cached
+        prices[pair] = harga
     hilang = [pair for pair, harga in prices.items() if harga is None]
     if hilang:
         raise ValueError("harga gagal dibaca: " + ", ".join(sorted(hilang)))
@@ -499,7 +510,16 @@ def _proses_batch(conn, ctx, updates, *, now, telegram, transport, shadow,
                 pair = getattr(_USULAN_MENUNGGU.get(id_usulan), "pair", None)
                 if pair is not None:
                     try:
-                        ctx.prices[pair] = baca_harga(pair)
+                        harga = baca_harga(pair)
+                        if harga is None:
+                            # Fallback to price cache if network failed
+                            cache = getattr(portfolio, '_PRICE_CACHE', {})
+                            if pair in cache:
+                                ts, cached = cache[pair]
+                                # Use cached price if less than 24h old
+                                if time.time() - ts < 86400:
+                                    harga = cached
+                        ctx.prices[pair] = harga
                     except Exception:
                         ctx.prices[pair] = None
             _jawab(
