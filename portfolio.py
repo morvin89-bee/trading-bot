@@ -192,7 +192,7 @@ def sync_trades(conn, pairs=None):
 
 
 _PRICE_CACHE = {}
-_CACHE_TTL = 60  # simpan cache harga sampai 60 detik jika network terputus
+_CACHE_TTL = 86400  # keep cached price up to 24 h if fresh fetch fails
 
 def fetch_price(pair):
     """Harga **bid** Indodax untuk `pair`; `None` bila gagal dan tidak ada cache.
