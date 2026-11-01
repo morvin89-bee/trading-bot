@@ -191,13 +191,32 @@ def sync_trades(conn, pairs=None):
     return inserted
 
 
+_PRICE_CACHE = {}
+_CACHE_TTL = 60  # simpan cache harga sampai 60 detik jika network terputus
+
 def fetch_price(pair):
-    """Harga **bid** Indodax untuk `pair`; `None` bila gagal (mis. 429)."""
+    """Harga **bid** Indodax untuk `pair`; `None` bila gagal dan tidak ada cache.
+    Menerapkan caching ringan agar bila terjadi kegagalan jaringan sementara (seperti HTTP 429 atau DNS timeout),
+    harga terakhir yang sah (<60s) dapat digunakan sehingga siklus DCA tidak gugur mendadak.
+    """
+    now = time.time()
     try:
         import scanner                      # impor malas: menghindari efek samping
-        return scanner.indodax_price(pair)[0]
+        res = scanner.indodax_price(pair)
+        if res and res[0] is not None:
+            harga = res[0]
+            _PRICE_CACHE[pair] = (now, harga)
+            return harga
     except Exception:
-        return None
+        pass
+
+    # Fallback ke cache bila ada dan usianya di bawah TTL
+    if pair in _PRICE_CACHE:
+        ts, harga = _PRICE_CACHE[pair]
+        if now - ts <= _CACHE_TTL:
+            return harga
+
+    return None
 
 
 def _breakdown_json(holdings, idr):
