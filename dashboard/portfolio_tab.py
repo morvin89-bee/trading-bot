@@ -71,14 +71,14 @@ def _render_growth(conn):
     df = pd.DataFrame(rep)
     fig = px.line(df, x="month", y="end_value_idr", markers=True,
                   labels={"month": "Bulan", "end_value_idr": "Nilai (Rp)"})
-    st.plotly_chart(fig, use_container_width=True)
+    st.plotly_chart(fig, width="stretch")
     st.dataframe(pd.DataFrame({
         "Bulan": df["month"],
         "Setoran (Rp)": df["contributions_idr"],
         "Hasil Pasar (Rp)": df["market_idr"],
         "Nilai Awal (Rp)": df["opening_value_idr"],
         "Nilai Akhir (Rp)": df["end_value_idr"],
-    }), use_container_width=True)
+    }), width="stretch")
     if not bool(df["opening_known"].all()):
         st.caption("Bulan tanpa snapshot SEBELUM setoran pertama: 'Hasil Pasar' "
                    "dihitung sejak setoran pertama (nilai awal 0, asumsi "
@@ -105,7 +105,7 @@ def render():
         kas_idr = out["total_idr"] - sum(h.value_idr for h in out["holdings"])
         rows = _holdings_rows(out["holdings"], kas_idr)
         if rows:
-            st.dataframe(rows, use_container_width=True)
+            st.dataframe(rows, width="stretch")
         else:
             st.info("Belum ada aset yang dilacak.")
         st.caption(f"Total portofolio: {fmt_idr(out['total_idr'])}")
@@ -141,7 +141,7 @@ def render():
         st.write(f"Setoran bulan ini: **{fmt_idr(nyata)}** dari target "
                  f"{fmt_idr(MONTHLY_IDR)} ({status}).")
         st.dataframe([{"Aset": k, "Alokasi yang disarankan": fmt_idr(v)}
-                      for k, v in saran.items()], use_container_width=True)
+                      for k, v in saran.items()], width="stretch")
 
         st.markdown("### Pertumbuhan Bulanan")
         _render_growth(conn)
