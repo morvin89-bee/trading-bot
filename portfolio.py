@@ -10,6 +10,7 @@ from dataclasses import dataclass
 
 import indodax_api
 import portfolio_store
+import price_feed
 import rules
 
 # Koin yang dilacak -> pair Indodax.
@@ -201,8 +202,7 @@ def fetch_price(pair):
     """
     now = time.time()
     try:
-        import scanner                      # impor malas: menghindari efek samping
-        res = scanner.indodax_price(pair)
+        res = price_feed.indodax_price(pair)
         if res and res[0] is not None:
             harga = res[0]
             _PRICE_CACHE[pair] = (now, harga)
