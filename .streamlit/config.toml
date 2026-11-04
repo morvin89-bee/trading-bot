@@ -14,3 +14,7 @@ serverPort = 8501
 
 [theme]
 base = "light"
+
+[theme.sidebar]
+primaryColor = "#FF4B4B"
+textColor = "#31333F"
