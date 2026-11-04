@@ -26,6 +26,19 @@ Rekomendasi utama sudah dieksekusi:
 
 Bagian 1–6 di bawah adalah analisis kondisi **sebelum** eksekusi, yaitu saat `core/` masih berisi salinan/demo. Bagian tersebut dipertahankan sebagai catatan audit.
 
+### 0.1 Penghapusan Subsistem Arbitrage Mean-Reversion
+
+Setelah analisis di atas, subsistem arbitrage mean-reversion dihapus pada branch `refactor/remove-mean-reversion`:
+
+- Harga publik Indodax dipindahkan ke `price_feed.py`; `portfolio.fetch_price()` tidak lagi bergantung pada `scanner.py`.
+- Dihapus permanen: `scanner.py`, `strategy_mean_reversion.py`, `paper_trader.py`, `backtest_mr.py`, `monitor.py`, `analyzer.py`, `trades_store.py`, `report.py`, `config_strategy.yaml`, data MR (`signals.csv`, `demo_signals.csv`, `laporan.html`), dashboard MR (`dashboard/utils/*`, `dashboard/config/dashboard.yaml`), dan `core/strategy.py`.
+- `dashboard/app.py` ditulis ulang menjadi dua tab: **Portofolio** dan **Shadow**.
+- `core/` tidak lagi mengekspor `MeanReversionStrategy`; facade hanya berisi `on_answer`, `mark_pending`, `Context`, `Proposal`, dan `main`.
+- `dca_tracker.py`, `migrate_dca.py`, dan test-nya diarsipkan ke `docs/archive/` karena `dca.db` tidak ada dan bot sudah punya DCA sendiri.
+- Task Windows `IndodaxMonitor` dilepas; `start_monitor.*` dan `register_task.ps1` dihapus. Rotasi log kini hanya untuk `errors.log`.
+- Test suite setelah penghapusan: **329 passed**.
+- `spread.py`, `dashboard/portfolio_tab.py`, `dashboard/shadow_tab.py`, dan `portfolio.db` tidak berubah.
+
 ---
 
 ## 1. Ringkasan Eksekutif (kondisi sebelum eksekusi)

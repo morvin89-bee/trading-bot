@@ -1,15 +1,14 @@
-# Rotasi trading-bot\errors.log + monitor.log: salin ke .1 .. .10, lalu
-# kosongkan file aslinya TANPA me-rename. Alasan: pythonw (main_loop, scanner,
-# monitor) dan cmd (monitor.log lewat redirect >>) memegang file lewat handle
-# -> Windows menolak rename file yang sedang dibuka (tanpa FILE_SHARE_DELETE).
-# Copy + truncate in place aman: handle python/cmd tetap valid, mode append
-# ("a") menulis lagi dari offset 0.
+# Rotasi trading-bot\errors.log: salin ke .1 .. .10, lalu kosongkan file
+# aslinya TANPA me-rename. Alasan: pythonw (main_loop) memegang file lewat
+# handle -> Windows menolak rename file yang sedang dibuka (tanpa
+# FILE_SHARE_DELETE). Copy + truncate in place aman: handle python tetap
+# valid, mode append ("a") menulis lagi dari offset 0.
 #
 # Dijalankan task "Rotasi Log" setiap hari 04:30 (S4U, tanpa login user).
 # Ambang: hanya berputar bila file >= 5 MB. ASCII polos (PowerShell 5.1).
-# Nama file dipertahankan meski kini juga merotasi monitor.log, karena task
-# "Rotasi Log" mengarah ke path ini (mengganti nama butuh re-register task
-# elevated). Jangan tambahkan karakter non-ASCII di skrip ini.
+# Nama file dipertahankan karena task "Rotasi Log" mengarah ke path ini
+# (mengganti nama butuh re-register task elevated). Jangan tambahkan
+# karakter non-ASCII di skrip ini.
 
 param(
     [string]$Log = "",
@@ -27,7 +26,6 @@ if ($Log) {
     $targets += ,@{ path = $Log; min = $m }
 } else {
     $targets += ,@{ path = "$botDir\errors.log";  min = $defaultMin }
-    $targets += ,@{ path = "$botDir\monitor.log"; min = $defaultMin }
 }
 
 foreach ($t in $targets) {

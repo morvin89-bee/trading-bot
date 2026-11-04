@@ -1,5 +1,5 @@
-# Task "Rotasi Log": rotasi trading-bot\errors.log + monitor.log harian
-# (simpan 10 salinan per file).
+# Task "Rotasi Log": rotasi trading-bot\errors.log harian
+# (simpan 10 salinan).
 #
 # Kenapa S4U: task harus jalan tanpa ada sesi login aktif. Principal S4U
 # membutuhkan hak admin -> skrip ini WAJIB elevated (PowerShell "Run as
@@ -12,7 +12,7 @@
 #
 # Catatan: skrip yang dijalankan task adalah rotate_errors_log.ps1 (nama
 # dipertahankan supaya task lama tetap valid tanpa re-register). Isinya
-# merotasi errors.log DAN monitor.log.
+# merotasi errors.log.
 
 $botDir = "C:\Users\KakiTangan\trading-bot"
 $userSid = ([Security.Principal.WindowsIdentity]::GetCurrent()).User.Value
@@ -36,7 +36,7 @@ $xml = @"
 <?xml version="1.0" encoding="UTF-16"?>
 <Task version="1.3" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
   <RegistrationInfo>
-    <Description>Rotasi trading-bot\errors.log + monitor.log harian (simpan 10 salinan per file). S4U: jalan tanpa login.</Description>
+    <Description>Rotasi trading-bot\errors.log harian (simpan 10 salinan). S4U: jalan tanpa login.</Description>
     <URI>\Rotasi Log</URI>
   </RegistrationInfo>
   <Triggers>
