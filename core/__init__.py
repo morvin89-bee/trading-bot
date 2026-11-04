@@ -6,7 +6,6 @@ mengekspor API yang stabil agar pemanggil tidak perlu tahu lokasi internal.
 
 from .dca_window import mark_pending
 from .engine import Context, Proposal, on_answer
-from .strategy import MeanReversionStrategy
 from .utils import _fresh_db, _TelegramPerekam, _ts
 
 __all__ = [
@@ -17,7 +16,6 @@ __all__ = [
     "Context",
     "Proposal",
     "on_answer",
-    "MeanReversionStrategy",
     "main",
 ]
 

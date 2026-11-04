@@ -21,7 +21,7 @@ import sqlite3
 import sys
 import time
 
-import scanner
+import price_feed
 
 DB_FILE = "dca.db"
 
@@ -133,7 +133,7 @@ def cmd_status():
     for pair, n, modal, coins in rows:
         avg = modal / coins
         try:
-            bid, ask = scanner.indodax_price(pair)
+            bid, ask = price_feed.indodax_price(pair)
             kini = (bid + ask) / 2
         except Exception:
             kini = None
