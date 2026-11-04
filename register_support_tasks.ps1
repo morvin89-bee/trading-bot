@@ -1,5 +1,5 @@
 # Task pendukung trading-bot:
-#   - "IndodaxDashboard" : dashboard streamlit (port 8501) + monitor.py
+#   - "IndodaxDashboard" : dashboard streamlit (port 8501)
 #   - "Portofolio Snapshot" : snapshot harian 21:00, diubah ke S4U + StartWhenAvailable
 #
 # Kenapa S4U: "Interactive only" = task hanya jalan bila ada sesi login aktif.
@@ -88,20 +88,12 @@ function Register-S4UTask($nama, $xml) {
 # ---------- 1. IndodaxDashboard ----------
 $xmlDash = New-S4UTaskXml `
     "IndodaxDashboard" `
-    "Dashboard trading (streamlit 8501) + monitor.py. S4U: jalan tanpa login." `
+    "Dashboard trading (streamlit 8501). S4U: jalan tanpa login." `
     "powershell.exe" `
     "-NoProfile -ExecutionPolicy Bypass -File `"$botDir\start_dashboard.ps1`""
 Register-S4UTask "IndodaxDashboard" $xmlDash
 
-# ---------- 2. IndodaxMonitor ----------
-$xmlMon = New-S4UTaskXml `
-    "IndodaxMonitor" `
-    "Pengisi trades.db (monitor.py). S4U: jalan tanpa login." `
-    "powershell.exe" `
-    "-NoProfile -ExecutionPolicy Bypass -File `"$botDir\start_monitor.ps1`""
-Register-S4UTask "IndodaxMonitor" $xmlMon
-
-# ---------- 3. Portofolio Snapshot -> S4U + StartWhenAvailable ----------
+# ---------- 2. Portofolio Snapshot -> S4U + StartWhenAvailable ----------
 # Backup XML lama dulu; kalau pendaftaran gagal, pulihkan.
 $backup = Join-Path $env:TEMP "snapshot_backup.xml"
 schtasks /query /tn "Portofolio Snapshot" /xml 2>$null | Out-File -FilePath $backup -Encoding Unicode
