@@ -376,16 +376,23 @@ def _ingat(usulan):
     return usulan
 
 
-def _catat_dca(conn, now, usulan):
+def _catat_dca(conn, now, usulan, *, tunda=False):
     """Buka atau tutup bulan DCA setelah satu tick — HANYA bila disebut.
 
     Usulan DCA di daftar berarti pesan benar-benar terkirim (`engine.tick`
     hanya mengembalikan yang terkirim) -> jendela resmi dibuka. DCA aktif
     tapi nol usulan terkirim = percobaan sudah habis -> bulan ditutup
     (keputusan pengguna 2026-10-17: sekali coba, gagal = dilewati).
+
+    `tunda=True` adalah pengecualian tersempit: percobaan belum tuntas
+    karena konfirmasi tidak terkirim atau tick berhenti sebelum sempat
+    mengirim. Tidak ada jendela yang dibuka dan tidak ada uang bergerak,
+    jadi bulan TIDAK ditutup; percobaan diulang pada tick berikutnya.
     """
     if any(p.rule == rules.RULE_DCA for p in usulan):
         dca_window.mark_pending(conn, now)
+    elif tunda:
+        return
     else:
         dca_window.mark_skip(conn, now)
 
@@ -665,7 +672,8 @@ def tick_cycle(
     # `not diulang`: siklus `/ulang` sudah mencatat di `apply_ulang` —
     # dua pencatatan untuk satu keputusan bulan adalah bug, bukan pengaman.
     if ctx.dca_enabled and not diulang:
-        _catat_dca(conn, now, usulan)
+        _catat_dca(conn, now, usulan,
+                   tunda=getattr(ctx, "dca_retry", False))
 
     # 6. Sakelar mode bayangan.
     apply_shadow_gate(conn, now=now)
@@ -688,7 +696,8 @@ def apply_ulang(conn, ctx, *, now, telegram, shadow,
     # terkirim lewat sini = jendela resmi dibuka; nol terkirim = percobaan
     # habis. `tick_cycle` tidak ikut mencatat (guard `not diulang`).
     if ctx.dca_enabled:
-        _catat_dca(conn, now, usulan)
+        _catat_dca(conn, now, usulan,
+                   tunda=getattr(ctx, "dca_retry", False))
     return usulan
 
 

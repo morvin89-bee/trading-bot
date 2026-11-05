@@ -1062,6 +1062,44 @@ def test_siklus_berikutnya_tidak_mengusulkan_dca_lagi(tmp_path):
         f"{[(p.rule, p.pair) for p in telegram.konfirmasi[sebelum:]]}")
 
 
+def test_konfirmasi_dca_gagal_terkirim_tidak_menutup_bulan(tmp_path):
+    """Kegagalan kirim Telegram bukan penolakan final.
+
+    `engine.tick` hanya mengembalikan usulan yang benar-benar terkirim; bila
+    konfirmasi DCA gagal dikirim, nol usulan bukan berarti "percobaan habis".
+    Bulan harus tetap terbuka dan percobaan diulang pada siklus berikutnya,
+    bukan ditutup lewat `mark_skip`.
+    """
+    conn = _fresh_db(tmp_path)
+    now = _ts(day=1, hour=9, minute=5)
+
+    class _TelegramGagalKonfirmasi(_TelegramPerekam):
+        def confirmation(self, p):
+            super().confirmation(p)
+            return None
+
+    keluar = _satu_siklus(conn, telegram=_TelegramGagalKonfirmasi(), now=now,
+                          ctx=_ctx_dca())
+
+    assert keluar == "kosong"
+    baris = conn.execute(
+        "SELECT last_dca_date, dca_status, dca_sent_ts FROM bot_state "
+        "WHERE id = 1"
+    ).fetchone()
+    assert baris["last_dca_date"] is None, (
+        "kegagalan kirim Telegram tidak boleh menutup bulan DCA")
+    assert baris["dca_status"] is None
+    assert baris["dca_sent_ts"] is None
+
+    # Siklus berikutnya dengan Telegram sehat masih mengusulkan DCA.
+    telegram = _TelegramPerekam()
+    keluar2 = _satu_siklus(conn, telegram=telegram, now=now + 300,
+                           ctx=_ctx_dca())
+
+    assert keluar2 == "proposed"
+    assert any(p.rule == rules.RULE_DCA for p in telegram.konfirmasi)
+
+
 def test_dca_gagal_di_gerbang_menutup_bulan_sekali(tmp_path):
     """Percobaan pertama gugur di gerbang spread -> `mark_skip` menutup
     bulan tepat sekali: `dca_status` "batal", `dca_sent_ts` NULL (tidak ada

@@ -114,6 +114,12 @@ class Context:
     # `getattr(..., False)` supaya konteks bertipe `SimpleNamespace` pada tes
     # lama (yang tidak memasang field ini) tidak AttributeError.
     dca_enabled: bool = False
+    # Hasil tick, bukan masukan: True bila percobaan DCA belum tuntas karena
+    # konfirmasi tidak terkirim (bukan ditolak gerbang/spread). `main_loop`
+    # WAJIB membiarkan bulan terbuka supaya percobaan diulang tick berikutnya;
+    # menutupnya di sini akan menghabiskan jatah satu-per-bulan karena
+    # gangguan Telegram yang sementara.
+    dca_retry: bool = False
 
 
 def collect_actions(ctx: Context) -> List[rules.Action]:
@@ -200,6 +206,9 @@ def tick(
     """
     # 1. Kumpulkan dan satukan aksi
     actions = collect_actions(ctx)
+    # Flag hasil tick direset lebih dulu: nilai dari tick sebelumnya tidak
+    # boleh membekukan keputusan bulan ini.
+    ctx.dca_retry = False
     if not actions:
         return []
 
@@ -348,7 +357,11 @@ def tick(
         # Kirim pesan konfirmasi dengan tombol inline
         message_id = telegram.confirmation(prop)
         if message_id is None:
-            # Gagalkirim konfirmasi, lanjut ke aksi berikutnya
+            # Gagal kirim = tidak ada jendela yang dibuka dan tidak ada uang
+            # bergerak. Untuk DCA ini BUKAN penolakan final: tandai supaya
+            # `main_loop` tidak menutup bulan, lalu coba lagi tick berikutnya.
+            if prop.rule == rules.RULE_DCA:
+                ctx.dca_retry = True
             continue
 
         # Catat usulan sebagai "proposed" di shadow_log
