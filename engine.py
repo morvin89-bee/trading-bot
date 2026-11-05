@@ -436,12 +436,7 @@ def _outcome_log(conn: Any, p: proposal.Proposal) -> Optional[str]:
     catatan apa pun -> None. Tidak pernah membuka jaringan — hanya membaca
     koneksi SQLite yang diberikan pemanggil.
     """
-    try:
-        baris = conn.execute(
-            "SELECT outcome FROM proposals WHERE id = ?", (p.id,)).fetchone()
-    except sqlite3.OperationalError:
-        return None
-    return baris[0] if baris else None
+    return shadow_log.outcome(conn, p.id)
 
 
 def _sudah_dijawab(conn: Any, p: proposal.Proposal) -> bool:

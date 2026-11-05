@@ -425,6 +425,28 @@ def _catat_dca(conn, now, usulan, *, tunda=False):
         dca_window.mark_skip(conn, now)
 
 
+def _terapkan_setuju_dca(conn, usulan, hasil, *, shadow, now, telegram):
+    """Tutup jendela DCA hanya bila persetujuan benar-benar diterapkan.
+
+    "sent" = order terkirim. Di mode bayangan tidak ada order, tetapi
+    `on_answer` mencatat persetujuan sebagai outcome "setuju" — itulah
+    persetujuan bayangan yang menutup jendela. Penolakan spread/gerbang,
+    halt, atau konfirmasi hangus TIDAK menutup jendela: pengguna diberi tahu
+    bahwa DCA bulan ini masih terbuka dan bisa dijawab lagi.
+    """
+    if hasil == "sent":
+        dca_window.mark_confirmed(conn, now)
+        return
+    if shadow and shadow_log.outcome(conn, usulan.id) == "setuju":
+        dca_window.mark_confirmed(conn, now)
+        return
+    if dca_window.dca_state(conn, now)[0] == "awaiting":
+        telegram.line(
+            "DCA bulan ini masih terbuka — jawaban belum diterapkan. "
+            "Tekan Setuju lagi setelah gangguan berlalu, atau Batal bulan ini."
+        )
+
+
 def _jawab(conn, ctx, aksi, id_usulan, *, now, telegram, transport,
            shadow, verdict):
     """Teruskan satu jawaban pengguna ke `engine.on_answer`.
@@ -436,22 +458,19 @@ def _jawab(conn, ctx, aksi, id_usulan, *, now, telegram, transport,
     F46: jendela DCA hanya disentuh bila jawaban rujuk ke usulan DCA yang
     benar-benar dikenal — id tak dikenal berarti jenis usulan tidak
     diketahui, jadi ragu dan tidak menulis (lihat tes F46).
+
+    Jendela DCA ditutup SETELAH `on_answer` memberi hasil yang final —
+    bukan sebelum, karena penolakan gerbang bukan persetujuan.
     """
     if aksi == "ulang":
         return apply_ulang(conn, ctx, now=now, telegram=telegram,
                            shadow=shadow, verdict=verdict)
 
-    # Jawaban DCA dicatat terpisah: tombol Setuju pada keyboard konfirmasi DCA
-    # harus menutup jendela 24 jam, kalau tidak pengingat tetap menyala dan di
-    # +24 jam tercipta catatan `dca_missed` palsu (kabel Task 13 #7). Pencarian
-    # usulan lebih dulu: tombol hanya berarti bila id-nya dikenal DAN
-    # usulannya ber-rule DCA (F46) — Setuju pada take-profit tidak boleh
+    # Pencarian usulan lebih dulu: tombol hanya berarti bila id-nya dikenal
+    # DAN usulannya ber-rule DCA (F46) — Setuju pada take-profit tidak boleh
     # menutup jendela DCA, dan id tak dikenal tidak boleh menyentuh apa pun.
     usulan = _USULAN_MENUNGGU.get(id_usulan)
-    if aksi == telegram_gate.BUTTON_SETUJU:
-        if usulan is not None and usulan.rule == rules.RULE_DCA:
-            dca_window.mark_confirmed(conn, now)
-    elif aksi == telegram_gate.BUTTON_BATAL:
+    if aksi == telegram_gate.BUTTON_BATAL:
         if usulan is not None and usulan.rule == rules.RULE_DCA:
             if dca_window.mark_batal(conn, now):
                 # Jendela resmi ditutup: lepas proposal dari ingatan, supaya
@@ -478,18 +497,33 @@ def _jawab(conn, ctx, aksi, id_usulan, *, now, telegram, transport,
         telegram.line(
             "Eksekusi belum dinyalakan — jawaban dicatat, tidak ada order dikirim."
         )
+        if aksi == telegram_gate.BUTTON_SETUJU and usulan.rule == rules.RULE_DCA:
+            _terapkan_setuju_dca(conn, usulan, None, shadow=shadow, now=now,
+                                 telegram=telegram)
         return "ignored"
 
     hasil = engine.on_answer(
         conn, ctx, p=usulan, answer=aksi, now=now, transport=transport,
         telegram=telegram, shadow=shadow, verdict=verdict,
     )
-    # Tombol di pesan lama tidak berlaku lagi. Pengaman sesungguhnya ada di
-    # langkah 0 `on_answer` (jawaban kedua berhenti sebelum menyentuh bursa);
-    # pesan ini supaya pengguna tidak menekan tombol yang sudah mati.
-    telegram.line(
-        f"Usulan {id_usulan} sudah diproses. Tombol di pesan lama sudah tidak berlaku."
-    )
+    if aksi == telegram_gate.BUTTON_SETUJU and usulan.rule == rules.RULE_DCA:
+        _terapkan_setuju_dca(conn, usulan, hasil, shadow=shadow, now=now,
+                             telegram=telegram)
+
+    # Pengaman sesungguhnya ada di langkah 0 `on_answer` (jawaban kedua
+    # berhenti sebelum menyentuh bursa). Pesan ini hanya untuk hasil yang
+    # sudah final; penolakan sebelum kirim masih bisa dicoba lagi (P1.4).
+    menunggu = (hasil in ("gate_blocked", "halted")
+                and shadow_log.outcome(conn, usulan.id) in (None, "proposed"))
+    if menunggu:
+        telegram.line(
+            f"Usulan {id_usulan} belum dieksekusi — tombol masih berlaku. "
+            "Coba lagi setelah gangguan berlalu."
+        )
+    else:
+        telegram.line(
+            f"Usulan {id_usulan} sudah diproses. Tombol di pesan lama sudah tidak berlaku."
+        )
     return hasil
 
 

@@ -815,6 +815,10 @@ def test_jawaban_setuju_menandai_dca_bulan_ini_confirmed(tmp_path):
     DCA SUNGGUHAN yang didaftarkan lewat `main_loop._ingat`, bukan pada id
     tak dikenal yang tidak boleh menyentuh jendela. Niat aslinya — Setuju
     pada usulan DCA menutup jendela menjadi confirmed — utuh.
+
+    `_ctx()` (bukan `_ctx_kosong()`) sejak P1.5: persetujuan bayangan baru
+    sah bila `on_answer` benar-benar mencatatnya, dan itu menuntut harga
+    pasangan terbaca (gerbang geser 0,5%).
     """
     conn = _fresh_db(tmp_path)
     telegram = _TelegramPerekam()
@@ -824,7 +828,7 @@ def test_jawaban_setuju_menandai_dca_bulan_ini_confirmed(tmp_path):
 
     fetch = _FetchPerekam([_update_tombol("setuju", p.id)])
     _satu_siklus(conn, telegram=telegram, now=_ts(hour=12),
-                 ctx=_ctx_kosong(), fetch=fetch)
+                 ctx=_ctx(), fetch=fetch)
 
     assert dca_window.dca_state(conn, _ts(hour=12))[0] == "confirmed"
 
@@ -1245,6 +1249,50 @@ def test_setuju_dca_menutup_jendela(tmp_path):
     _satu_siklus(conn, telegram=telegram, now=_ts(hour=12),
                  ctx=_ctx(), fetch=fetch)
 
+    assert dca_window.dca_state(conn, _ts(hour=12))[0] == "confirmed"
+
+
+def test_setuju_dca_ditolak_gerbang_tidak_menutup_jendela(tmp_path):
+    """Penolakan spread/gerbang bukan persetujuan: jendela DCA tetap terbuka.
+
+    `_jawab` dulu memanggil `mark_confirmed` SEBELUM `on_answer`, jadi
+    Setuju yang berhenti di gerbang tetap menutup bulan — pengguna
+    kehilangan DCA bulan itu tanpa satu pun order.
+    """
+    conn = _fresh_db(tmp_path)
+    telegram = _TelegramPerekam()
+    dca_window.mark_pending(conn, _ts(hour=9))
+    p = _usulan_dca(_ts(hour=9))
+    main_loop._ingat([p])
+    transport = _TransportPerekam(can_trade=True, can_withdraw=False)
+
+    fetch = _FetchPerekam([_update_tombol("setuju", p.id)])
+    _satu_siklus(conn, telegram=telegram, transport=transport, shadow=False,
+                 now=_ts(hour=12), ctx=_ctx(), fetch=fetch,
+                 verdict=lambda pair, **k: (False, 45.0))
+
+    assert transport.posted == []
+    assert dca_window.dca_state(conn, _ts(hour=12))[0] == "awaiting", (
+        "penolakan spread tidak boleh menutup bulan DCA")
+    assert any("masih terbuka" in b for b in telegram.lines), telegram.lines
+
+
+def test_setuju_dca_terkirim_menutup_jendela(tmp_path):
+    """Kebalikannya: order yang benar-benar terkirim menutup jendela DCA."""
+    conn = _fresh_db(tmp_path)
+    telegram = _TelegramPerekam()
+    dca_window.mark_pending(conn, _ts(hour=9))
+    p = _usulan_dca(_ts(hour=9))
+    main_loop._ingat([p])
+    transport = _TransportPerekam(can_trade=True, can_withdraw=False)
+    ctx = _ctx()
+    ctx.free_idr = 400000.0
+
+    fetch = _FetchPerekam([_update_tombol("setuju", p.id)])
+    _satu_siklus(conn, telegram=telegram, transport=transport, shadow=False,
+                 now=_ts(hour=12), ctx=ctx, fetch=fetch, verdict=_ok_verdict)
+
+    assert transport.posted, "fixture harus benar-benar mengirim order"
     assert dca_window.dca_state(conn, _ts(hour=12))[0] == "confirmed"
 
 

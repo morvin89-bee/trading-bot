@@ -110,6 +110,22 @@ def record(conn, p, outcome, note=""):
     conn.commit()
 
 
+def outcome(conn, id):
+    """Outcome tercatat untuk `id`, atau None bila belum ada/tabel belum dibuat.
+
+    Tabel `proposals` milik modul ini; pemanggil lain tidak perlu mengetahui
+    bentuk skemanya. `OperationalError` berarti tabel belum pernah dibuat —
+    belum ada catatan apa pun, bukan kegagalan.
+    """
+    try:
+        baris = conn.execute(
+            "SELECT outcome FROM proposals WHERE id = ?", (id,)
+        ).fetchone()
+    except sqlite3.OperationalError:
+        return None
+    return baris[0] if baris is not None else None
+
+
 def pending(conn, now):
     """Usulan berstatus "proposed" yang jendelanya masih terbuka pada `now`.
 
