@@ -629,6 +629,40 @@ def test_spread_rechecked_at_execution_time(tmp_path):
     # pesan penolakan menampilkan KEDUA besaran: spread dan ambang (F17a)
     assert any("spread 45.0 bps > 30 bps" in s for s in sent), sent
 
+def test_on_answer_penolakan_sebelum_kirim_tidak_mengunci_jawaban_ulang(tmp_path):
+    """Penolakan gerbang/spread bukan jawaban final: pengguna boleh mencoba lagi.
+
+    `_catat_hasil("setuju")` dulu ditulis SEBELUM gerbang spread/safeguards,
+    sehingga `_sudah_dijawab` mengunci usulan yang tidak pernah dikirim.
+    Setuju ulang setelah gangguan sementara harus tetap bisa mengirim order.
+    """
+    conn = _fresh_db(tmp_path)
+    p = _fresh_proposal()
+    ctx = _pasangkan_harga(_ctx(), p)
+    t = _FakeTransport(status_sequence=["filled"])
+
+    out1 = engine.on_answer(conn, ctx, p=p, answer="setuju", now=0.0,
+                            transport=t, telegram=_tg([]), shadow=False,
+                            verdict=lambda pair, **k: (False, 45.0))
+    assert out1 == "gate_blocked" and t.posted == []
+    assert _outcomes(conn) == [], "penolakan spread tidak boleh menulis setuju"
+
+    ctx.today_counts = {"btc_idr": 3}   # pagu 3 order/aset/hari terlampaui
+    out2 = engine.on_answer(conn, ctx, p=p, answer="setuju", now=1.0,
+                            transport=t, telegram=_tg([]), shadow=False,
+                            verdict=lambda pair, **k: (True, 1.0))
+    assert out2 == "gate_blocked" and t.posted == []
+    assert _outcomes(conn) == [], "penolakan gerbang tidak boleh menulis setuju"
+
+    ctx.today_counts = {}
+    out3 = engine.on_answer(conn, ctx, p=p, answer="setuju", now=2.0,
+                            transport=t, telegram=_tg([]), shadow=False,
+                            verdict=lambda pair, **k: (True, 1.0))
+    assert out3 == "sent", "setuju ulang setelah penolakan harus bisa mengirim"
+    assert len(t.posted) == 1
+    assert _outcomes(conn) == ["executed"]
+
+
 def test_halt_when_can_withdraw_flips_true(tmp_path):
     conn = _fresh_db(tmp_path)
     t = _FakeTransport(can_withdraw=True)

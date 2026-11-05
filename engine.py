@@ -528,14 +528,18 @@ def on_answer(conn: Any, ctx: Context, *, p: proposal.Proposal, answer: str,
         selalu `False` dan SETIAP konfirmasi berbalik `"ignored"` —
         gagal ke arah aman (bot diam), tetapi fitur konfirmasi jadi
         mati total dan penyebabnya gampang dicari di lapisan yang salah.
-    3. Catat jawaban PERTAMA pada KEDUA mode (`shadow_log.proposals` —
-       amendmen rencana R-B); mode bayangan berhenti di sini, transport
-       tidak PERNAH disentuh.
+    3. Mode bayangan MENCATAT persetujuan lalu berhenti; transport tidak
+       PERNAH disentuh. Di mode eksekusi persetujuan BARU dicatat pada
+       langkah 6b — setelah semua gerbang lolos, tepat sebelum kirim —
+       supaya penolakan spread/gerbang tidak mengunci jawaban ulang.
     4. Gerbang spread diulang pada harga SEKARANG (`verdict`) — lolos saat
        komposisi tidak menjamin lolos saat eksekusi. Harga hilang (`None`)
        = berhenti (ruling F5); spread gugur = `"gate_blocked"`.
     5. `safeguards.gates` diulang dengan konteks sekarang -> `"gate_blocked"`.
     6. `safeguards.permissions_ok` (`canWithdraw` aktif = berhenti) -> `"halted"`.
+    6b. Catat jawaban PERTAMA (`setuju`) TEPAT SEBELUM transport disentuh.
+       Sejak titik ini jawaban kedua terkunci — termasuk bila balasan
+       pengiriman hilang dan statusnya masih `"unknown"` (R-B).
     7. `executor.submit_once` SATU KALI; `SubmissionUncertain` -> TANYA
        status dengan id yang sama (maks 3 kali, backoff [2, 5, 10]) TANPA
        PERNAH mengirim ulang (putusan R-C; plan:539, spec §6.1/L398):
@@ -592,19 +596,15 @@ def on_answer(conn: Any, ctx: Context, *, p: proposal.Proposal, answer: str,
             f"{alasan_hangus} — konfirmasi hangus, tidak ada order dikirim.")
         return "ignored"
 
-    # 3. Catat jawaban PERTAMA pada KEDUA mode (amendmen rencana R-B):
-    #    baris inilah yang membuat jawaban kedua berhenti di langkah 0.
-    #    Mode bayangan MENCATAT persetujuan sebagai hasilnya lalu berhenti;
+    # 3. Mode bayangan: catat persetujuan sebagai hasilnya lalu berhenti;
     #    jalur fisik tidak pernah dijalankan dan transport tidak pernah
-    #    disentuh.
+    #    disentuh. Mode eksekusi mencatat di langkah 6b — setelah gerbang
+    #    lolos — supaya penolakan sementara tidak mengunci jawaban ulang.
     if shadow:
         _catat_hasil(
             conn, p, "setuju",
             "Mode bayangan: persetujuan dicatat, tidak ada order dikirim.")
         return "ignored"
-    _catat_hasil(
-        conn, p, "setuju",
-        "Persetujuan pertama diterima; order menyusul setelah lolos gerbang.")
 
     # 4. Gerbang spread DIULANG pada harga sekarang (spec §8, Review
     #    Focus #3). `verdict` disuntikkan pemanggil — tes tidak pernah
@@ -657,6 +657,16 @@ def on_answer(conn: Any, ctx: Context, *, p: proposal.Proposal, answer: str,
     if izin is not None:
         telegram.line(izin)
         return "halted"
+
+    # 6b. Catat persetujuan PERTAMA tepat sebelum transport disentuh. Baris
+    #     inilah yang mengunci jawaban kedua (langkah 0), termasuk bila
+    #     balasan pengiriman hilang dan statusnya masih "unknown" — order
+    #     TIDAK boleh dikirim ulang. Penolakan di langkah 4-6 tidak menulis
+    #     apa pun, jadi pengguna masih bisa menekan Setuju lagi setelah
+    #     gangguan sementara berlalu.
+    _catat_hasil(
+        conn, p, "setuju",
+        "Persetujuan pertama diterima; order dikirim setelah lolos gerbang.")
 
     # 7. Kirim SATU KALI dengan client order id tetap = id proposal
     #    (<= 36 karakter, charset [0-9A-Za-z_-] — terdokumentasi di
