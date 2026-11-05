@@ -213,6 +213,10 @@ def tick(
         return []
 
     proposals: List[proposal.Proposal] = []
+    # Usulan yang sudah lolos semua gerbang tetapi BELUM dikirim. Konfirmasi
+    # baru dikirim setelah seluruh aksi dinilai: halt di tengah tidak boleh
+    # meninggalkan tombol untuk usulan yang tidak pernah dikembalikan.
+    siap_kirim: List[proposal.Proposal] = []
 
     # 2. Proses setiap aksi
     for action in actions:
@@ -249,6 +253,10 @@ def tick(
             telegram.line(
                 f"Harga {pair} tidak tersedia — proses dihentikan untuk melindungi dana."
             )
+            # Tidak ada konfirmasi yang terkirim pada tick ini. Bila DCA
+            # sedang aktif, percobaan belum tuntas: jangan tutup bulan.
+            if getattr(ctx, "dca_enabled", False):
+                ctx.dca_retry = True
             # BERHENTI segera, tidak proses aksi lain
             return []
         
@@ -329,7 +337,7 @@ def tick(
             # Lanjut ke aksi berikutnya
             continue
 
-        # 5. Lolos kedua gerbang -> buat usulan
+        # 5. Lolos kedua gerbang -> siapkan usulan (belum dikirim)
         # Hitung sisa cadangan setelah reserve buy (jika berlaku)
         reserve_after = ctx.reserve_idr
         if rule == proposal.RULE_RESERVE_BUY:
@@ -353,8 +361,12 @@ def tick(
                       else proposal.REACTIVE_WINDOW_S),
             now=now,
         )
-        
-        # Kirim pesan konfirmasi dengan tombol inline
+        siap_kirim.append(prop)
+
+    # 6. Seluruh aksi sudah dinilai tanpa halt -> baru kirim konfirmasi.
+    #    Kegagalan kirim per usulan tidak membatalkan usulan lain; untuk DCA
+    #    kegagalan berarti percobaan belum tuntas (jangan tutup bulan).
+    for prop in siap_kirim:
         message_id = telegram.confirmation(prop)
         if message_id is None:
             # Gagal kirim = tidak ada jendela yang dibuka dan tidak ada uang

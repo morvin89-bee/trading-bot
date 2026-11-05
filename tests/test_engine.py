@@ -380,6 +380,53 @@ def test_shadow_writes_nothing_to_exchange():
     # 5. Tidak ada panggilan jaringan: guard di conftest.py (root) akan mematikan
     #    tes ini bila ada yang membuka koneksi (lihat F25).
 
+def test_tick_halt_spread_tidak_meninggalkan_konfirmasi_yatim(tmp_path):
+    """Spread hilang di aksi KEDUA tidak boleh membuang konfirmasi aksi pertama.
+
+    `engine.tick` dulu mengirim konfirmasi sambil memproses aksi; halt pada
+    aksi berikutnya mengembalikan [] sehingga tombol aksi pertama menjadi
+    yatim (tidak terdaftar, tidak bisa dijawab). Kontrak baru: nilai semua
+    aksi dulu, kirim konfirmasi hanya bila seluruh evaluasi selesai tanpa halt.
+    """
+    conn = _fresh_db(tmp_path)
+    ctx = _ctx_with_spread()
+    ctx.holdings.append(Holding(
+        pair="eth_idr", coin="eth", qty=1.0, avg_cost=1000.0, price=1600.0,
+        value_idr=1600.0, cost_basis_idr=1000.0, unrealized_idr=600.0,
+        basis_known=True,
+    ))
+
+    class _Telegram:
+        def __init__(self):
+            self.lines = []
+            self.konfirmasi = []
+
+        def line(self, text):
+            self.lines.append(text)
+            return True
+
+        def confirmation(self, p):
+            self.konfirmasi.append(p)
+            return 1
+
+    telegram = _Telegram()
+
+    def verdict(pair, **k):
+        return (None, 0.0) if pair == "eth_idr" else (True, 1.0)
+
+    assert engine.tick(conn, ctx, now=0.0, telegram=telegram, shadow=True,
+                       verdict=verdict) == []
+    assert telegram.konfirmasi == [], (
+        "konfirmasi aksi pertama terkirim sebelum tick berhenti: tombol yatim")
+    assert any("tidak tersedia" in baris for baris in telegram.lines)
+
+    # Siklus sehat berikutnya mengusulkan KEDUA aksi, bukan hanya sisanya.
+    props = engine.tick(conn, ctx, now=1.0, telegram=telegram, shadow=True,
+                        verdict=lambda pair, **k: (True, 1.0))
+    assert [p.pair for p in props] == ["btc_idr", "eth_idr"]
+    assert len(telegram.konfirmasi) == 2
+
+
 def test_duplicate_rules_produce_single_proposal():
     ctx = _ctx_where_two_rules_fire()
     # We need a conn for this test
