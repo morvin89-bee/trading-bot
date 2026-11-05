@@ -382,8 +382,16 @@ def _muat_usulan(conn, *, now):
     Tanpa ini restart membuat tombol yang sudah dikirim ke Telegram menjadi
     inert ("id tak dikenal"), lalu jendela DCA 24 jam berakhir dengan catatan
     `dca_missed` palsu.
+
+    Usulan DCA hanya dimuat bila jendelanya masih resmi `awaiting`. Baris
+    `proposed` yang tertinggal setelah Batal/confirmed/missed tidak boleh
+    hidup lagi hanya karena restart — order tanpa jendela yang sah.
     """
-    _ingat(shadow_log.pending(conn, now))
+    status_dca = dca_window.dca_state(conn, now)[0]
+    for p in shadow_log.pending(conn, now):
+        if p.rule == rules.RULE_DCA and status_dca != "awaiting":
+            continue
+        _USULAN_MENUNGGU[p.id] = p
 
 
 def _muat_offset(conn):

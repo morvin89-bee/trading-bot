@@ -1442,6 +1442,24 @@ def test_batal_satu_usulan_dca_membatalkan_semua_yang_menunggu(tmp_path):
             f"usulan DCA {p.pair} tidak ikut dibatalkan: {baris[0]}")
 
 
+def test_usulan_dca_tidak_dimuat_setelah_jendela_dibatalkan(tmp_path):
+    """Restart tidak boleh menghidupkan usulan DCA di jendela yang sudah batal.
+
+    Baris `proposed` bisa tertinggal bila penandaan DB sempat gagal; status
+    jendela adalah sumber kebenaran, bukan keberadaan baris usulan.
+    """
+    conn = _fresh_db(tmp_path)
+    dca_window.mark_pending(conn, _ts(hour=9))
+    p = _usulan_dca(_ts(hour=9))
+    shadow_log.record(conn, p, "proposed", "")
+    dca_window.mark_batal(conn, _ts(hour=10))
+
+    main_loop.reset_state()
+    main_loop._muat_usulan(conn, now=_ts(hour=11))
+
+    assert p.id not in main_loop._USULAN_MENUNGGU
+
+
 def test_siklus_sebelum_jam_usul_tidak_menutup_bulan(tmp_path):
     """Guard `ctx.dca_enabled`: siklus di luar jendela usul (tanggal 1,
     08.00 — sebelum `DCA_SEND_HOUR`) tidak boleh menyentuh bulan sama
