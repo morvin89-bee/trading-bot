@@ -1403,6 +1403,45 @@ def test_batal_lalu_setuju_pada_usulan_dca_yang_sama_tidak_mengirim_order(
     assert hidup == 0
 
 
+def test_batal_satu_usulan_dca_membatalkan_semua_yang_menunggu(tmp_path):
+    """Batal bulan ini menutup SELURUH usulan DCA, bukan hanya id yang ditekan.
+
+    Kalau hanya id itu yang dilepas, Setuju pada usulan DCA lain tetap
+    mengirim order padahal `dca_status` sudah 'batal' — order tanpa jendela
+    yang sah.
+    """
+    conn = _fresh_db(tmp_path)
+    telegram = _TelegramPerekam()
+    dca_window.mark_pending(conn, _ts(hour=9))
+    p1 = _usulan_dca(_ts(hour=9), pair="btc_idr", price=1400.0)
+    p2 = _usulan_dca(_ts(hour=9), pair="eth_idr", price=1400.0)
+    shadow_log.record(conn, p1, "proposed", "")
+    shadow_log.record(conn, p2, "proposed", "")
+    main_loop._ingat([p1, p2])
+
+    transport = _TransportPerekam(can_trade=True, can_withdraw=False)
+    ctx = _ctx_kosong()
+    ctx.prices = {"btc_idr": 1400.0, "eth_idr": 1400.0}
+    ctx.free_idr = 400000.0
+
+    fetch = _FetchPerekam([
+        _update_tombol("batal", p1.id),
+        _update_tombol("setuju", p2.id),
+    ])
+    _satu_siklus(conn, telegram=telegram, transport=transport, shadow=False,
+                 now=_ts(hour=12), ctx=ctx, fetch=fetch, verdict=_ok_verdict)
+
+    assert transport.posted == [], (
+        f"Setuju pada usulan DCA lain tetap mengirim order: {transport.posted}")
+    assert p2.id not in main_loop._USULAN_MENUNGGU
+    for p in (p1, p2):
+        baris = conn.execute(
+            "SELECT outcome FROM proposals WHERE id = ?", (p.id,)
+        ).fetchone()
+        assert baris[0] == "batal", (
+            f"usulan DCA {p.pair} tidak ikut dibatalkan: {baris[0]}")
+
+
 def test_siklus_sebelum_jam_usul_tidak_menutup_bulan(tmp_path):
     """Guard `ctx.dca_enabled`: siklus di luar jendela usul (tanggal 1,
     08.00 — sebelum `DCA_SEND_HOUR`) tidak boleh menyentuh bulan sama

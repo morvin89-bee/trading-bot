@@ -126,6 +126,23 @@ def outcome(conn, id):
     return baris[0] if baris is not None else None
 
 
+def void_pending(conn, rule, now, note=""):
+    """Tandai semua usulan `rule` yang jendelanya masih terbuka sebagai "batal".
+
+    Dipakai tombol Batal DCA: satu tekanan menutup SELURUH usulan DCA bulan
+    itu, bukan hanya id yang kebetulan ditekan. Usulan yang jendelanya sudah
+    lewat tidak disentuh — statusnya bukan lagi "menunggu".
+    """
+    _ensure_table(conn)
+    conn.execute(
+        "UPDATE proposals SET outcome = 'batal', note = ? "
+        "WHERE outcome = 'proposed' AND rule = ? AND ts IS NOT NULL "
+        "AND window_s IS NOT NULL AND ? < ts + window_s",
+        (note, rule, now),
+    )
+    conn.commit()
+
+
 def pending(conn, now):
     """Usulan berstatus "proposed" yang jendelanya masih terbuka pada `now`.
 

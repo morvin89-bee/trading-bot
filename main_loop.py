@@ -473,13 +473,18 @@ def _jawab(conn, ctx, aksi, id_usulan, *, now, telegram, transport,
     if aksi == telegram_gate.BUTTON_BATAL:
         if usulan is not None and usulan.rule == rules.RULE_DCA:
             if dca_window.mark_batal(conn, now):
-                # Jendela resmi ditutup: lepas proposal dari ingatan, supaya
-                # jawaban lanjutan (mis. Setuju) menempuh jalur "id tak
-                # dikenal" yang inert — tanpa ini `on_answer` tetap mengirim
-                # order sementara `dca_status` 'batal' (order tanpa jendela
-                # yang sah). `mark_batal` False = bulan sudah selesai:
-                # ingatan TIDAK dilepas, perilaku lama dipertahankan.
-                _USULAN_MENUNGGU.pop(id_usulan, None)
+                # Satu Batal menutup SELURUH usulan DCA bulan ini: kalau hanya
+                # id yang ditekan yang dilepas, Setuju pada usulan DCA lain
+                # tetap mengirim order padahal jendelanya sudah 'batal'.
+                # Ingatan dikosongkan lebih dulu (tidak ada order yang bisa
+                # lolos), lalu DB ditandai supaya restart tidak
+                # menghidupkan kembali tombol yang sama.
+                for pid in [pid for pid, p in _USULAN_MENUNGGU.items()
+                            if p.rule == rules.RULE_DCA]:
+                    _USULAN_MENUNGGU.pop(pid, None)
+                shadow_log.void_pending(
+                    conn, rules.RULE_DCA, now,
+                    "Dibatalkan bersama jendela DCA bulan ini")
             else:
                 telegram.line(
                     "Bulan ini sudah selesai, Batal bulan ini tidak berlaku."
