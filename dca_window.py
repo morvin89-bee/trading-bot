@@ -62,6 +62,8 @@ def ensure_bot_state(conn):
     boleh NULL) adalah kerja Task 14: penanda hari lokal yang sudah dihitung,
     tanpa penanda itu `shadow_day` naik setiap denyut jantung dan sakelar
     menyala dalam hitungan jam, bukan 7 hari (spec §9).
+    `telegram_offset` (INTEGER, default 0) adalah posisi `getUpdates` terakhir:
+    tanpa kolom ini restart membuat update lama diproses ulang.
     `total_disetor` dan
     `reserve_buy_enabled` TIDAK disimpan di sini (R-G): yang pertama sudah
     tersedia dari snapshots.contributions_idr, yang kedua berisiko ganda dengan
@@ -76,7 +78,8 @@ def ensure_bot_state(conn):
             shadow_day INTEGER NOT NULL DEFAULT 0,
             dca_sent_ts REAL,
             dca_status TEXT,
-            shadow_checked_day TEXT
+            shadow_checked_day TEXT,
+            telegram_offset INTEGER NOT NULL DEFAULT 0
         )
         """
     )
@@ -92,6 +95,13 @@ def ensure_bot_state(conn):
     ]
     if "shadow_checked_day" not in kolom:
         conn.execute("ALTER TABLE bot_state ADD COLUMN shadow_checked_day TEXT")
+    # Basis data lama juga belum punya `telegram_offset`: tanpa migrasi ini
+    # pembacaan offset setelah restart gagal keras (OperationalError).
+    if "telegram_offset" not in kolom:
+        conn.execute(
+            "ALTER TABLE bot_state ADD COLUMN telegram_offset "
+            "INTEGER NOT NULL DEFAULT 0"
+        )
     conn.execute("INSERT OR IGNORE INTO bot_state (id) VALUES (1)")
     conn.commit()
 

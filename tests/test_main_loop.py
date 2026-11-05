@@ -419,6 +419,7 @@ def test_kolom_penanda_hari_ditambahkan_idempoten():
     assert _kolom(conn, "bot_state") == [
         "id", "last_dca_date", "v1_enabled", "shadow_day",
         "dca_sent_ts", "dca_status", "shadow_checked_day",
+        "telegram_offset",
     ]
     baris = conn.execute("SELECT * FROM bot_state WHERE id = 1").fetchone()
     assert baris["shadow_day"] == 4
@@ -686,6 +687,77 @@ def test_polling_membaca_jawaban_dan_mencatat_setuju(tmp_path):
     assert baris[0] == "setuju"
     # Tombol di pesan lama sudah tidak berlaku — pengguna diberi tahu.
     assert any(id_usulan in baris for baris in telegram.lines)
+
+
+def test_usulan_menunggu_dipulihkan_setelah_restart(tmp_path):
+    """Setuju setelah restart tidak boleh jatuh ke "tidak dikenal".
+
+    `_USULAN_MENUNGGU` dulu hanya di memori: proses mati = tombol yang sudah
+    dikirim ke pengguna menjadi inert, lalu +24 jam tercatat `dca_missed`
+    palsu. Usulan yang jendelanya masih terbuka wajib dimuat ulang dari DB.
+    """
+    conn = _fresh_db(tmp_path)
+    telegram = _TelegramPerekam()
+    now = _ts(day=1, hour=9, minute=5)
+    _satu_siklus(conn, telegram=telegram, now=now, ctx=_ctx_dca())
+    p = next(p for p in telegram.konfirmasi if p.rule == rules.RULE_DCA)
+
+    main_loop.reset_state()                  # proses mati: state memori hilang
+    main_loop._muat_usulan(conn, now=now + 60)
+
+    fetch = _FetchPerekam([_update_tombol("setuju", p.id)])
+    telegram2 = _TelegramPerekam()
+    _satu_siklus(conn, telegram=telegram2, now=now + 60, ctx=_ctx_dca(),
+                 fetch=fetch)
+
+    assert not any("tidak dikenal" in b for b in telegram2.lines), (
+        f"usulan tidak dipulihkan setelah restart: {telegram2.lines}")
+    baris = conn.execute(
+        "SELECT outcome FROM proposals WHERE id = ?", (p.id,)
+    ).fetchone()
+    assert baris[0] == "setuju"
+
+
+def test_usulan_kedaluwarsa_tidak_dimuat_setelah_restart(tmp_path):
+    """Usulan yang jendelanya sudah lewat tidak boleh hidup lagi setelah restart."""
+    conn = _fresh_db(tmp_path)
+    telegram = _TelegramPerekam()
+    now = _ts(day=1, hour=9, minute=5)
+    _satu_siklus(conn, telegram=telegram, now=now, ctx=_ctx_dca())
+    p = next(p for p in telegram.konfirmasi if p.rule == rules.RULE_DCA)
+
+    main_loop.reset_state()
+    main_loop._muat_usulan(conn, now=now + proposal.DCA_WINDOW_S)
+
+    assert p.id not in main_loop._USULAN_MENUNGGU
+
+
+def test_offset_telegram_dipulihkan_setelah_restart(tmp_path):
+    """Offset `getUpdates` harus tahan restart.
+
+    Offset 0 setelah restart membuat Telegram mengirim ulang update lama;
+    tombol yang sudah dijawab bisa diproses sebagai jawaban baru.
+    """
+    conn = _fresh_db(tmp_path)
+    now = _ts(hour=12)
+    fetch = _FetchPerekam([{"update_id": 5, "message": {"text": "halo"}}])
+    _satu_siklus(conn, telegram=_TelegramPerekam(), now=now, ctx=_ctx(),
+                 fetch=fetch)
+
+    assert fetch.panggilan[0][1] == 0
+    tersimpan = conn.execute(
+        "SELECT telegram_offset FROM bot_state WHERE id = 1"
+    ).fetchone()[0]
+    assert tersimpan == 6
+
+    main_loop.reset_state()
+    main_loop._muat_offset(conn)
+    fetch2 = _FetchPerekam([])
+    _satu_siklus(conn, telegram=_TelegramPerekam(), now=now + 15, ctx=_ctx(),
+                 fetch=fetch2)
+
+    assert fetch2.panggilan[0][1] == 6, (
+        "offset kembali ke 0 setelah restart: update lama akan diproses ulang")
 
 
 def test_jawaban_kedua_diabaikan_dan_tidak_mengirim_order_lagi(tmp_path):

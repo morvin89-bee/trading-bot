@@ -164,7 +164,10 @@ def test_should_remind_is_passive_and_sends_nothing(tmp_path):
     assert sesudah[2] == "awaiting"  # "Tunda" tidak pernah berubah jadi "Setuju"
     assert _ada_tabel_proposals(conn) is False  # nol tulisan sama sekali
     sumber = inspect.getsource(dca_window)
-    assert "telegram" not in sumber  # pengirimannya urusan pemanggil (Task 14)
+    # Nama kolom `telegram_offset` boleh muncul di docstring; yang dilarang
+    # adalah modul ini mengirim pesan sendiri (pengiriman urusan pemanggil).
+    assert "telegram_gate" not in sumber
+    assert ".confirmation(" not in sumber and ".line(" not in sumber
     assert "urllib" not in sumber and "requests" not in sumber
     assert "rebalance_actions" not in sumber
     assert "drawdown" not in sumber.lower()

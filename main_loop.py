@@ -376,6 +376,34 @@ def _ingat(usulan):
     return usulan
 
 
+def _muat_usulan(conn, *, now):
+    """Pulihkan usulan yang masih menunggu jawaban dari `shadow_log`.
+
+    Tanpa ini restart membuat tombol yang sudah dikirim ke Telegram menjadi
+    inert ("id tak dikenal"), lalu jendela DCA 24 jam berakhir dengan catatan
+    `dca_missed` palsu.
+    """
+    _ingat(shadow_log.pending(conn, now))
+
+
+def _muat_offset(conn):
+    """Pulihkan offset `getUpdates` terakhir dari `bot_state`."""
+    dca_window.ensure_bot_state(conn)
+    baris = conn.execute(
+        "SELECT telegram_offset FROM bot_state WHERE id = 1"
+    ).fetchone()
+    _OFFSET_TELEGRAM["offset"] = int(baris[0]) if baris is not None else 0
+
+
+def _simpan_offset(conn, offset):
+    """Simpan offset `getUpdates` agar restart tidak memproses ulang update lama."""
+    dca_window.ensure_bot_state(conn)
+    conn.execute(
+        "UPDATE bot_state SET telegram_offset = ? WHERE id = 1", (offset,)
+    )
+    conn.commit()
+
+
 def _catat_dca(conn, now, usulan, *, tunda=False):
     """Buka atau tutup bulan DCA setelah satu tick — HANYA bila disebut.
 
@@ -560,7 +588,7 @@ def _polling(conn, ctx, *, now, telegram, transport, shadow, verdict, fetch,
     if fetch is None:
         return False
     updates, offset_baru = _ambil_update(telegram, fetch)
-    _OFFSET_TELEGRAM["offset"] = offset_baru
+    _simpan_offset(conn, offset_baru)
     return _proses_batch(conn, ctx, updates, now=now, telegram=telegram,
                          transport=transport, shadow=shadow, verdict=verdict,
                          baca_harga=baca_harga)
@@ -803,6 +831,8 @@ def main(argv=None, *, conn=None, db_path=None, telegram=None,
             telegram = telegram_gate.Telegram(token, chat)
 
         reset_state()
+        _muat_usulan(conn, now=jam())
+        _muat_offset(conn)
         transport = None
         telah_menyala = False
         # Banner status dicetak SATU KALI PER KEADAAN — bukan tiap bangun
@@ -1001,7 +1031,7 @@ def main(argv=None, *, conn=None, db_path=None, telegram=None,
                     # di server Telegram tidak hilang.
                     updates, offset_baru = ambil
                     try:
-                        _OFFSET_TELEGRAM["offset"] = offset_baru
+                        _simpan_offset(conn, offset_baru)
                         _proses_batch(conn, ctx, updates, now=sekarang,
                                       telegram=telegram, transport=transport,
                                       shadow=shadow,

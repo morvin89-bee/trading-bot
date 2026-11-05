@@ -376,9 +376,11 @@ def tick(
                 ctx.dca_retry = True
             continue
 
-        # Catat usulan sebagai "proposed" di shadow_log
-        if shadow:
-            shadow_log.record(conn, prop, "proposed", "")
+        # Catat usulan sebagai "proposed" di shadow_log — juga di mode
+        # eksekusi. Baris inilah yang dipulihkan `main_loop` setelah restart;
+        # tanpa catatan di mode eksekusi, tombol Setuju yang sudah terkirim
+        # menjadi inert saat bot hidup lagi.
+        shadow_log.record(conn, prop, "proposed", "")
 
         proposals.append(prop)
 

@@ -5,6 +5,8 @@ Semua fungsi murni lokal (tanpa jaringan) agar mudah diuji.
 import time
 import sqlite3
 
+import proposal
+
 
 # Hasil yang mungkin terjadi pada suatu usulan
 outcomes = (
@@ -22,7 +24,13 @@ outcomes = (
 
 
 def _ensure_table(conn):
-    """Buat tabel proposals jika belum ada."""
+    """Buat tabel proposals jika belum ada, lalu lengkapi kolom barunya.
+
+    Tiga kolom terakhir menyimpan angka yang dibutuhkan untuk memulihkan
+    usulan yang masih menunggu jawaban setelah proses restart. Tanpa kolom
+    itu usulan yang sudah terkirim ke Telegram menjadi inert saat bot hidup
+    lagi, dan jendela DCA 24 jam berakhir dengan catatan `dca_missed` palsu.
+    """
     cursor = conn.cursor()
     cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='proposals'")
     if not cursor.fetchone():
@@ -38,10 +46,21 @@ def _ensure_table(conn):
                 price_ref REAL,
                 rule TEXT,
                 outcome TEXT,
-                note TEXT
+                note TEXT,
+                qty REAL,
+                reserve_after REAL,
+                window_s INTEGER
             )
             """
         )
+        return
+    # Tabel lama (dibuat sebelum P1.3) belum punya kolom pemulihan. Cek
+    # lewat PRAGMA supaya migrasi idempoten — ALTER kedua akan gagal keras.
+    kolom = [baris[1] for baris in conn.execute("PRAGMA table_info(proposals)")]
+    for nama, tipe in (("qty", "REAL"), ("reserve_after", "REAL"),
+                       ("window_s", "INTEGER")):
+        if nama not in kolom:
+            conn.execute(f"ALTER TABLE proposals ADD COLUMN {nama} {tipe}")
 
 
 def record(conn, p, outcome, note=""):
@@ -68,8 +87,9 @@ def record(conn, p, outcome, note=""):
     conn.execute(
         """
         INSERT INTO proposals (
-            id, ts, day, kind, pair, amount_idr, price_ref, rule, outcome, note
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            id, ts, day, kind, pair, amount_idr, price_ref, rule, outcome,
+            note, qty, reserve_after, window_s
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             p.id,
@@ -82,9 +102,47 @@ def record(conn, p, outcome, note=""):
             p.rule,
             outcome,
             note,
+            getattr(p, "qty", None),
+            getattr(p, "reserve_after", None),
+            getattr(p, "window_s", None),
         ),
     )
     conn.commit()
+
+
+def pending(conn, now):
+    """Usulan berstatus "proposed" yang jendelanya masih terbuka pada `now`.
+
+    Dipakai `main_loop` untuk memulihkan `_USULAN_MENUNGGU` setelah restart:
+    tombol yang sudah dikirim ke pengguna harus tetap bisa dijawab. Usulan
+    yang jendelanya sudah lewat TIDAK dimuat — konfirmasi hangus, dan
+    `proposal.is_expired` akan menolaknya pula.
+
+    Baris lama tanpa angka pemulihan (`window_s`/`qty` NULL) dilewati:
+    merekonstruksi usulan dari angka yang tidak lengkap berarti menebak.
+    """
+    _ensure_table(conn)
+    baris = conn.execute(
+        """
+        SELECT id, kind, pair, amount_idr, qty, price_ref, rule,
+               reserve_after, window_s, ts
+        FROM proposals
+        WHERE outcome = 'proposed' AND ts IS NOT NULL
+          AND window_s IS NOT NULL AND qty IS NOT NULL
+          AND reserve_after IS NOT NULL AND ? < ts + window_s
+        """,
+        (now,),
+    ).fetchall()
+    return [
+        proposal.Proposal(
+            id=r["id"], kind=r["kind"], pair=r["pair"],
+            amount_idr=r["amount_idr"], qty=r["qty"],
+            price_ref=r["price_ref"], rule=r["rule"],
+            reserve_after=r["reserve_after"], window_s=r["window_s"],
+            created_ts=r["ts"], status="proposed",
+        )
+        for r in baris
+    ]
 
 
 def daily_summary(conn, day):
