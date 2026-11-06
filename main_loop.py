@@ -583,8 +583,13 @@ def _jawab(conn, ctx, aksi, id_usulan, *, now, telegram, transport,
     # Pengaman sesungguhnya ada di langkah 0 `on_answer` (jawaban kedua
     # berhenti sebelum menyentuh bursa). Pesan ini hanya untuk hasil yang
     # sudah final; penolakan sebelum kirim masih bisa dicoba lagi (P1.4).
-    menunggu = (hasil in ("gate_blocked", "halted")
-                and shadow_log.outcome(conn, usulan.id) in (None, "proposed"))
+    # "ignored" karena harga bergeser/re-quote juga belum final selama
+    # jendelanya masih terbuka dan usulan belum dijawab.
+    outcome = shadow_log.outcome(conn, usulan.id)
+    menunggu = outcome in (None, "proposed") and (
+        hasil in ("gate_blocked", "halted")
+        or (hasil == "ignored" and not proposal.is_expired(usulan, now))
+    )
     if menunggu:
         telegram.line(
             f"Usulan {id_usulan} belum dieksekusi — tombol masih berlaku. "

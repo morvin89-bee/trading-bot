@@ -1267,6 +1267,42 @@ def test_batas_retry_dca_dan_pemberitahuan_bulan_gagal(tmp_path):
                for pesan in telegram.lines), telegram.lines
 
 
+def test_requote_dca_drift_8_persen_hangus_dan_ulang_tidak_mengusulkan_dca(
+        tmp_path):
+    """DCA +8% > batas 3%: konfirmasi hangus, jendela tetap awaiting, dan
+    `/ulang` TIDAK membuat usulan DCA baru (perilaku lama, dilaporkan)."""
+    conn = _fresh_db(tmp_path)
+    now = _ts(day=1, hour=9, minute=5)
+    p = _usulan_dca(now, pair="btc_idr", price=1000.0, amount_idr=100000.0)
+    dca_window.mark_pending(conn, now)
+    shadow_log.record(conn, p, "proposed", "")
+    main_loop._ingat([p])
+
+    telegram = _TelegramPerekam()
+    fetch = _FetchPerekam([_update_tombol("setuju", p.id)])
+    keluar = _satu_siklus(
+        conn, telegram=telegram, now=now + 10, ctx=_ctx_dca(),
+        fetch=fetch, baca_harga=lambda pair: 1080.0)
+
+    assert keluar == "kosong"
+    assert telegram.konfirmasi == []
+    assert any("melebihi batas" in s and "hangus" in s
+               for s in telegram.lines), telegram.lines
+    assert dca_window.dca_state(conn, now + 10)[0] == "awaiting"
+    assert shadow_log.outcome(conn, p.id) == "proposed"
+
+    telegram2 = _TelegramPerekam()
+    fetch2 = _FetchPerekam([_update_teks("/ulang")])
+    keluar2 = _satu_siklus(
+        conn, telegram=telegram2, now=now + 20, ctx=_ctx_dca(),
+        fetch=fetch2, baca_harga=lambda pair: 1080.0)
+
+    assert keluar2 == "kosong"
+    assert telegram2.konfirmasi == [], (
+        "perilaku /ulang berubah: usulan DCA baru dibuat setelah hangus")
+    assert dca_window.dca_state(conn, now + 20)[0] == "awaiting"
+
+
 def test_dca_gagal_di_gerbang_menutup_bulan_sekali(tmp_path):
     """Percobaan pertama gugur di gerbang spread -> `mark_skip` menutup
     bulan tepat sekali: `dca_status` "batal", `dca_sent_ts` NULL (tidak ada

@@ -497,6 +497,57 @@ def _catat_hasil(conn: Any, p: proposal.Proposal, outcome: str,
         conn.commit()
 
 
+def _requote_dca(conn: Any, p: proposal.Proposal, harga_sekarang: float, *,
+                 now: float, telegram: telegram_gate.Telegram) -> str:
+    """Re-quote DCA saat harga bergeser 0,5%-3% dari angka di pesan.
+
+    Order DCA adalah LIMIT di `price_ref`, jadi harga limit ikut harga
+    sekarang; qty dihitung dari nominal yang tetap. Id/client_order_id dan
+    jendela tidak berubah. Konfirmasi BARU dikirim: persetujuan lama tidak
+    dipakai karena angka yang disetujui pengguna sudah berubah. Di atas
+    batas -> hangus, jendela tetap awaiting.
+    """
+    drift = abs(harga_sekarang - p.price_ref) / p.price_ref
+    if drift > proposal.DCA_MAX_DRIFT_PCT:
+        telegram.line(
+            f"Harga {p.pair} bergeser {drift:.1%} dari angka di pesan, "
+            f"melebihi batas re-quote DCA "
+            f"{proposal.DCA_MAX_DRIFT_PCT:.0%} — konfirmasi hangus, tidak "
+            "ada order. Jendela DCA tetap terbuka; usulan lama masih bisa "
+            "disetujui bila harga kembali dalam 0,5%.")
+        return "ignored"
+
+    lama_harga, lama_qty = p.price_ref, p.qty
+    baru = replace(
+        p, price_ref=harga_sekarang, qty=p.amount_idr / harga_sekarang)
+    if telegram.confirmation(baru) is None:
+        telegram.line(
+            f"Konfirmasi re-quote {p.pair} gagal dikirim — tidak ada order. "
+            "Usulan lama tetap berlaku.")
+        return "ignored"
+
+    p.price_ref, p.qty = baru.price_ref, baru.qty
+    catatan = (
+        f"Re-quote DCA: harga {lama_harga} -> {harga_sekarang}, "
+        f"qty {lama_qty} -> {p.qty}, nominal tetap {p.amount_idr}")
+    shadow_log.perbarui_harga(conn, p, catatan)
+    # Baris audit terpisah: catatan di atas akan tertimpa saat order selesai.
+    shadow_log.record(
+        conn,
+        replace(baru, id=f"requoted_{p.id}", created_ts=now),
+        "requoted",
+        catatan,
+    )
+    telegram.line(
+        f"Re-quote DCA {p.pair}: harga lama {alerts._rp(lama_harga)} -> "
+        f"harga baru {alerts._rp(harga_sekarang)}, qty lama "
+        f"{proposal._qty_text(lama_qty)} -> qty baru "
+        f"{proposal._qty_text(p.qty)} koin. Nominal tetap "
+        f"{alerts._rp(p.amount_idr)}. Tekan Setuju pada pesan konfirmasi "
+        "baru untuk mengirim.")
+    return "ignored"
+
+
 def _beritahu_status(p: proposal.Proposal, status: str,
                      telegram: telegram_gate.Telegram) -> None:
     """Satu baris notifikasi per perubahan status bursa (G7)."""
@@ -532,7 +583,10 @@ def on_answer(conn: Any, ctx: Context, *, p: proposal.Proposal, answer: str,
     2b. Harga sekarang bergeser > 0,5% dari angka di pesan
         (`proposal.price_still_valid`) -> `"ignored"` — konfirmasi hangus
         (spec L116, putusan R-E); harga tak terbaca juga berarti tidak ada
-        keputusan (§6.3).
+        keputusan (§6.3). PENGECUALIAN KHUSUS DCA (keputusan 2026-11-06):
+        geser 0,5%-3% -> harga limit dan qty dihitung ulang dari nominal
+        tetap, konfirmasi BARU dikirim, id/jendela tetap; di atas 3% tetap
+        hangus.
 
         **KEWAJIBAN PEMANGGIL (Task 14):** fungsi ini MEMBACA
         `ctx.prices.get(p.pair)`, tidak pernah mengambil harga sendiri.
@@ -599,6 +653,12 @@ def on_answer(conn: Any, ctx: Context, *, p: proposal.Proposal, answer: str,
     #     keputusan (§6.3) dan `price_still_valid` menolaknya.
     harga_sekarang = ctx.prices.get(p.pair)
     if not proposal.price_still_valid(p, harga_sekarang):
+        # Pengecualian KHUSUS DCA: re-quote di dalam batas, bukan hangus.
+        # Harga hilang tetap jatuh ke jalur hangus di bawah (fail closed).
+        if (p.rule == rules.RULE_DCA and harga_sekarang is not None
+                and harga_sekarang > 0):
+            return _requote_dca(conn, p, harga_sekarang, now=now,
+                                telegram=telegram)
         if harga_sekarang is None or harga_sekarang <= 0:
             alasan_hangus = (
                 f"Harga {p.pair} tidak bisa dibaca untuk memeriksa geseran")

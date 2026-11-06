@@ -12,6 +12,7 @@ import proposal
 import pytest
 import re
 import rules
+import shadow_log
 import spread
 import sqlite3
 import tempfile
@@ -1057,6 +1058,137 @@ def test_on_answer_harga_tidak_terbaca_konfirmasi_hangus(tmp_path):
     assert out == "ignored"
     assert t.posted == [] and _db_rows(conn) == []
     assert any("hangus" in s for s in sent), sent
+
+
+def test_requote_dca_drift_15_persen_kirim_konfirmasi_baru(tmp_path):
+    """DCA +1,5%: harga limit ikut harga sekarang, qty dari nominal tetap,
+    id tetap, dan TIDAK ada order sampai pengguna menekan Setuju lagi."""
+    conn = _fresh_db(tmp_path)
+    p = _proposal(kind="BUY", pair="btc_idr", amount_idr=100000.0,
+                  qty=100.0, price_ref=1000.0, rule=rules.RULE_DCA,
+                  window_s=proposal.DCA_WINDOW_S)
+    shadow_log.record(conn, p, "proposed", "")
+    ctx = _ctx()
+    ctx.free_idr = 200000.0
+    ctx.reserve_idr = 0.0
+    ctx.prices["btc_idr"] = 1015.0        # +1,5%
+    t = _FakeTransport(status_sequence=["filled"])
+    sent, konfirmasi = [], []
+
+    class _Tg:
+        def line(self, text):
+            sent.append(text)
+            return True
+
+        def confirmation(self, prop):
+            konfirmasi.append(prop)
+            return 12345
+
+    out = engine.on_answer(conn, ctx, p=p, answer="setuju", now=10.0,
+                           transport=t, telegram=_Tg(), shadow=False,
+                           verdict=lambda pair, **k: (True, 1.0))
+
+    assert out == "ignored"
+    assert t.posted == []
+    assert len(konfirmasi) == 1
+    baru = konfirmasi[0]
+    assert baru.id == p.id
+    assert baru.amount_idr == 100000.0
+    assert baru.price_ref == 1015.0
+    assert baru.qty == pytest.approx(100000.0 / 1015.0)
+    assert p.price_ref == 1015.0
+    assert p.qty == pytest.approx(100000.0 / 1015.0)
+    baris = conn.execute(
+        "SELECT price_ref, qty, outcome FROM proposals WHERE id = ?",
+        (p.id,)).fetchone()
+    assert baris[0] == 1015.0
+    assert baris[1] == pytest.approx(100000.0 / 1015.0)
+    assert baris[2] == "proposed"
+    audit = conn.execute(
+        "SELECT price_ref, qty, outcome, note FROM proposals WHERE id = ?",
+        (f"requoted_{p.id}",)).fetchone()
+    assert audit[0] == 1015.0
+    assert audit[1] == pytest.approx(100000.0 / 1015.0)
+    assert audit[2] == "requoted"
+    assert "1000.0 -> 1015.0" in audit[3] and "100.0 ->" in audit[3], audit[3]
+    assert any("Re-quote DCA" in s and "harga lama" in s for s in sent), sent
+
+    out2 = engine.on_answer(conn, ctx, p=p, answer="setuju", now=20.0,
+                            transport=t, telegram=_Tg(), shadow=False,
+                            verdict=lambda pair, **k: (True, 1.0))
+
+    assert out2 == "sent"
+    assert len(t.posted) == 1
+    assert t.posted[0]["price"] == 1015.0
+    assert t.posted[0]["amount"] == pytest.approx(100000.0 / 1015.0)
+    assert t.posted[0]["client_order_id"] == p.id
+
+
+def test_requote_dca_gagal_kirim_konfirmasi_tidak_mengubah_usulan(tmp_path):
+    """Konfirmasi re-quote gagal dikirim -> tidak ada order dan angka lama
+    yang sudah disetujui pengguna TIDAK berubah diam-diam."""
+    conn = _fresh_db(tmp_path)
+    p = _proposal(kind="BUY", pair="btc_idr", amount_idr=100000.0,
+                  qty=100.0, price_ref=1000.0, rule=rules.RULE_DCA,
+                  window_s=proposal.DCA_WINDOW_S)
+    shadow_log.record(conn, p, "proposed", "")
+    ctx = _ctx()
+    ctx.free_idr = 200000.0
+    ctx.reserve_idr = 0.0
+    ctx.prices["btc_idr"] = 1015.0
+    t = _FakeTransport(status_sequence=["filled"])
+    sent = []
+
+    class _Tg:
+        def line(self, text):
+            sent.append(text)
+            return True
+
+        def confirmation(self, prop):
+            return None
+
+    out = engine.on_answer(conn, ctx, p=p, answer="setuju", now=10.0,
+                           transport=t, telegram=_Tg(), shadow=False,
+                           verdict=lambda pair, **k: (True, 1.0))
+
+    assert out == "ignored"
+    assert t.posted == []
+    assert p.price_ref == 1000.0
+    assert p.qty == 100.0
+    baris = conn.execute(
+        "SELECT price_ref, qty, outcome FROM proposals WHERE id = ?",
+        (p.id,)).fetchone()
+    assert baris == (1000.0, 100.0, "proposed")
+    assert any("gagal dikirim" in s for s in sent), sent
+
+
+def test_take_profit_drift_15_persen_tetap_hangus(tmp_path):
+    """Aturan non-DCA tetap memakai toleransi 0,5%: take-profit +1,5%
+    hangus, tanpa konfirmasi re-quote dan tanpa order."""
+    conn = _fresh_db(tmp_path)
+    p = _fresh_proposal()                 # SELL take-profit, price_ref 1600
+    ctx = _ctx()
+    ctx.prices["btc_idr"] = 1624.0        # +1,5%
+    t = _FakeTransport(status_sequence=["filled"])
+    sent, konfirmasi = [], []
+
+    class _Tg:
+        def line(self, text):
+            sent.append(text)
+            return True
+
+        def confirmation(self, prop):
+            konfirmasi.append(prop)
+            return 12345
+
+    out = engine.on_answer(conn, ctx, p=p, answer="setuju", now=0.0,
+                           transport=t, telegram=_Tg(), shadow=False,
+                           verdict=lambda pair, **k: (True, 1.0))
+
+    assert out == "ignored"
+    assert t.posted == []
+    assert konfirmasi == []
+    assert any("bergeser" in s and "hangus" in s for s in sent), sent
 
 
 def test_on_answer_produksi_setelah_tick_tanpa_bentrok_primary_key(tmp_path):

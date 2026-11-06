@@ -12,6 +12,7 @@ import proposal
 outcomes = (
     "proposed",
     "undelivered",
+    "requoted",
     "setuju",
     "tunda",
     "batal",
@@ -179,6 +180,21 @@ def pending(conn, now):
     ]
 
 
+def perbarui_harga(conn, p, note=""):
+    """Perbarui harga/qty usulan yang di-re-quote; id dan outcome tetap.
+
+    Dipakai re-quote DCA: angka di pesan baru harus sama dengan angka yang
+    tersimpan, supaya tombol yang sama setelah restart tidak memakai harga
+    lama. `id`, `ts`, dan `outcome` tidak disentuh.
+    """
+    _ensure_table(conn)
+    conn.execute(
+        "UPDATE proposals SET price_ref = ?, qty = ?, note = ? WHERE id = ?",
+        (p.price_ref, p.qty, note, p.id),
+    )
+    conn.commit()
+
+
 def dca_bulan_ini(conn, rule, bulan):
     """Pair DCA yang sudah terkirim dan jumlah percobaan gagal bulan ini.
 
@@ -220,6 +236,7 @@ def daily_summary(conn, day):
     outcome_to_id = {
         "proposed": "diusulkan",
         "undelivered": "gagal dikirim",
+        "requoted": "di-re-quote",
         "setuju": "disetujui",
         "tunda": "ditunda",
         "batal": "dibatalkan",

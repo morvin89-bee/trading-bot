@@ -17,6 +17,9 @@ import rules
 REACTIVE_WINDOW_S = 90      # jendela konfirmasi sinyal reaktif (§6.2)
 DCA_WINDOW_S = 86400        # jendela konfirmasi DCA — 24 jam (§7.2)
 PRICE_DRIFT_TOL = 0.005     # geser harga > 0,5% -> konfirmasi hangus (§6.2)
+DCA_MAX_DRIFT_PCT = 0.03    # batas re-quote KHUSUS DCA (keputusan 2026-11-06):
+                            # 0,5% < geser <= 3% -> harga/qty dihitung ulang;
+                            # di atas 3% konfirmasi hangus, jendela tetap awaiting
 FEE_PCT = 0.002             # perkiraan fee taker yang diketengahkan (§6.2)
 RULE_RESERVE_BUY = "reserve_buy"   # ejaan yang sama persis dengan yang
 # dibaca `safeguards.gates` (ruling F15); jangan diubah sepihak — ejaan
