@@ -44,6 +44,16 @@ def test_refresh_writes_at_most_one_snapshot_per_day(tmp_conn, monkeypatch):
     assert len(ps.list_snapshots(tmp_conn)) == 1   # buka dasbor berkali-kali aman
 
 
+def test_fetch_price_tolak_cache_lebih_dari_120_detik(monkeypatch):
+    """Cache 121 detik = hilang; 60 detik masih sah. Batas dari konstanta."""
+    monkeypatch.setattr(p, "_PRICE_CACHE", {"btc_idr": (1000.0, 500.0)})
+    monkeypatch.setattr(p.price_feed, "indodax_price",
+                        lambda pair: (None, None))
+
+    assert p.fetch_price("btc_idr", now=1000.0 + 121) is None
+    assert p.fetch_price("btc_idr", now=1000.0 + 60) == 500.0
+
+
 def test_offline_refresh_does_not_write_snapshot(tmp_conn):
     p.refresh(tmp_conn, online=False)              # hanya membaca cache
     assert ps.list_snapshots(tmp_conn) == []

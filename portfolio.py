@@ -193,14 +193,33 @@ def sync_trades(conn, pairs=None):
 
 
 _PRICE_CACHE = {}
-_CACHE_TTL = 86400  # keep cached price up to 24 h if fresh fetch fails
+PRICE_CACHE_TTL_S = 120  # harga cache lebih tua dari ini = harga hilang (§6.3)
 
-def fetch_price(pair):
-    """Harga **bid** Indodax untuk `pair`; `None` bila gagal dan tidak ada cache.
-    Menerapkan caching ringan agar bila terjadi kegagalan jaringan sementara (seperti HTTP 429 atau DNS timeout),
-    harga terakhir yang sah (<60s) dapat digunakan sehingga siklus DCA tidak gugur mendadak.
+
+def cached_price(pair, *, now):
+    """Harga cache yang usianya 0..`PRICE_CACHE_TTL_S`, atau `None`.
+
+    Satu sumber batas untuk `fetch_price`, `baca_konteks`, dan
+    `_proses_batch`: harga basi tidak boleh lolos sebagai angka jujur.
+    Waktu di masa depan (jam mundur) juga ditolak — bukan "segar".
     """
-    now = time.time()
+    entri = _PRICE_CACHE.get(pair)
+    if entri is None:
+        return None
+    ts, harga = entri
+    umur = now - ts
+    if 0 <= umur <= PRICE_CACHE_TTL_S:
+        return harga
+    return None
+
+
+def fetch_price(pair, *, now=None):
+    """Harga **bid** Indodax untuk `pair`; `None` bila gagal dan cache basi.
+
+    Cache hanya dipakai bila usianya <= `PRICE_CACHE_TTL_S` (120 detik):
+    kegagalan jaringan sesaat masih tertutup, harga 24 jam tidak.
+    """
+    now = time.time() if now is None else now
     try:
         res = price_feed.indodax_price(pair)
         if res and res[0] is not None:
@@ -210,13 +229,7 @@ def fetch_price(pair):
     except Exception:
         pass
 
-    # Fallback ke cache bila ada dan usianya di bawah TTL
-    if pair in _PRICE_CACHE:
-        ts, harga = _PRICE_CACHE[pair]
-        if now - ts <= _CACHE_TTL:
-            return harga
-
-    return None
+    return cached_price(pair, now=now)
 
 
 def _breakdown_json(holdings, idr):

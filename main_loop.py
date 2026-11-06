@@ -328,13 +328,8 @@ def baca_konteks(conn, *, now=None, sinkron=portfolio.sync_trades,
     for pair in portfolio.COIN_PAIRS.values():
         harga = ambil_harga(pair)
         if harga is None:
-            # Fallback to price cache if network failed
-            cache = getattr(portfolio, '_PRICE_CACHE', {})
-            if pair in cache:
-                ts, cached = cache[pair]
-                # Use cached price if less than 24h old
-                if time.time() - ts < 86400:
-                    harga = cached
+            # Hanya cache SEGAR (<= 120 dtk); selain itu harga hilang.
+            harga = portfolio.cached_price(pair, now=now)
         prices[pair] = harga
     hilang = [pair for pair, harga in prices.items() if harga is None]
     if hilang:
@@ -656,13 +651,9 @@ def _proses_batch(conn, ctx, updates, *, now, telegram, transport, shadow,
                     try:
                         harga = baca_harga(pair)
                         if harga is None:
-                            # Fallback to price cache if network failed
-                            cache = getattr(portfolio, '_PRICE_CACHE', {})
-                            if pair in cache:
-                                ts, cached = cache[pair]
-                                # Use cached price if less than 24h old
-                                if time.time() - ts < 86400:
-                                    harga = cached
+                            # Hanya cache SEGAR (<= 120 dtk); selain itu
+                            # harga hilang dan `on_answer` menolak.
+                            harga = portfolio.cached_price(pair, now=now)
                         ctx.prices[pair] = harga
                     except Exception:
                         ctx.prices[pair] = None

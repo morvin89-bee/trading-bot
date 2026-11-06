@@ -1824,6 +1824,72 @@ def test_baca_konteks_harga_satu_pair_gagal_mengangkat(tmp_path):
             ambil_info=lambda: {"balances": []}, ambil_harga=ambil_harga)
 
 
+def test_baca_konteks_tolak_cache_lebih_dari_120_detik(tmp_path, monkeypatch):
+    """Harga cache 121 detik = harga hilang, bukan angka yang dipakai."""
+    import portfolio
+    import portfolio_store
+    conn = _fresh_db(tmp_path)
+    portfolio_store.init_db(conn)
+    now = _ts(hour=12)
+    monkeypatch.setattr(
+        portfolio, "_PRICE_CACHE", {"btc_idr": (now - 121, 999.0)})
+
+    def ambil_harga(pair):
+        return None if pair == "btc_idr" else 1000.0
+
+    with pytest.raises(ValueError, match="btc_idr"):
+        main_loop.baca_konteks(
+            conn, now=now, sinkron=lambda c: None,
+            ambil_info=lambda: {"balances": []}, ambil_harga=ambil_harga)
+
+
+def test_baca_konteks_pakai_cache_segar_di_bawah_120_detik(tmp_path,
+                                                           monkeypatch):
+    """Harga cache 60 detik masih boleh dipakai — batasnya pendek, bukan nol."""
+    import portfolio
+    import portfolio_store
+    conn = _fresh_db(tmp_path)
+    portfolio_store.init_db(conn)
+    now = _ts(hour=12)
+    monkeypatch.setattr(
+        portfolio, "_PRICE_CACHE", {"btc_idr": (now - 60, 999.0)})
+
+    def ambil_harga(pair):
+        return None if pair == "btc_idr" else 1000.0
+
+    ctx = main_loop.baca_konteks(
+        conn, now=now, sinkron=lambda c: None,
+        ambil_info=lambda: {"balances": []}, ambil_harga=ambil_harga)
+
+    assert ctx.prices["btc_idr"] == 999.0
+
+
+def test_polling_tidak_memakai_cache_basi_untuk_gerbang_harga(
+        tmp_path, monkeypatch):
+    """Tombol Setuju tidak boleh lolos gerbang harga memakai cache 24 jam."""
+    import portfolio
+    conn = _fresh_db(tmp_path)
+    # Waktu nyata: jalur lama memakai time.time(), jadi cache 121 detik harus
+    # benar-benar berusia 121 detik terhadap jam dinding.
+    now = time.time()
+    p = _usulan_dca(now, pair="btc_idr", price=1000.0, amount_idr=100000.0)
+    dca_window.mark_pending(conn, now)
+    shadow_log.record(conn, p, "proposed", "")
+    main_loop._ingat([p])
+    monkeypatch.setattr(
+        portfolio, "_PRICE_CACHE", {"btc_idr": (now - 121, 1000.0)})
+
+    telegram = _TelegramPerekam()
+    fetch = _FetchPerekam([_update_tombol("setuju", p.id)])
+    _satu_siklus(
+        conn, telegram=telegram, now=now + 10, ctx=_ctx_dca(),
+        fetch=fetch, baca_harga=lambda pair: None)
+
+    assert any("tidak bisa dibaca" in s for s in telegram.lines), telegram.lines
+    assert shadow_log.outcome(conn, p.id) == "proposed"
+    assert dca_window.dca_state(conn, now + 10)[0] == "awaiting"
+
+
 def test_baca_konteks_bentuk_saldo_tak_dikenal_mengangkat(tmp_path):
     """Bukan bentuk TAPIv2 = tidak ada angka free yang bisa dipercaya."""
     import portfolio_store
