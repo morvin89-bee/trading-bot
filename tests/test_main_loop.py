@@ -1176,6 +1176,97 @@ def test_konfirmasi_dca_gagal_terkirim_tidak_menutup_bulan(tmp_path):
     assert any(p.rule == rules.RULE_DCA for p in telegram.konfirmasi)
 
 
+def test_kirim_sebagian_hanya_mengulang_pair_yang_gagal(tmp_path):
+    """Satu konfirmasi DCA gagal dikirim: tick berikutnya hanya mengulang
+    pair itu. Pair yang sudah terkirim TIDAK boleh diusulkan dua kali, dan
+    jendela 24 jam tidak boleh diperpanjang oleh retry."""
+    conn = _fresh_db(tmp_path)
+    now = _ts(day=1, hour=9, minute=5)
+
+    class _TelegramGagalSekali(_TelegramPerekam):
+        def __init__(self, pair_gagal):
+            super().__init__()
+            self.pair_gagal = pair_gagal
+            self.sudah_gagal = False
+
+        def confirmation(self, p):
+            self.konfirmasi.append(p)
+            if p.pair == self.pair_gagal and not self.sudah_gagal:
+                self.sudah_gagal = True
+                return None
+            return 4242
+
+    telegram = _TelegramGagalSekali("eth_idr")
+    _satu_siklus(conn, telegram=telegram, now=now, ctx=_ctx_dca())
+    assert {p.pair for p in telegram.konfirmasi} == {
+        "btc_idr", "eth_idr", "sol_idr"}
+    assert len(conn.execute(
+        "SELECT 1 FROM proposals WHERE outcome = 'undelivered'"
+    ).fetchall()) == 1
+
+    telegram2 = _TelegramPerekam()
+    keluar = _satu_siklus(conn, telegram=telegram2, now=now + 300,
+                          ctx=_ctx_dca())
+
+    assert keluar == "proposed"
+    assert [p.pair for p in telegram2.konfirmasi] == ["eth_idr"], (
+        "retry mengirim ulang pair yang sudah terkirim: "
+        f"{[p.pair for p in telegram2.konfirmasi]}")
+
+    per_pair = {
+        baris[0]: baris[1]
+        for baris in conn.execute(
+            "SELECT pair, COUNT(*) FROM proposals "
+            "WHERE rule = ? AND outcome = 'proposed' GROUP BY pair",
+            (rules.RULE_DCA,),
+        )
+    }
+    assert per_pair == {"btc_idr": 1, "eth_idr": 1, "sol_idr": 1}, per_pair
+
+    baris = conn.execute(
+        "SELECT dca_sent_ts FROM bot_state WHERE id = 1").fetchone()
+    assert baris["dca_sent_ts"] == now, (
+        "retry memperpanjang jendela 24 jam; waktu kirim pertama harus tetap")
+
+
+def test_batas_retry_dca_dan_pemberitahuan_bulan_gagal(tmp_path):
+    """Konfirmasi yang selalu gagal diulang maksimal tiga kali per pair.
+    Setelah itu bulan ditutup dan pengguna diberi tahu — bukan dicoba
+    tanpa batas, dan bukan hilang diam-diam."""
+    conn = _fresh_db(tmp_path)
+    now = _ts(day=1, hour=9, minute=5)
+
+    class _TelegramSelaluGagal(_TelegramPerekam):
+        def confirmation(self, p):
+            self.konfirmasi.append(p)
+            return None
+
+    for i in range(3):
+        telegram = _TelegramSelaluGagal()
+        _satu_siklus(conn, telegram=telegram, now=now + i * 300,
+                     ctx=_ctx_dca())
+        assert len(telegram.konfirmasi) == 3, (
+            f"percobaan ke-{i + 1}: "
+            f"{[p.pair for p in telegram.konfirmasi]}")
+
+    telegram = _TelegramSelaluGagal()
+    keluar = _satu_siklus(conn, telegram=telegram, now=now + 900,
+                          ctx=_ctx_dca())
+
+    assert keluar == "kosong"
+    assert telegram.konfirmasi == [], (
+        "batas retry tidak ditegakkan: "
+        f"{[p.pair for p in telegram.konfirmasi]}")
+    baris = conn.execute(
+        "SELECT last_dca_date, dca_status FROM bot_state WHERE id = 1"
+    ).fetchone()
+    assert baris["last_dca_date"] == time.strftime(
+        "%Y-%m", time.localtime(now))
+    assert baris["dca_status"] == "batal"
+    assert any("gagal" in pesan.lower() and "dca" in pesan.lower()
+               for pesan in telegram.lines), telegram.lines
+
+
 def test_dca_gagal_di_gerbang_menutup_bulan_sekali(tmp_path):
     """Percobaan pertama gugur di gerbang spread -> `mark_skip` menutup
     bulan tepat sekali: `dca_status` "batal", `dca_sent_ts` NULL (tidak ada

@@ -89,6 +89,11 @@ def _catat_denyut_dilewatkan(pesan):
 # Denyut jantung: lima menit (plan:1116).
 HEARTBEAT_S = 300
 
+# Batas percobaan kirim konfirmasi DCA per pair per bulan, TERMASUK yang
+# pertama. Gangguan Telegram sementara diulang, tetapi tidak tanpa batas:
+# setelah habis bulan ditutup dan pengguna diberi tahu.
+DCA_MAX_PERCOBAAN_KIRIM = 3
+
 # Jarak bangun antar pembacaan tombol Telegram. Jendela konfirmasi reaktif
 # 90 detik (`proposal.REACTIVE_WINDOW_S`) harus BISA dipenuhi pengguna:
 # kalau `getUpdates` hanya dibaca per denyut (300 dtk), setiap tekanan tombol
@@ -120,6 +125,8 @@ _USULAN_MENUNGGU = {}
 _SLOT_PENGINGAT = set()
 # Offset getUpdates terakhir — pemanggilan berikutnya hanya membaca yang baru.
 _OFFSET_TELEGRAM = {"offset": 0}
+# Bulan "YYYY-MM" yang sudah diberi tahu bahwa DCA-nya berakhir tanpa order.
+_SUDAH_DIBERITAHU_DCA_GAGAL = set()
 
 
 def reset_state():
@@ -127,6 +134,7 @@ def reset_state():
     _USULAN_MENUNGGU.clear()
     _SLOT_PENGINGAT.clear()
     _OFFSET_TELEGRAM["offset"] = 0
+    _SUDAH_DIBERITAHU_DCA_GAGAL.clear()
 
 
 def load_state(conn):
@@ -412,6 +420,49 @@ def _simpan_offset(conn, offset):
     conn.commit()
 
 
+def _status_kirim_dca(conn, now):
+    """Pair DCA yang sudah terkirim dan jumlah percobaan gagal bulan ini."""
+    bulan = time.strftime("%Y-%m", time.localtime(now))
+    return shadow_log.dca_bulan_ini(conn, rules.RULE_DCA, bulan)
+
+
+def _boleh_kirim_ulang_dca(conn, now, terkirim, gagal):
+    """True bila jendela masih awaiting dan ada pair gagal yang belum
+    mencapai batas percobaan."""
+    if dca_window.dca_state(conn, now)[0] != "awaiting":
+        return False
+    return any(
+        pair not in terkirim and jumlah < DCA_MAX_PERCOBAAN_KIRIM
+        for pair, jumlah in gagal.items()
+    )
+
+
+def _beritahu_dca_berakhir(conn, now, telegram, gagal, *, baru_skip):
+    """Satu pesan bila DCA bulan ini berakhir tanpa order yang lengkap.
+
+    `baru_skip` = bulan baru saja ditutup karena batas retry habis. Jalur
+    kedua: jendela 24 jam lewat tanpa jawaban (`dca_state` -> "missed").
+    Satu pesan per bulan; Batal/confirmed tidak diberitahu di sini.
+    """
+    if baru_skip:
+        if not gagal:
+            return
+    elif dca_window.dca_state(conn, now)[0] != "missed":
+        return
+    bulan = time.strftime("%Y-%m", time.localtime(now))
+    if bulan in _SUDAH_DIBERITAHU_DCA_GAGAL:
+        return
+    _SUDAH_DIBERITAHU_DCA_GAGAL.add(bulan)
+    rincian = (
+        "konfirmasi gagal terkirim untuk: " + ", ".join(sorted(gagal))
+        if gagal else "konfirmasi tidak dijawab dalam 24 jam"
+    )
+    telegram.line(
+        f"DCA bulan {bulan} berakhir tanpa order — {rincian}. "
+        "Tidak ada order yang dikirim untuk pair itu."
+    )
+
+
 def _catat_dca(conn, now, usulan, *, tunda=False):
     """Buka atau tutup bulan DCA setelah satu tick — HANYA bila disebut.
 
@@ -424,13 +475,19 @@ def _catat_dca(conn, now, usulan, *, tunda=False):
     karena konfirmasi tidak terkirim atau tick berhenti sebelum sempat
     mengirim. Tidak ada jendela yang dibuka dan tidak ada uang bergerak,
     jadi bulan TIDAK ditutup; percobaan diulang pada tick berikutnya.
+
+    Mengembalikan "pending" | "tunda" | "skip" — `skip` berarti bulan
+    benar-benar ditutup pada panggilan ini, dasar pemberitahuan pengguna.
     """
     if any(p.rule == rules.RULE_DCA for p in usulan):
-        dca_window.mark_pending(conn, now)
-    elif tunda:
-        return
-    else:
-        dca_window.mark_skip(conn, now)
+        # Jendela yang sudah terbuka TIDAK diperpanjang oleh retry parsial:
+        # waktu kirim pertama adalah janji 24 jam yang sebenarnya.
+        if dca_window.dca_state(conn, now)[0] != "awaiting":
+            dca_window.mark_pending(conn, now)
+        return "pending"
+    if tunda:
+        return "tunda"
+    return "skip" if dca_window.mark_skip(conn, now) else "tunda"
 
 
 def _terapkan_setuju_dca(conn, usulan, hasil, *, shadow, now, telegram):
@@ -663,9 +720,22 @@ def tick_cycle(
     """
     ctx = _konteks_kosong() if ctx is None else ctx
     # Sakelar DCA per siklus (Task 15.4): dihitung SEBELUM polling supaya
-    # `/ulang` pada siklus ini memakai keputusan bulan yang sama.
+    # `/ulang` pada siklus ini memakai keputusan bulan yang sama. Jendela
+    # yang sudah terbuka boleh retry HANYA untuk pair yang konfirmasinya
+    # gagal; pair yang sudah terkirim atau habis percobaannya dilewati.
+    terkirim_dca, gagal_dca = _status_kirim_dca(conn, now)
     ctx = dataclasses.replace(
-        ctx, dca_enabled=dca_window.boleh_usul_dca(conn, now))
+        ctx,
+        dca_enabled=(
+            dca_window.boleh_usul_dca(conn, now)
+            or _boleh_kirim_ulang_dca(conn, now, terkirim_dca, gagal_dca)
+        ),
+        dca_lewati=(
+            set(terkirim_dca)
+            | {pair for pair, jumlah in gagal_dca.items()
+               if jumlah >= DCA_MAX_PERCOBAAN_KIRIM}
+        ),
+    )
 
     # 1. Rekonsiliasi lebih dulu: buku yang tidak bisa dipercaya tidak boleh
     #    menghasilkan usulan apa pun.
@@ -746,9 +816,13 @@ def tick_cycle(
     # terkirim, tutup bulan bila percobaan habis tanpa hasil. Guard
     # `not diulang`: siklus `/ulang` sudah mencatat di `apply_ulang` —
     # dua pencatatan untuk satu keputusan bulan adalah bug, bukan pengaman.
+    hasil_catat = None
     if ctx.dca_enabled and not diulang:
-        _catat_dca(conn, now, usulan,
-                   tunda=getattr(ctx, "dca_retry", False))
+        hasil_catat = _catat_dca(
+            conn, now, usulan,
+            tunda=getattr(ctx, "dca_retry", False))
+    _beritahu_dca_berakhir(conn, now, telegram, gagal_dca,
+                           baru_skip=hasil_catat == "skip")
 
     # 6. Sakelar mode bayangan.
     apply_shadow_gate(conn, now=now)

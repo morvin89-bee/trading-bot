@@ -8,7 +8,7 @@ dan tidak pernah mengulang kirim. Hanya memproses aksi take-profit,
 reserve buy, dan — bila sakelar per-siklus `Context.dca_enabled` menyala —
 DCA bulanan (sumber v1; modul v2 tidak boleh dipanggil dari sini).
 """
-from dataclasses import dataclass
+from dataclasses import dataclass, field, replace
 from typing import List, Callable, Any, Optional
 
 import actions_merge
@@ -120,6 +120,10 @@ class Context:
     # menutupnya di sini akan menghabiskan jatah satu-per-bulan karena
     # gangguan Telegram yang sementara.
     dca_retry: bool = False
+    # Pair DCA yang TIDAK boleh diusulkan lagi bulan ini: sudah terkirim
+    # (jangan sampai ada dua usulan untuk pair+bulan yang sama) atau
+    # percobaan kirimnya sudah habis (batas retry). Diisi `main_loop`.
+    dca_lewati: set[str] = field(default_factory=set)
 
 
 def collect_actions(ctx: Context) -> List[rules.Action]:
@@ -144,12 +148,15 @@ def collect_actions(ctx: Context) -> List[rules.Action]:
     if getattr(ctx, "dca_enabled", False):
         # Sakelar mati / field absen (konteks lama) = tanpa sumber DCA.
         # `max_order` wajib diisi dari sini: `rules` tidak boleh mengimpor
-        # `safeguards` (siklus impor).
+        # `safeguards` (siklus impor). Pair yang sudah terkirim atau
+        # percobaan kirimnya habis dilewati: retry hanya untuk yang gagal.
+        lewati = getattr(ctx, "dca_lewati", set())
         sumber += [
             (rules.RULE_DCA, aksi)
             for aksi in rules.dca_actions(
                 ctx.holdings, ctx.free_idr, ctx.prices,
                 max_order=safeguards.MAX_ORDER_IDR)
+            if aksi.pair not in lewati
         ]
     # DCA mengklaim lebih dulu (keputusan builder #2, desain Task 15):
     # kaki reserve buy untuk (kind, pair) yang sudah diklaim DCA dilewati
@@ -161,6 +168,9 @@ def collect_actions(ctx: Context) -> List[rules.Action]:
     # tidak disentuh.
     dibeli = {(aksi.kind, aksi.pair) for nama, aksi in sumber
               if nama == rules.RULE_DCA}
+    # Pair DCA yang dilewati tetap diklaim DCA: reserve buy tidak boleh
+    # membeli pair yang sama sebagai order kedua di bulan yang sama.
+    dibeli |= {("BUY", pair) for pair in getattr(ctx, "dca_lewati", set())}
     sumber += [
         (proposal.RULE_RESERVE_BUY, aksi)
         for aksi in rules.reserve_buy_actions(
@@ -370,10 +380,17 @@ def tick(
         message_id = telegram.confirmation(prop)
         if message_id is None:
             # Gagal kirim = tidak ada jendela yang dibuka dan tidak ada uang
-            # bergerak. Untuk DCA ini BUKAN penolakan final: tandai supaya
-            # `main_loop` tidak menutup bulan, lalu coba lagi tick berikutnya.
+            # bergerak. Untuk DCA ini BUKAN penolakan final: catat percobaan
+            # yang gagal (dasar batas retry dan retry per pair), lalu coba
+            # lagi tick berikutnya.
             if prop.rule == rules.RULE_DCA:
                 ctx.dca_retry = True
+                shadow_log.record(
+                    conn,
+                    replace(prop, id=f"undelivered_{prop.id}"),
+                    "undelivered",
+                    f"Konfirmasi DCA {prop.pair} tidak terkirim",
+                )
             continue
 
         # Catat usulan sebagai "proposed" di shadow_log — juga di mode

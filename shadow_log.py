@@ -11,6 +11,7 @@ import proposal
 # Hasil yang mungkin terjadi pada suatu usulan
 outcomes = (
     "proposed",
+    "undelivered",
     "setuju",
     "tunda",
     "batal",
@@ -178,6 +179,32 @@ def pending(conn, now):
     ]
 
 
+def dca_bulan_ini(conn, rule, bulan):
+    """Pair DCA yang sudah terkirim dan jumlah percobaan gagal bulan ini.
+
+    `bulan` berformat "YYYY-MM" waktu lokal. "Terkirim" berarti konfirmasi
+    sudah sampai ke pengguna (`proposed`/`setuju`/`executed`); `undelivered`
+    adalah percobaan yang gagal dikirim dan boleh diulang. Baris audit
+    `dca_missed` (pair NULL) diabaikan.
+    """
+    _ensure_table(conn)
+    baris = conn.execute(
+        "SELECT pair, outcome, COUNT(*) FROM proposals "
+        "WHERE rule = ? AND day LIKE ? GROUP BY pair, outcome",
+        (rule, f"{bulan}-%"),
+    ).fetchall()
+    terkirim = set()
+    gagal = {}
+    for pair, outcome, jumlah in baris:
+        if pair is None:
+            continue
+        if outcome in ("proposed", "setuju", "executed"):
+            terkirim.add(pair)
+        elif outcome == "undelivered":
+            gagal[pair] = gagal.get(pair, 0) + jumlah
+    return terkirim, gagal
+
+
 def daily_summary(conn, day):
     """Kembalikan rangkuman harian dalam Bahasa Indonesia untuk review.
 
@@ -192,6 +219,7 @@ def daily_summary(conn, day):
     # Mapping hasil ke Bahasa Indonesia
     outcome_to_id = {
         "proposed": "diusulkan",
+        "undelivered": "gagal dikirim",
         "setuju": "disetujui",
         "tunda": "ditunda",
         "batal": "dibatalkan",
