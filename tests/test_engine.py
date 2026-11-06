@@ -12,6 +12,7 @@ import proposal
 import pytest
 import re
 import rules
+import safeguards
 import shadow_log
 import spread
 import sqlite3
@@ -325,6 +326,73 @@ def test_every_action_carries_a_reason():
     acts = engine.collect_actions(ctx)
     assert acts and all(a.reason != "" for a in acts)
 
+def test_take_profit_dipotong_ke_atap_dan_sisa_tampil(tmp_path):
+    """SELL 400.000 tidak boleh ditolak gerbang: potong ke 275.000 dan
+    sebutkan sisa koin di pesan konfirmasi."""
+    from types import SimpleNamespace
+    conn = _fresh_db(tmp_path)
+    h = Holding("btc_idr", "btc", 1000.0, 1000.0, 1600.0, 1_600_000.0,
+                1_000_000.0, 600_000.0, True)
+    ctx = SimpleNamespace(
+        holdings=[h], prices={}, free_idr=100000.0, reserve_idr=50000.0,
+        today_counts={}, last_fill_ts={}, held_pairs_24h=set())
+
+    props = engine.tick(conn, ctx, now=0.0, telegram=_tg([]), shadow=True,
+                        verdict=lambda pair, **k: (True, 1.0))
+
+    tp = [p for p in props if p.rule == engine.RULE_TAKE_PROFIT]
+    assert len(tp) == 1
+    p = tp[0]
+    assert p.amount_idr == pytest.approx(safeguards.MAX_ORDER_IDR)
+    assert p.qty == pytest.approx(safeguards.MAX_ORDER_IDR / 1600.0)
+    assert "Sisa 78.125 koin" in proposal.confirmation_text(p)
+
+
+def test_take_profit_tidak_diusulkan_lagi_setelah_disetujui_bayangan(
+        tmp_path):
+    """Persetujuan bayangan = simulasi jual; ambang yang sama tidak boleh
+    diusulkan lagi pada tick berikutnya."""
+    conn = _fresh_db(tmp_path)
+    ctx = _ctx_with_spread()
+
+    props = engine.tick(conn, ctx, now=0.0, telegram=_tg([]), shadow=True,
+                        verdict=lambda pair, **k: (True, 1.0))
+    assert len(props) == 1
+    p = props[0]
+
+    out = engine.on_answer(conn, _pasangkan_harga(ctx, p), p=p,
+                           answer="setuju", now=1.0, transport=None,
+                           telegram=_tg([]), shadow=True,
+                           verdict=lambda pair, **k: (True, 1.0))
+    assert out == "ignored"
+
+    lagi = engine.tick(conn, ctx, now=2.0, telegram=_tg([]), shadow=True,
+                       verdict=lambda pair, **k: (True, 1.0))
+    assert lagi == [], (
+        f"ambang yang sudah disetujui diusulkan lagi: "
+        f"{[(x.pair, x.rule) for x in lagi]}")
+
+
+def test_take_profit_tidak_diusulkan_lagi_setelah_order_terisi(tmp_path):
+    """Hanya status final `filled` yang mencatat ambang sebagai terjual."""
+    conn = _fresh_db(tmp_path)
+    ctx = _ctx_with_spread()
+
+    p = engine.tick(conn, ctx, now=0.0, telegram=_tg([]), shadow=True,
+                    verdict=lambda pair, **k: (True, 1.0))[0]
+    t = _FakeTransport(status_sequence=["filled"])
+    out = engine.on_answer(conn, _pasangkan_harga(ctx, p), p=p,
+                           answer="setuju", now=1.0, transport=t,
+                           telegram=_tg([]), shadow=False,
+                           verdict=lambda pair, **k: (True, 1.0))
+
+    assert out == "sent"
+    assert len(t.posted) == 1
+    lagi = engine.tick(conn, ctx, now=2.0, telegram=_tg([]), shadow=True,
+                       verdict=lambda pair, **k: (True, 1.0))
+    assert lagi == []
+
+
 def test_spread_rejected_is_notified_and_logged(tmp_path):
     conn = _fresh_db(tmp_path)
     sent = []
@@ -562,7 +630,7 @@ def test_collect_actions_menolak_dua_aturan_untuk_pasangan_sama(monkeypatch):
         kind="SELL", pair="btc_idr", amount_idr=400.0, qty=0.25,
         price_ref=1600.0, reason="dari sumber kedua", executable=True)
     monkeypatch.setattr(engine.rules, "take_profit_actions",
-                        lambda holdings: [aksi_satu])
+                        lambda holdings, **k: [aksi_satu])
     monkeypatch.setattr(engine.rules, "reserve_buy_actions",
                         lambda holdings, idr_reserve: [aksi_dua])
     with pytest.raises(ValueError, match="dua aturan berbeda"):

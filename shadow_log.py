@@ -28,10 +28,12 @@ outcomes = (
 def _ensure_table(conn):
     """Buat tabel proposals jika belum ada, lalu lengkapi kolom barunya.
 
-    Tiga kolom terakhir menyimpan angka yang dibutuhkan untuk memulihkan
-    usulan yang masih menunggu jawaban setelah proses restart. Tanpa kolom
-    itu usulan yang sudah terkirim ke Telegram menjadi inert saat bot hidup
-    lagi, dan jendela DCA 24 jam berakhir dengan catatan `dca_missed` palsu.
+    Kolom pemulihan menyimpan angka yang dibutuhkan untuk memulihkan usulan
+    yang masih menunggu jawaban setelah proses restart. Tanpa kolom itu
+    usulan yang sudah terkirim ke Telegram menjadi inert saat bot hidup lagi,
+    dan jendela DCA 24 jam berakhir dengan catatan `dca_missed` palsu.
+    `level`/`basis` menyimpan ambang take-profit agar memori ambang tetap
+    benar walau usulan dieksekusi setelah restart.
     """
     cursor = conn.cursor()
     cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='proposals'")
@@ -51,7 +53,9 @@ def _ensure_table(conn):
                 note TEXT,
                 qty REAL,
                 reserve_after REAL,
-                window_s INTEGER
+                window_s INTEGER,
+                level REAL,
+                basis REAL
             )
             """
         )
@@ -60,7 +64,8 @@ def _ensure_table(conn):
     # lewat PRAGMA supaya migrasi idempoten — ALTER kedua akan gagal keras.
     kolom = [baris[1] for baris in conn.execute("PRAGMA table_info(proposals)")]
     for nama, tipe in (("qty", "REAL"), ("reserve_after", "REAL"),
-                       ("window_s", "INTEGER")):
+                       ("window_s", "INTEGER"), ("level", "REAL"),
+                       ("basis", "REAL")):
         if nama not in kolom:
             conn.execute(f"ALTER TABLE proposals ADD COLUMN {nama} {tipe}")
 
@@ -90,8 +95,8 @@ def record(conn, p, outcome, note=""):
         """
         INSERT INTO proposals (
             id, ts, day, kind, pair, amount_idr, price_ref, rule, outcome,
-            note, qty, reserve_after, window_s
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            note, qty, reserve_after, window_s, level, basis
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             p.id,
@@ -107,6 +112,8 @@ def record(conn, p, outcome, note=""):
             getattr(p, "qty", None),
             getattr(p, "reserve_after", None),
             getattr(p, "window_s", None),
+            getattr(p, "level", None),
+            getattr(p, "basis", None),
         ),
     )
     conn.commit()
@@ -160,7 +167,7 @@ def pending(conn, now):
     baris = conn.execute(
         """
         SELECT id, kind, pair, amount_idr, qty, price_ref, rule,
-               reserve_after, window_s, ts
+               reserve_after, window_s, ts, level, basis
         FROM proposals
         WHERE outcome = 'proposed' AND ts IS NOT NULL
           AND window_s IS NOT NULL AND qty IS NOT NULL
@@ -175,6 +182,7 @@ def pending(conn, now):
             price_ref=r["price_ref"], rule=r["rule"],
             reserve_after=r["reserve_after"], window_s=r["window_s"],
             created_ts=r["ts"], status="proposed",
+            level=r["level"], basis=r["basis"],
         )
         for r in baris
     ]
@@ -192,6 +200,70 @@ def perbarui_harga(conn, p, note=""):
         "UPDATE proposals SET price_ref = ?, qty = ?, note = ? WHERE id = ?",
         (p.price_ref, p.qty, note, p.id),
     )
+    conn.commit()
+
+
+def _ensure_take_profit_state(conn):
+    """Buat tabel memori ambang take-profit (idempoten)."""
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS take_profit_state (
+            pair TEXT PRIMARY KEY,
+            avg_cost REAL NOT NULL,
+            level REAL NOT NULL,
+            updated_ts REAL
+        )
+        """
+    )
+
+
+def take_profit_state(conn, pairs=None):
+    """`{pair: (avg_cost, level)}` ambang take-profit yang sudah dieksekusi.
+
+    `pairs` (bila diisi) adalah pair yang masih dipegang; baris untuk pair
+    yang sudah tidak dipegang DIHAPUS — posisi tertutup = siklus baru, jadi
+    ambangnya tidak boleh menghantui pembelian berikutnya. Tabel belum ada
+    berarti belum ada eksekusi (bukan kegagalan).
+    """
+    try:
+        baris = conn.execute(
+            "SELECT pair, avg_cost, level FROM take_profit_state").fetchall()
+    except sqlite3.OperationalError:
+        return {}
+    state = {pair: (basis, level) for pair, basis, level in baris}
+    if pairs is not None:
+        basi = set(state) - set(pairs)
+        if basi:
+            conn.executemany(
+                "DELETE FROM take_profit_state WHERE pair = ?",
+                [(pair,) for pair in basi])
+            conn.commit()
+            for pair in basi:
+                state.pop(pair, None)
+    return state
+
+
+def catat_take_profit(conn, pair, basis, level, ts):
+    """Catat ambang take-profit yang sudah dieksekusi untuk satu pair.
+
+    Basis biaya yang sama -> simpan level TERTINGGI (satu arah, tidak
+    pernah mundur). Basis berbeda -> ganti seluruh baris: siklus biaya baru
+    berhak menjual ambang yang sama lagi.
+    """
+    _ensure_take_profit_state(conn)
+    baris = conn.execute(
+        "SELECT avg_cost, level FROM take_profit_state WHERE pair = ?",
+        (pair,)).fetchone()
+    if baris is None:
+        conn.execute(
+            "INSERT INTO take_profit_state (pair, avg_cost, level, updated_ts) "
+            "VALUES (?, ?, ?, ?)", (pair, basis, level, ts))
+    else:
+        if abs(float(baris[0]) - float(basis)) <= 1e-9:
+            level = max(float(baris[1]), float(level))
+        conn.execute(
+            "UPDATE take_profit_state SET avg_cost = ?, level = ?, "
+            "updated_ts = ? WHERE pair = ?", (basis, level, ts, pair))
     conn.commit()
 
 

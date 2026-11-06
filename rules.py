@@ -77,47 +77,83 @@ class Action:
     price_ref: float | None
     reason: str
     executable: bool
+    # Ambang take-profit yang memicu aksi ini dan basis biayanya; dipakai
+    # pemanggil untuk mencatat ambang yang sudah dieksekusi. `None` untuk
+    # aksi yang bukan take-profit.
+    level: float | None = None
+    basis: float | None = None
+    # Koin yang TIDAK dijual karena nominal dipotong ke atap per order.
+    sisa_qty: float = 0.0
 
 
 def take_profit_actions(holdings, thresholds=((50, 25), (100, 25)),
-                        fee_pct=0.002, min_order=10000):
+                        fee_pct=0.002, min_order=10000, sudah=None,
+                        max_order=None):
     """Saran jual saat untung bersih melewati ambang (kumulatif).
 
     Pemicu dihitung **neto setelah fee taker** (`fee_pct`) memakai harga bid
     (`holding.price`). Bila beberapa ambang terlewati, persentase jual
     dijumlahkan (kumulatif +50% -> 25%, +100% -> 25%). Posisi tanpa riwayat
     beli (`basis_known` salah) dilewati.
+
+    `sudah` = `{pair: (avg_cost, level)}` ambang yang sudah dieksekusi.
+    Ambang itu dilewati selama basis biayanya sama; basis berbeda berarti
+    siklus biaya baru, jadi semua ambang berlaku lagi. State dipass masuk
+    (bukan disimpan di modul ini).
+
+    `max_order` = atap nominal per order (dari `safeguards.MAX_ORDER_IDR`);
+    `None` = tanpa potong. Kelebihan dilaporkan lewat `sisa_qty`, tidak
+    dibuang diam-diam.
     """
+    if sudah is None:
+        sudah = {}
     actions = []
     for h in holdings:
         if not h.basis_known or not h.avg_cost or not h.price:
             continue
         gain_pct = (h.price * (1 - fee_pct) - h.avg_cost) / h.avg_cost * 100
+        basis_lama, level_lama = sudah.get(h.pair, (None, None))
+        batas = (level_lama if basis_lama is not None
+                 and abs(basis_lama - h.avg_cost) <= 1e-9 else None)
         pct = 0
         level = None
         for thresh, part in thresholds:
-            if gain_pct >= thresh:
+            if gain_pct >= thresh and (batas is None or thresh > batas):
                 pct += part
                 level = thresh
         if level is None:
             continue
         sell_qty = h.qty * pct / 100
         amount = sell_qty * h.price
+        sisa = 0.0
+        if max_order is not None and amount > max_order:
+            sisa = sell_qty - max_order / h.price
+            sell_qty = max_order / h.price
+            amount = max_order
+        reason = (f"Untung bersih {gain_pct:.1f}% dari harga rata-rata "
+                  f"(level +{level}%, jual {pct}% posisi)")
+        if sisa > 0:
+            sisa_txt = f"{sisa:.8f}".rstrip("0").rstrip(".")
+            reason += (f"; dipotong ke atap per order, sisa {sisa_txt} koin "
+                       "tidak dijual")
         actions.append(Action(
             kind="SELL",
             pair=h.pair,
             amount_idr=amount,
             qty=sell_qty,
             price_ref=h.price,
-            reason=(f"Untung bersih {gain_pct:.1f}% dari harga rata-rata "
-                    f"(level +{level}%, jual kumulatif {pct}% posisi)"),
+            reason=reason,
             executable=amount >= min_order,
+            level=level,
+            basis=h.avg_cost,
+            sisa_qty=sisa,
         ))
     return actions
 
 
 def rebalance_actions(holdings, target=None, band_pct=10.0,
-                      fee_pct=0.002, min_order=10000, idr_reserve=0.0):
+                      fee_pct=0.002, min_order=10000, idr_reserve=0.0,
+                      sudah=None, max_order=None):
     """Saran jual untuk aset yang menyimpang jauh di atas target.
 
     Hanya menghasilkan `SELL`, dan hanya bila **dua-duanya** benar:
@@ -141,7 +177,9 @@ def rebalance_actions(holdings, target=None, band_pct=10.0,
         share = h.value_idr / total
         if (share - target_share) * 100 > band_pct:
             actions.extend(
-                take_profit_actions([h], fee_pct=fee_pct, min_order=min_order))
+                take_profit_actions([h], fee_pct=fee_pct,
+                                    min_order=min_order, sudah=sudah,
+                                    max_order=max_order))
     return actions
 
 

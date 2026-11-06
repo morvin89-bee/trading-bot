@@ -70,5 +70,8 @@ def merge_actions(actions: list[rules.Action]) -> list[rules.Action]:
             price_ref=base.price_ref,
             reason="; ".join(a.reason for a in group),
             executable=base.executable,
+            level=base.level,
+            basis=base.basis,
+            sisa_qty=base.sisa_qty,
         ))
     return merged

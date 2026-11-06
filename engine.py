@@ -124,6 +124,10 @@ class Context:
     # (jangan sampai ada dua usulan untuk pair+bulan yang sama) atau
     # percobaan kirimnya sudah habis (batas retry). Diisi `main_loop`.
     dca_lewati: set[str] = field(default_factory=set)
+    # Memori ambang take-profit {pair: (avg_cost, level)}; diisi `tick` dari
+    # `shadow_log` sebelum `collect_actions`. State dipass masuk — `rules`
+    # tidak menyimpan apa pun.
+    take_profit_sudah: dict = field(default_factory=dict)
 
 
 def collect_actions(ctx: Context) -> List[rules.Action]:
@@ -143,7 +147,10 @@ def collect_actions(ctx: Context) -> List[rules.Action]:
     """
     sumber: List[tuple[str, rules.Action]] = [
         (RULE_TAKE_PROFIT, aksi)
-        for aksi in rules.take_profit_actions(ctx.holdings)
+        for aksi in rules.take_profit_actions(
+            ctx.holdings,
+            sudah=getattr(ctx, "take_profit_sudah", None),
+            max_order=safeguards.MAX_ORDER_IDR)
     ]
     if getattr(ctx, "dca_enabled", False):
         # Sakelar mati / field absen (konteks lama) = tanpa sumber DCA.
@@ -214,7 +221,10 @@ def tick(
         Daftar Proposal yang siap dikonfirmasi pengguna.
         Kosong jika ada halt (verdict None) atau tidak ada usulan.
     """
-    # 1. Kumpulkan dan satukan aksi
+    # 1. Muat memori ambang take-profit SEBELUM menilai aksi; pair yang sudah
+    #    tidak dipegang ikut dibuang (posisi tertutup = siklus baru).
+    ctx.take_profit_sudah = shadow_log.take_profit_state(
+        conn, {h.pair for h in ctx.holdings})
     actions = collect_actions(ctx)
     # Flag hasil tick direset lebih dulu: nilai dari tick sebelumnya tidak
     # boleh membekukan keputusan bulan ini.
@@ -548,6 +558,19 @@ def _requote_dca(conn: Any, p: proposal.Proposal, harga_sekarang: float, *,
     return "ignored"
 
 
+def _catat_take_profit(conn: Any, p: proposal.Proposal, *, now: float) -> None:
+    """Catat ambang take-profit yang sudah dieksekusi (bukan sekadar diusulkan).
+
+    Dipanggil HANYA setelah order final `filled`, atau setelah persetujuan
+    mode bayangan (simulasi jual — tidak ada uang bergerak, tetapi perilaku
+    strategi harus sama dengan mode nyata). Usulan yang ditolak/hangus tidak
+    pernah sampai ke sini.
+    """
+    if p.rule != RULE_TAKE_PROFIT or p.level is None or p.basis is None:
+        return
+    shadow_log.catat_take_profit(conn, p.pair, p.basis, p.level, ts=now)
+
+
 def _beritahu_status(p: proposal.Proposal, status: str,
                      telegram: telegram_gate.Telegram) -> None:
     """Satu baris notifikasi per perubahan status bursa (G7)."""
@@ -676,6 +699,8 @@ def on_answer(conn: Any, ctx: Context, *, p: proposal.Proposal, answer: str,
         _catat_hasil(
             conn, p, "setuju",
             "Mode bayangan: persetujuan dicatat, tidak ada order dikirim.")
+        # Simulasi jual: ambang ini "sudah dieksekusi" di mode bayangan.
+        _catat_take_profit(conn, p, now=now)
         return "ignored"
 
     # 4. Gerbang spread DIULANG pada harga sekarang (spec §8, Review
@@ -765,6 +790,8 @@ def on_answer(conn: Any, ctx: Context, *, p: proposal.Proposal, answer: str,
         # satu baris, lalu catat ke log usulan dan beri tahu pengguna.
         _tulis_status_order(conn, p, status, ts=now)
         _catat_hasil(conn, p, "executed", f"Status bursa: {status}")
+        if status == "filled":
+            _catat_take_profit(conn, p, now=now)
         _beritahu_status(p, status, telegram)
         return "sent"
 
@@ -784,5 +811,7 @@ def on_answer(conn: Any, ctx: Context, *, p: proposal.Proposal, answer: str,
     # pengguna (G7: satu baris notifikasi per perubahan status).
     _tulis_status_order(conn, p, status, ts=now)
     _catat_hasil(conn, p, "executed", f"Status bursa: {status}")
+    if status == "filled":
+        _catat_take_profit(conn, p, now=now)
     _beritahu_status(p, status, telegram)
     return "sent"

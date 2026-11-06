@@ -39,6 +39,11 @@ class Proposal:
     window_s: int
     created_ts: float
     status: str
+    # Take-profit: ambang pemicu + basis biayanya (dasar memori ambang yang
+    # sudah dieksekusi) dan koin yang tidak dijual karena atap per order.
+    level: float | None = None
+    basis: float | None = None
+    sisa_qty: float = 0.0
 
 
 def new_proposal(action: rules.Action, *, rule: str, reserve_after: float,
@@ -80,6 +85,9 @@ def new_proposal(action: rules.Action, *, rule: str, reserve_after: float,
         window_s=window_s,
         created_ts=now,
         status="proposed",          # kosakata yang sama dengan shadow_log
+        level=getattr(action, "level", None),
+        basis=getattr(action, "basis", None),
+        sisa_qty=getattr(action, "sisa_qty", 0.0),
     )
 
 
@@ -119,6 +127,9 @@ def confirmation_text(p: Proposal) -> str:
         f"Perkiraan fee {fee_label}: {alerts._rp(p.amount_idr * FEE_PCT)}\n"
         f"Sisa cadangan: {alerts._rp(p.reserve_after)}\n"
         f"Berlaku {p.window_s} detik — jawab di dalam waktunya."
+        + (f"\nSisa {_qty_text(p.sisa_qty)} koin tidak dijual "
+           "(dipotong ke atap per order)."
+           if getattr(p, "sisa_qty", 0) else "")
     )
 
 

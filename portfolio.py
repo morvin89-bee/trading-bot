@@ -12,6 +12,8 @@ import indodax_api
 import portfolio_store
 import price_feed
 import rules
+import safeguards
+import shadow_log
 
 # Koin yang dilacak -> pair Indodax.
 COIN_PAIRS = {
@@ -311,8 +313,14 @@ def refresh(conn, online=True):
     # disarankan "jual 50%" padahal hanya 25%).
     seen = set()
     actions = []
-    for a in (rules.take_profit_actions(holdings)
-              + rules.rebalance_actions(holdings, idr_reserve=idr)
+    sudah = shadow_log.take_profit_state(
+        conn, {h.pair for h in holdings})
+    for a in (rules.take_profit_actions(
+                  holdings, sudah=sudah,
+                  max_order=safeguards.MAX_ORDER_IDR)
+              + rules.rebalance_actions(
+                  holdings, idr_reserve=idr, sudah=sudah,
+                  max_order=safeguards.MAX_ORDER_IDR)
               + rules.reserve_buy_actions(holdings, idr_reserve=idr)):
         key = (a.kind, a.pair)
         if key in seen:
