@@ -203,67 +203,150 @@ def perbarui_harga(conn, p, note=""):
     conn.commit()
 
 
-def _ensure_take_profit_state(conn):
-    """Buat tabel memori ambang take-profit (idempoten)."""
+def _buat_tabel_take_profit(conn):
+    """Buat tabel memori ambang take-profit bentuk baru (idempoten)."""
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS take_profit_state (
-            pair TEXT PRIMARY KEY,
-            avg_cost REAL NOT NULL,
+            mode TEXT NOT NULL,
+            pair TEXT NOT NULL,
             level REAL NOT NULL,
-            updated_ts REAL
+            qty_target REAL NOT NULL DEFAULT 0,
+            qty_terjual REAL NOT NULL DEFAULT 0,
+            last_day TEXT,
+            updated_ts REAL,
+            PRIMARY KEY (mode, pair, level)
         )
         """
     )
 
 
-def take_profit_state(conn, pairs=None):
-    """`{pair: (avg_cost, level)}` ambang take-profit yang sudah dieksekusi.
+def _ensure_take_profit_state(conn):
+    """Buat/migrasi tabel memori ambang take-profit (idempoten).
+
+    Tabel lama dikunci pada `(pair, avg_cost)`; DCA yang mengubah avg_cost
+    membuat ambang yang sudah dieksekusi berlaku lagi. Bentuk baru tidak
+    menyimpan avg_cost sama sekali: reset hanya terjadi saat posisi ditutup.
+    Baris lama disalin ke KEDUA mode dengan target 0 (sudah selesai) supaya
+    pembaruan tidak membuka penjualan dobel.
+    """
+    baris = conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' "
+        "AND name='take_profit_state'").fetchone()
+    if baris is None:
+        _buat_tabel_take_profit(conn)
+        conn.commit()
+        return
+    kolom = [r[1] for r in conn.execute("PRAGMA table_info(take_profit_state)")]
+    if "mode" in kolom:
+        return
+    conn.execute(
+        "ALTER TABLE take_profit_state RENAME TO take_profit_state_lama")
+    _buat_tabel_take_profit(conn)
+    for mode in ("shadow", "live"):
+        conn.execute(
+            "INSERT OR IGNORE INTO take_profit_state "
+            "(mode, pair, level, qty_target, qty_terjual, last_day, updated_ts) "
+            "SELECT ?, pair, level, 0.0, 0.0, NULL, updated_ts "
+            "FROM take_profit_state_lama",
+            (mode,),
+        )
+    conn.execute("DROP TABLE take_profit_state_lama")
+    conn.commit()
+
+
+def take_profit_state(conn, pairs=None, mode="shadow"):
+    """`{(pair, level): (qty_target, qty_terjual, last_day)}` per mode.
 
     `pairs` (bila diisi) adalah pair yang masih dipegang; baris untuk pair
-    yang sudah tidak dipegang DIHAPUS — posisi tertutup = siklus baru, jadi
-    ambangnya tidak boleh menghantui pembelian berikutnya. Tabel belum ada
-    berarti belum ada eksekusi (bukan kegagalan).
+    yang sudah tidak dipegang DIHAPUS di SEMUA mode — posisi tertutup =
+    siklus baru. `avg_cost` tidak lagi menjadi kunci: pembelian DCA tidak
+    boleh membuka kembali ambang yang sudah dieksekusi.
     """
-    try:
-        baris = conn.execute(
-            "SELECT pair, avg_cost, level FROM take_profit_state").fetchall()
-    except sqlite3.OperationalError:
-        return {}
-    state = {pair: (basis, level) for pair, basis, level in baris}
+    _ensure_take_profit_state(conn)
+    baris = conn.execute(
+        "SELECT pair, level, qty_target, qty_terjual, last_day "
+        "FROM take_profit_state WHERE mode = ?", (mode,)).fetchall()
+    state = {(pair, level): (target, terjual, last_day)
+             for pair, level, target, terjual, last_day in baris}
     if pairs is not None:
-        basi = set(state) - set(pairs)
+        semua = {r[0] for r in conn.execute(
+            "SELECT DISTINCT pair FROM take_profit_state")}
+        basi = semua - set(pairs)
         if basi:
             conn.executemany(
                 "DELETE FROM take_profit_state WHERE pair = ?",
                 [(pair,) for pair in basi])
             conn.commit()
-            for pair in basi:
-                state.pop(pair, None)
+            state = {kunci: nilai for kunci, nilai in state.items()
+                     if kunci[0] not in basi}
     return state
 
 
-def catat_take_profit(conn, pair, basis, level, ts):
-    """Catat ambang take-profit yang sudah dieksekusi untuk satu pair.
+def catat_take_profit(conn, pair, level, *, qty_target, qty, ts,
+                      mode="shadow", hari=None):
+    """Catat satu tranche take-profit yang benar-benar dieksekusi.
 
-    Basis biaya yang sama -> simpan level TERTINGGI (satu arah, tidak
-    pernah mundur). Basis berbeda -> ganti seluruh baris: siklus biaya baru
-    berhak menjual ambang yang sama lagi.
+    `qty_target` adalah total target level itu; `qty` adalah bagian yang
+    terjual pada tranche ini. Baris yang sudah ada menambah `qty_terjual`
+    (tidak pernah melebihi target) dan memperbarui `last_day`; target TIDAK
+    pernah diganti oleh pembelian DCA berikutnya.
     """
     _ensure_take_profit_state(conn)
     baris = conn.execute(
-        "SELECT avg_cost, level FROM take_profit_state WHERE pair = ?",
-        (pair,)).fetchone()
+        "SELECT qty_target, qty_terjual FROM take_profit_state "
+        "WHERE mode = ? AND pair = ? AND level = ?",
+        (mode, pair, level)).fetchone()
     if baris is None:
+        target = float(qty_target)
+        terjual = min(float(qty), target) if target > 0 else float(qty)
         conn.execute(
-            "INSERT INTO take_profit_state (pair, avg_cost, level, updated_ts) "
-            "VALUES (?, ?, ?, ?)", (pair, basis, level, ts))
+            "INSERT INTO take_profit_state "
+            "(mode, pair, level, qty_target, qty_terjual, last_day, updated_ts) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (mode, pair, level, target, terjual, hari, ts))
     else:
-        if abs(float(baris[0]) - float(basis)) <= 1e-9:
-            level = max(float(baris[1]), float(level))
+        target = float(baris[0])
+        terjual = float(baris[1]) + float(qty)
+        if target > 0:
+            terjual = min(terjual, target)
         conn.execute(
-            "UPDATE take_profit_state SET avg_cost = ?, level = ?, "
-            "updated_ts = ? WHERE pair = ?", (basis, level, ts, pair))
+            "UPDATE take_profit_state SET qty_terjual = ?, last_day = ?, "
+            "updated_ts = ? WHERE mode = ? AND pair = ? AND level = ?",
+            (terjual, hari, ts, mode, pair, level))
+    conn.commit()
+
+
+def hapus_take_profit(conn, pair, level, *, qty, mode="shadow"):
+    """Batalkan catatan satu tranche (status akhir rejected/cancelled).
+
+    `qty` dikurangkan dari `qty_terjual`; baris dihapus bila tidak ada sisa.
+    Ini mengembalikan state ke sebelum tranche yang ternyata tidak jadi.
+    """
+    _ensure_take_profit_state(conn)
+    baris = conn.execute(
+        "SELECT qty_terjual FROM take_profit_state "
+        "WHERE mode = ? AND pair = ? AND level = ?",
+        (mode, pair, level)).fetchone()
+    if baris is None:
+        return
+    sisa = float(baris[0]) - float(qty)
+    if sisa <= 0:
+        conn.execute(
+            "DELETE FROM take_profit_state "
+            "WHERE mode = ? AND pair = ? AND level = ?", (mode, pair, level))
+    else:
+        conn.execute(
+            "UPDATE take_profit_state SET qty_terjual = ? "
+            "WHERE mode = ? AND pair = ? AND level = ?",
+            (sisa, mode, pair, level))
+    conn.commit()
+
+
+def hapus_take_profit_mode(conn, mode):
+    """Hapus seluruh memori TP satu mode; dipakai `aktifkan_live`."""
+    _ensure_take_profit_state(conn)
+    conn.execute("DELETE FROM take_profit_state WHERE mode = ?", (mode,))
     conn.commit()
 
 

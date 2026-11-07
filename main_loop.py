@@ -203,6 +203,9 @@ def aktifkan_live(conn):
     if int(baris[0]) < GO_LIVE_SHADOW_DAYS:
         return False
     conn.execute("UPDATE bot_state SET v1_enabled = 1 WHERE id = 1")
+    # Memori TP dipisah per mode: penjualan simulasi tidak boleh menghalangi
+    # penjualan nyata. Baris live (bila ada) dipertahankan.
+    shadow_log.hapus_take_profit_mode(conn, "shadow")
     conn.commit()
     return True
 

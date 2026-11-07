@@ -388,9 +388,54 @@ def test_take_profit_tidak_diusulkan_lagi_setelah_order_terisi(tmp_path):
 
     assert out == "sent"
     assert len(t.posted) == 1
-    lagi = engine.tick(conn, ctx, now=2.0, telegram=_tg([]), shadow=True,
+    # Memori TP dipisah per mode: order live yang terisi dibaca di mode live,
+    # bukan di mode bayangan.
+    lagi = engine.tick(conn, ctx, now=2.0, telegram=_tg([]), shadow=False,
                        verdict=lambda pair, **k: (True, 1.0))
     assert lagi == []
+
+
+def test_take_profit_tidak_diusulkan_lagi_setelah_dca_mengubah_avg_cost(
+        tmp_path):
+    """Temuan A: pembelian DCA mengubah avg_cost; ambang +50% yang sudah
+    dieksekusi tidak boleh terbuka lagi hanya karena basis biaya berubah."""
+    conn = _fresh_db(tmp_path)
+    ctx = _ctx_with_spread()
+    p = engine.tick(conn, ctx, now=0.0, telegram=_tg([]), shadow=True,
+                    verdict=lambda pair, **k: (True, 1.0))[0]
+    engine.on_answer(conn, _pasangkan_harga(ctx, p), p=p, answer="setuju",
+                     now=1.0, transport=None, telegram=_tg([]), shadow=True,
+                     verdict=lambda pair, **k: (True, 1.0))
+
+    # DCA beli: qty 1 -> 1,5; avg_cost 1000 -> 950. Gain ~68% (< +100%).
+    ctx.holdings[0] = Holding(
+        "btc_idr", "btc", 1.5, 950.0, 1600.0, 2400.0, 1425.0, 675.0, True)
+    lagi = engine.tick(conn, ctx, now=86400.0, telegram=_tg([]), shadow=True,
+                       verdict=lambda pair, **k: (True, 1.0))
+    assert lagi == []
+
+
+def test_ambang_berlaku_lagi_setelah_posisi_ditutup_dan_dibeli_ulang(tmp_path):
+    """Posisi tertutup = siklus baru; state dibuang dan ambang +50% berlaku."""
+    from types import SimpleNamespace
+    conn = _fresh_db(tmp_path)
+    ctx = _ctx_with_spread()
+    p = engine.tick(conn, ctx, now=0.0, telegram=_tg([]), shadow=True,
+                    verdict=lambda pair, **k: (True, 1.0))[0]
+    engine.on_answer(conn, _pasangkan_harga(ctx, p), p=p, answer="setuju",
+                     now=1.0, transport=None, telegram=_tg([]), shadow=True,
+                     verdict=lambda pair, **k: (True, 1.0))
+
+    kosong = SimpleNamespace(
+        holdings=[], prices={}, free_idr=0.0, reserve_idr=0.0,
+        today_counts={}, last_fill_ts={}, held_pairs_24h=set())
+    assert engine.tick(conn, kosong, now=86400.0, telegram=_tg([]),
+                       shadow=True,
+                       verdict=lambda pair, **k: (True, 1.0)) == []
+
+    lagi = engine.tick(conn, ctx, now=172800.0, telegram=_tg([]), shadow=True,
+                       verdict=lambda pair, **k: (True, 1.0))
+    assert len(lagi) == 1 and lagi[0].level == 50
 
 
 def test_spread_rejected_is_notified_and_logged(tmp_path):

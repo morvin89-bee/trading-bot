@@ -82,24 +82,36 @@ class Action:
     # aksi yang bukan take-profit.
     level: float | None = None
     basis: float | None = None
+    # Total koin yang direncanakan untuk level ini (target tranche). `qty`
+    # adalah bagian yang dijual pada tranche ini; selisihnya `sisa_qty`
+    # dijadwalkan sebagai tranche berikutnya.
+    qty_target: float | None = None
     # Koin yang TIDAK dijual karena nominal dipotong ke atap per order.
     sisa_qty: float = 0.0
 
 
 def take_profit_actions(holdings, thresholds=((50, 25), (100, 25)),
                         fee_pct=0.002, min_order=10000, sudah=None,
-                        max_order=None):
-    """Saran jual saat untung bersih melewati ambang (kumulatif).
+                        max_order=None, hari=None):
+    """Saran jual saat untung bersih melewati ambang (satu tranche per hari).
 
     Pemicu dihitung **neto setelah fee taker** (`fee_pct`) memakai harga bid
-    (`holding.price`). Bila beberapa ambang terlewati, persentase jual
-    dijumlahkan (kumulatif +50% -> 25%, +100% -> 25%). Posisi tanpa riwayat
-    beli (`basis_known` salah) dilewati.
+    (`holding.price`). Bila beberapa ambang terlewati, hanya level TERENDAH
+    yang belum selesai yang diusulkan pada hari itu; level berikutnya
+    menyusul pada hari berikutnya. Posisi tanpa riwayat beli (`basis_known`
+    salah) dilewati.
 
-    `sudah` = `{pair: (avg_cost, level)}` ambang yang sudah dieksekusi.
-    Ambang itu dilewati selama basis biayanya sama; basis berbeda berarti
-    siklus biaya baru, jadi semua ambang berlaku lagi. State dipass masuk
-    (bukan disimpan di modul ini).
+    `sudah` = `{(pair, level): (qty_target, qty_terjual, last_day)}` ambang
+    yang sudah dieksekusi. Level yang `qty_terjual`-nya belum mencapai
+    `qty_target` diusulkan sisanya sebagai tranche berikutnya. State dipass
+    masuk (bukan disimpan di modul ini) dan TIDAK dikunci pada `avg_cost`:
+    pembelian DCA yang mengubah harga rata-rata tidak membuka kembali ambang
+    yang sudah dieksekusi. Reset hanya terjadi saat posisi ditutup (pemanggil
+    menghapus state).
+
+    `hari` = tanggal lokal "YYYY-MM-DD"; bila diisi, satu pair hanya boleh
+    mendapat satu tranche take-profit per hari. `None` = tanpa batas harian
+    (dipakai pemanggil tampilan seperti rebalance).
 
     `max_order` = atap nominal per order (dari `safeguards.MAX_ORDER_IDR`);
     `None` = tanpa potong. Kelebihan dilaporkan lewat `sisa_qty`, tidak
@@ -112,40 +124,56 @@ def take_profit_actions(holdings, thresholds=((50, 25), (100, 25)),
         if not h.basis_known or not h.avg_cost or not h.price:
             continue
         gain_pct = (h.price * (1 - fee_pct) - h.avg_cost) / h.avg_cost * 100
-        basis_lama, level_lama = sudah.get(h.pair, (None, None))
-        batas = (level_lama if basis_lama is not None
-                 and abs(basis_lama - h.avg_cost) <= 1e-9 else None)
-        pct = 0
-        level = None
-        for thresh, part in thresholds:
-            if gain_pct >= thresh and (batas is None or thresh > batas):
-                pct += part
-                level = thresh
-        if level is None:
+
+        # Satu tranche per pair per hari: level mana pun yang sudah dieksekusi
+        # hari ini menutup kesempatan tranche lain hari ini.
+        if hari is not None and any(
+                pair == h.pair and last_day == hari
+                for (pair, _level), (_target, _terjual, last_day) in sudah.items()):
             continue
-        sell_qty = h.qty * pct / 100
-        amount = sell_qty * h.price
+
+        pilihan = None
+        for thresh, part in sorted(thresholds):
+            if gain_pct < thresh:
+                continue
+            catatan = sudah.get((h.pair, thresh))
+            if catatan is None:
+                pilihan = (thresh, h.qty * part / 100.0, 0.0, part)
+                break
+            target, terjual, _last = catatan
+            if float(terjual) < float(target):
+                pilihan = (thresh, float(target), float(terjual), part)
+                break
+        if pilihan is None:
+            continue
+
+        level, target, terjual, part = pilihan
+        qty = max(0.0, target - terjual)
+        if qty <= 0:
+            continue
+        amount = qty * h.price
         sisa = 0.0
         if max_order is not None and amount > max_order:
-            sisa = sell_qty - max_order / h.price
-            sell_qty = max_order / h.price
+            sisa = qty - max_order / h.price
+            qty = max_order / h.price
             amount = max_order
         reason = (f"Untung bersih {gain_pct:.1f}% dari harga rata-rata "
-                  f"(level +{level}%, jual {pct}% posisi)")
+                  f"(level +{level}%, jual {part}% posisi)")
         if sisa > 0:
             sisa_txt = f"{sisa:.8f}".rstrip("0").rstrip(".")
             reason += (f"; dipotong ke atap per order, sisa {sisa_txt} koin "
-                       "tidak dijual")
+                       "dijadwalkan sebagai tranche berikutnya")
         actions.append(Action(
             kind="SELL",
             pair=h.pair,
             amount_idr=amount,
-            qty=sell_qty,
+            qty=qty,
             price_ref=h.price,
             reason=reason,
             executable=amount >= min_order,
             level=level,
             basis=h.avg_cost,
+            qty_target=target,
             sisa_qty=sisa,
         ))
     return actions

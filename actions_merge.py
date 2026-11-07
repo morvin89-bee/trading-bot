@@ -72,6 +72,7 @@ def merge_actions(actions: list[rules.Action]) -> list[rules.Action]:
             executable=base.executable,
             level=base.level,
             basis=base.basis,
+            qty_target=base.qty_target,
             sisa_qty=base.sisa_qty,
         ))
     return merged

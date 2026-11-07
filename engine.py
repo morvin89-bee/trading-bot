@@ -22,6 +22,7 @@ import shadow_log
 import spread
 import sqlite3
 import telegram_gate
+import time
 
 
 RULE_TAKE_PROFIT = "take_profit"
@@ -124,13 +125,13 @@ class Context:
     # (jangan sampai ada dua usulan untuk pair+bulan yang sama) atau
     # percobaan kirimnya sudah habis (batas retry). Diisi `main_loop`.
     dca_lewati: set[str] = field(default_factory=set)
-    # Memori ambang take-profit {pair: (avg_cost, level)}; diisi `tick` dari
-    # `shadow_log` sebelum `collect_actions`. State dipass masuk — `rules`
-    # tidak menyimpan apa pun.
+    # Memori ambang take-profit {(pair, level): (qty_target, qty_terjual,
+    # last_day)} per mode; diisi `tick` dari `shadow_log` sebelum
+    # `collect_actions`. State dipass masuk — `rules` tidak menyimpan apa pun.
     take_profit_sudah: dict = field(default_factory=dict)
 
 
-def collect_actions(ctx: Context) -> List[rules.Action]:
+def collect_actions(ctx: Context, *, hari=None) -> List[rules.Action]:
     """Gabungkan take-profit, DCA bulanan (bila sakelar menyala), dan
     reserve buy, lalu satukan duplikat.
 
@@ -150,7 +151,8 @@ def collect_actions(ctx: Context) -> List[rules.Action]:
         for aksi in rules.take_profit_actions(
             ctx.holdings,
             sudah=getattr(ctx, "take_profit_sudah", None),
-            max_order=safeguards.MAX_ORDER_IDR)
+            max_order=safeguards.MAX_ORDER_IDR,
+            hari=hari)
     ]
     if getattr(ctx, "dca_enabled", False):
         # Sakelar mati / field absen (konteks lama) = tanpa sumber DCA.
@@ -222,10 +224,14 @@ def tick(
         Kosong jika ada halt (verdict None) atau tidak ada usulan.
     """
     # 1. Muat memori ambang take-profit SEBELUM menilai aksi; pair yang sudah
-    #    tidak dipegang ikut dibuang (posisi tertutup = siklus baru).
+    #    tidak dipegang ikut dibuang (posisi tertutup = siklus baru). Memori
+    #    dipisah per mode: penjualan bayangan tidak menghalangi penjualan
+    #    nyata, dan sebaliknya.
+    mode = "shadow" if shadow else "live"
+    hari = time.strftime("%Y-%m-%d", time.localtime(now))
     ctx.take_profit_sudah = shadow_log.take_profit_state(
-        conn, {h.pair for h in ctx.holdings})
-    actions = collect_actions(ctx)
+        conn, {h.pair for h in ctx.holdings}, mode=mode)
+    actions = collect_actions(ctx, hari=hari)
     # Flag hasil tick direset lebih dulu: nilai dari tick sebelumnya tidak
     # boleh membekukan keputusan bulan ini.
     ctx.dca_retry = False
@@ -558,17 +564,48 @@ def _requote_dca(conn: Any, p: proposal.Proposal, harga_sekarang: float, *,
     return "ignored"
 
 
-def _catat_take_profit(conn: Any, p: proposal.Proposal, *, now: float) -> None:
-    """Catat ambang take-profit yang sudah dieksekusi (bukan sekadar diusulkan).
+def _catat_take_profit(conn: Any, p: proposal.Proposal, *, now: float,
+                       mode: str) -> None:
+    """Catat tranche take-profit yang sudah dieksekusi (bukan sekadar diusulkan).
 
-    Dipanggil HANYA setelah order final `filled`, atau setelah persetujuan
-    mode bayangan (simulasi jual — tidak ada uang bergerak, tetapi perilaku
-    strategi harus sama dengan mode nyata). Usulan yang ditolak/hangus tidak
-    pernah sampai ke sini.
+    Dipanggil setelah order final `filled`, setelah persetujuan mode bayangan
+    (simulasi jual), dan setelah status `unknown` (ragu = jangan jual dobel).
+    Usulan yang ditolak/hangus tidak pernah sampai ke sini. Status final
+    rejected/cancelled yang datang belakangan menghapus catatan lewat
+    `_hapus_take_profit`.
     """
-    if p.rule != RULE_TAKE_PROFIT or p.level is None or p.basis is None:
+    if p.rule != RULE_TAKE_PROFIT or p.level is None:
         return
-    shadow_log.catat_take_profit(conn, p.pair, p.basis, p.level, ts=now)
+    target = getattr(p, "qty_target", None)
+    if target is None:
+        target = (p.qty or 0.0) + getattr(p, "sisa_qty", 0.0)
+    shadow_log.catat_take_profit(
+        conn, p.pair, p.level,
+        qty_target=target, qty=p.qty or 0.0, ts=now, mode=mode,
+        hari=time.strftime("%Y-%m-%d", time.localtime(now)))
+
+
+def _hapus_take_profit(conn: Any, p: proposal.Proposal, *, mode: str) -> None:
+    """Batalkan catatan tranche TP setelah status final rejected/cancelled."""
+    if p.rule != RULE_TAKE_PROFIT or p.level is None:
+        return
+    shadow_log.hapus_take_profit(
+        conn, p.pair, p.level, qty=p.qty or 0.0, mode=mode)
+
+
+def rekonsiliasi_status(conn: Any, p: proposal.Proposal, status: str, *,
+                        now: float, mode: str) -> None:
+    """Terapkan status final yang baru diketahui setelah `unknown`.
+
+    `unknown` sudah mencatat tranche sebagai selesai (ragu = jangan jual
+    dobel). Bila bursa kemudian memastikan `filled`, catatan dipertahankan;
+    bila `rejected`/`cancelled`, catatan tranche itu dihapus supaya level
+    yang sama bisa diusulkan lagi. Tidak menyentuh jalur order sama sekali.
+    """
+    if status == "filled":
+        _catat_take_profit(conn, p, now=now, mode=mode)
+    elif status in ("rejected", "cancelled"):
+        _hapus_take_profit(conn, p, mode=mode)
 
 
 def _beritahu_status(p: proposal.Proposal, status: str,
@@ -649,6 +686,7 @@ def on_answer(conn: Any, ctx: Context, *, p: proposal.Proposal, answer: str,
     Returns:
         "sent" | "ignored" | "halted" | "gate_blocked" — sesuai kontrak.
     """
+    mode = "shadow" if shadow else "live"
     # 0. Jawaban ganda = SATU order (putusan R-B): bila `p.id` sudah pernah
     #    dijawab/dieksekusi, berhenti SEBELUM menyentuh transport. Pengaman
     #    utamanya `shadow_log.proposals` — pada balasan hilang tidak ada
@@ -700,7 +738,7 @@ def on_answer(conn: Any, ctx: Context, *, p: proposal.Proposal, answer: str,
             conn, p, "setuju",
             "Mode bayangan: persetujuan dicatat, tidak ada order dikirim.")
         # Simulasi jual: ambang ini "sudah dieksekusi" di mode bayangan.
-        _catat_take_profit(conn, p, now=now)
+        _catat_take_profit(conn, p, now=now, mode="shadow")
         return "ignored"
 
     # 4. Gerbang spread DIULANG pada harga sekarang (spec §8, Review
@@ -781,6 +819,9 @@ def on_answer(conn: Any, ctx: Context, *, p: proposal.Proposal, answer: str,
             f"ulang; status ditanya ke bursa (id: {p.id}).")
         status = executor.resolve_status(transport, p.id)
         if status == "unknown":
+            # Ragu = jangan jual dobel: tranche dianggap selesai sampai status
+            # final membuktikan sebaliknya (rejected/cancelled menghapusnya).
+            _catat_take_profit(conn, p, now=now, mode=mode)
             telegram.line(
                 f"Status order {p.pair} masih belum pasti setelah tiga kali "
                 "ditanya — berhenti, tidak dikirim ulang. Periksa manual di "
@@ -791,7 +832,9 @@ def on_answer(conn: Any, ctx: Context, *, p: proposal.Proposal, answer: str,
         _tulis_status_order(conn, p, status, ts=now)
         _catat_hasil(conn, p, "executed", f"Status bursa: {status}")
         if status == "filled":
-            _catat_take_profit(conn, p, now=now)
+            _catat_take_profit(conn, p, now=now, mode=mode)
+        elif status in ("rejected", "cancelled"):
+            _hapus_take_profit(conn, p, mode=mode)
         _beritahu_status(p, status, telegram)
         return "sent"
 
@@ -800,6 +843,9 @@ def on_answer(conn: Any, ctx: Context, *, p: proposal.Proposal, answer: str,
     #    berhenti dan beri tahu; DB disentuh nol kali.
     status = executor.resolve_status(transport, p.id)
     if status == "unknown":
+        # Ragu = jangan jual dobel: tranche dianggap selesai sampai status
+        # final membuktikan sebaliknya (rejected/cancelled menghapusnya).
+        _catat_take_profit(conn, p, now=now, mode=mode)
         telegram.line(
             f"Status order {p.pair} tidak pasti setelah tiga kali ditanya "
             "— berhenti, tidak dikirim ulang. Periksa manual di bursa "
@@ -812,6 +858,8 @@ def on_answer(conn: Any, ctx: Context, *, p: proposal.Proposal, answer: str,
     _tulis_status_order(conn, p, status, ts=now)
     _catat_hasil(conn, p, "executed", f"Status bursa: {status}")
     if status == "filled":
-        _catat_take_profit(conn, p, now=now)
+        _catat_take_profit(conn, p, now=now, mode=mode)
+    elif status in ("rejected", "cancelled"):
+        _hapus_take_profit(conn, p, mode=mode)
     _beritahu_status(p, status, telegram)
     return "sent"
