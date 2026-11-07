@@ -17,6 +17,7 @@ import shadow_log
 import spread
 import sqlite3
 import tempfile
+import time
 from unittest.mock import Mock
 from portfolio import Holding
 
@@ -726,6 +727,79 @@ def test_halt_when_status_unknown_keeps_db_untouched(tmp_path, monkeypatch):
     assert tidur == [2, 5, 10]           # backoff berjalan, tanpa jam dinding
     # kegagalan tidak boleh hilang tanpa jejak (G7)
     assert any("berhenti" in s for s in sent), sent
+
+
+def _proposal_take_profit(*, qty=0.25, qty_target=0.25, level=50.0, now=0.0):
+    """Proposal TP dengan level + target tranche (untuk memori take-profit)."""
+    aksi = rules.Action(
+        kind="SELL", pair="btc_idr", amount_idr=qty * 1600.0, qty=qty,
+        price_ref=1600.0, reason="take-profit uji", executable=True,
+        level=level, basis=1000.0, qty_target=qty_target)
+    return proposal.new_proposal(
+        aksi, rule=engine.RULE_TAKE_PROFIT, reserve_after=0.0,
+        window_s=proposal.REACTIVE_WINDOW_S, now=now)
+
+
+def test_unknown_setelah_submit_mencatat_take_profit_live(tmp_path, monkeypatch):
+    """Temuan D: status unknown = ragu, jadi tranche TP dicatat SELESAI.
+
+    Tanpa catatan ini tick berikutnya mengusulkan jual yang sama lagi —
+    jual dobel bila order yang tidak pasti ternyata terisi.
+    """
+    _tanpa_tidur(monkeypatch)
+    conn = _fresh_db(tmp_path)
+    p = _proposal_take_profit()
+    t = _FakeTransport(status_sequence=["unknown", "unknown", "unknown"])
+    out = engine.on_answer(conn, _pasangkan_harga(_ctx(), p), p=p,
+                           answer="setuju", now=10.0, transport=t,
+                           telegram=_tg([]), shadow=False,
+                           verdict=lambda pair, **k: (True, 1.0))
+    assert out == "halted"
+    hari = time.strftime("%Y-%m-%d", time.localtime(10.0))
+    assert shadow_log.take_profit_state(conn, mode="live") == {
+        ("btc_idr", 50.0): (0.25, 0.25, hari)}
+    assert shadow_log.take_profit_state(conn, mode="shadow") == {}
+
+    # Bursa kemudian memastikan order DITOLAK: catatan dihapus supaya level
+    # yang sama bisa diusulkan lagi.
+    engine.rekonsiliasi_status(conn, p, "rejected", now=20.0, mode="live")
+    assert shadow_log.take_profit_state(conn, mode="live") == {}
+
+
+def test_unknown_balasan_hilang_juga_mencatat_take_profit(tmp_path, monkeypatch):
+    """Jalur `SubmissionUncertain`: status unknown juga mencatat tranche."""
+    _tanpa_tidur(monkeypatch)
+    conn = _fresh_db(tmp_path)
+    p = _proposal_take_profit()
+    t = _FakeTransport(status_sequence=["unknown", "unknown", "unknown"],
+                       explode=True)
+    out = engine.on_answer(conn, _pasangkan_harga(_ctx(), p), p=p,
+                           answer="setuju", now=10.0, transport=t,
+                           telegram=_tg([]), shadow=False,
+                           verdict=lambda pair, **k: (True, 1.0))
+    assert out == "halted"
+    assert ("btc_idr", 50.0) in shadow_log.take_profit_state(
+        conn, mode="live")
+
+    engine.rekonsiliasi_status(conn, p, "cancelled", now=20.0, mode="live")
+    assert shadow_log.take_profit_state(conn, mode="live") == {}
+
+
+def test_rekonsiliasi_filled_mempertahankan_catatan_take_profit(
+        tmp_path, monkeypatch):
+    """Status final `filled` tidak boleh menghapus catatan yang sudah ada."""
+    _tanpa_tidur(monkeypatch)
+    conn = _fresh_db(tmp_path)
+    p = _proposal_take_profit()
+    t = _FakeTransport(status_sequence=["unknown", "unknown", "unknown"])
+    engine.on_answer(conn, _pasangkan_harga(_ctx(), p), p=p,
+                     answer="setuju", now=10.0, transport=t,
+                     telegram=_tg([]), shadow=False,
+                     verdict=lambda pair, **k: (True, 1.0))
+
+    engine.rekonsiliasi_status(conn, p, "filled", now=20.0, mode="live")
+    state = shadow_log.take_profit_state(conn, mode="live")
+    assert state[("btc_idr", 50.0)][:2] == (0.25, 0.25)
 
 def test_spread_rechecked_at_execution_time(tmp_path):
     # Review Focus #3 — lolos saat komposisi, melebar saat eksekusi
