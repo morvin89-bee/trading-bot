@@ -119,7 +119,7 @@ def test_rule_spelling_agrees_with_safeguards_reserve_gate():
     a = rules.Action("BUY", "btc_idr", 25000, 25.0, 1000.0, "reserve buy", True)
     p = proposal.new_proposal(a, rule=proposal.RULE_RESERVE_BUY, reserve_after=25000,
                               window_s=proposal.REACTIVE_WINDOW_S, now=0.0)
-    out = safeguards.gates(a, free_idr=0, reserve_idr=50000, today_counts={},
+    out = safeguards.gates(a, free_idr=50000, reserve_idr=50000, today_counts={},
                            last_fill_ts={}, held_pairs_24h=set(), now=0.0,
                            rule=p.rule)
     assert out == []

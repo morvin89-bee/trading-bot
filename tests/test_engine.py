@@ -562,11 +562,13 @@ def test_reserve_buy_lolos_gerbang_karena_nama_aturan_reserve_buy(tmp_path):
     # pernah bisa nol (spec §9, "7-14 hari tanpa penolakan").
     conn = _fresh_db(tmp_path)
     ctx = _rich_ctx()
-    # Cadangan sengaja besar supaya beda aturan terlihat jelas:
-    # - aturan lama "free - reserve" = Rp 100.000 - Rp 500.000 = Rp -400.000 -> TOLAK
-    # - aturan F15  "free + 0,5 x reserve" = Rp 100.000 + Rp 250.000 = Rp 350.000 -> LOLOS
+    # Cadangan sengaja besar supaya beda aturan terlihat jelas. `free_idr`
+    # SUDAH termasuk cadangan:
+    # - aturan biasa "free - reserve" = Rp 600.000 - Rp 500.000 = Rp 100.000 -> TOLAK
+    # - aturan F15 "(free - reserve) + 0,5 x reserve" = Rp 100.000 + Rp 250.000
+    #   = Rp 350.000 -> LOLOS
     # Nominal beli eth_idr = 0,25 x Rp 500.000 (tranche bulanan) = Rp 125.000.
-    ctx.free_idr = 100_000.0
+    ctx.free_idr = 600_000.0
     ctx.reserve_idr = 500_000.0
     sent = []
     props = engine.tick(conn, ctx, now=0.0, telegram=_tg(sent), shadow=True,
@@ -1031,14 +1033,15 @@ def test_on_answer_submit_dan_tanya_status_memakai_id_sama(tmp_path,
 def test_on_answer_reserve_buy_lolos_gerbang_saldo_input_sungguhan(tmp_path,
                                                                    monkeypatch):
     # Ruling F15 + F17b, diuji dengan input NYATA di titik kawat: reserve
-    # buy memakai aturan "free + 0,5 x reserve". Angka: free Rp 0 +
-    # 0,5 x Rp 50.000 = Rp 25.000 daya beli, beli Rp 25.000 (tepat di
-    # batas -> lolos). Nama aturan datang dari proposal (p.rule), bukan
-    # dari dihitung ulang (F36).
+    # buy memakai aturan "(free - reserve) + 0,5 x reserve". `free_idr`
+    # SUDAH termasuk cadangan. Angka: (Rp 50.000 - Rp 50.000) + 0,5 x
+    # Rp 50.000 = Rp 25.000 daya beli, beli Rp 25.000 (tepat di batas ->
+    # lolos). Nama aturan datang dari proposal (p.rule), bukan dari
+    # dihitung ulang (F36).
     tidur = _tanpa_tidur(monkeypatch)
     conn = _fresh_db(tmp_path)
     ctx = _ctx()
-    ctx.free_idr = 0.0
+    ctx.free_idr = 50_000.0
     ctx.reserve_idr = 50_000.0
     p = _proposal(kind="BUY", rule=proposal.RULE_RESERVE_BUY,
                   amount_idr=25_000.0, qty=0.025, price_ref=1_000_000.0)

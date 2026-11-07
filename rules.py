@@ -34,6 +34,10 @@ def dca_split(amount_idr, holdings_value, target=None, min_order=10000):
     """
     if target is None:
         target = DEFAULT_TARGET
+    if abs(sum(target.values()) - 1.0) > 1e-9:
+        raise ValueError(
+            "bobot target harus berjumlah 1.0, sekarang "
+            f"{sum(target.values()):.6f}")
 
     base = {k: amount_idr * w for k, w in target.items()}
 

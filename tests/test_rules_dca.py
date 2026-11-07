@@ -26,3 +26,14 @@ def test_below_min_order_goes_to_idr():
 def test_total_preserved_even_for_fractional_amount():
     out = rules.dca_split(500000.75, {})
     assert abs(sum(out.values()) - 500000.75) < 1e-6
+
+
+def test_target_weights_must_sum_to_one():
+    """Bobot target yang tidak berjumlah 1.0 bukan sekadar tidak rapi: total
+    alokasi tidak lagi sama dengan setoran dan `IDR` menyerap selisihnya
+    diam-diam. Tolak dengan keras."""
+    import pytest
+    with pytest.raises(ValueError, match="bobot"):
+        rules.dca_split(500000, {}, target={"btc_idr": 0.6, "IDR": 0.6})
+    with pytest.raises(ValueError, match="bobot"):
+        rules.dca_split(500000, {}, target={"btc_idr": 0.5, "IDR": 0.4})
