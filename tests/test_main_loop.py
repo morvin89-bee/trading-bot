@@ -1168,13 +1168,107 @@ def test_konfirmasi_dca_gagal_terkirim_tidak_menutup_bulan(tmp_path):
     assert baris["dca_status"] is None
     assert baris["dca_sent_ts"] is None
 
-    # Siklus berikutnya dengan Telegram sehat masih mengusulkan DCA.
+    # Siklus berikutnya dengan Telegram sehat masih mengusulkan DCA setelah
+    # jarak minimal 30 menit (DCA_RETRY_MIN_INTERVAL_S).
     telegram = _TelegramPerekam()
-    keluar2 = _satu_siklus(conn, telegram=telegram, now=now + 300,
+    keluar2 = _satu_siklus(conn, telegram=telegram, now=now + 1800,
                            ctx=_ctx_dca())
 
     assert keluar2 == "proposed"
     assert any(p.rule == rules.RULE_DCA for p in telegram.konfirmasi)
+
+
+def test_retry_dca_berjarak_minimal_30_menit(tmp_path):
+    """Kegagalan kirim tidak boleh diulang tiap denyut 5 menit.
+
+    Percobaan kedua baru boleh 30 menit setelah percobaan gagal terakhir;
+    selama menunggu, bulan TIDAK boleh ditutup (bukan `mark_skip`).
+    """
+    conn = _fresh_db(tmp_path)
+    now = _ts(day=1, hour=9, minute=5)
+
+    class _TelegramSelaluGagal(_TelegramPerekam):
+        def confirmation(self, p):
+            self.konfirmasi.append(p)
+            return None
+
+    _satu_siklus(conn, telegram=_TelegramSelaluGagal(), now=now,
+                 ctx=_ctx_dca())
+
+    telegram = _TelegramPerekam()
+    keluar = _satu_siklus(conn, telegram=telegram, now=now + 300,
+                          ctx=_ctx_dca())
+    assert keluar == "kosong"
+    assert telegram.konfirmasi == [], (
+        "retry diulang sebelum 30 menit: "
+        f"{[p.pair for p in telegram.konfirmasi]}")
+    baris = conn.execute(
+        "SELECT last_dca_date FROM bot_state WHERE id = 1").fetchone()
+    assert baris["last_dca_date"] is None, (
+        "bulan ditutup padahal retry hanya belum jatuh tempo")
+
+    telegram2 = _TelegramPerekam()
+    keluar2 = _satu_siklus(conn, telegram=telegram2, now=now + 1800,
+                           ctx=_ctx_dca())
+    assert keluar2 == "proposed"
+    assert len(telegram2.konfirmasi) == 3
+
+
+def test_retry_dca_tidak_diusulkan_setelah_jam_21(tmp_path):
+    """Batas jam usulan: setelah 21.00 lokal tidak ada percobaan DCA baru."""
+    conn = _fresh_db(tmp_path)
+    now = _ts(day=1, hour=20, minute=0)
+
+    class _TelegramSelaluGagal(_TelegramPerekam):
+        def confirmation(self, p):
+            self.konfirmasi.append(p)
+            return None
+
+    _satu_siklus(conn, telegram=_TelegramSelaluGagal(), now=now,
+                 ctx=_ctx_dca())
+
+    telegram = _TelegramPerekam()
+    keluar = _satu_siklus(conn, telegram=telegram,
+                          now=_ts(day=1, hour=21, minute=10),
+                          ctx=_ctx_dca())
+    assert keluar == "kosong"
+    assert telegram.konfirmasi == [], (
+        "DCA diusulkan setelah jam 21.00: "
+        f"{[p.pair for p in telegram.konfirmasi]}")
+    baris = conn.execute(
+        "SELECT last_dca_date FROM bot_state WHERE id = 1").fetchone()
+    assert baris["last_dca_date"] is None
+
+
+def test_retry_dca_habis_diberitahu_sekali(tmp_path):
+    """Pair yang gagal 3x saat jendela sudah terbuka diberi tahu tepat sekali."""
+    conn = _fresh_db(tmp_path)
+    now = _ts(day=1, hour=9, minute=5)
+
+    class _GagalPair(_TelegramPerekam):
+        def confirmation(self, p):
+            self.konfirmasi.append(p)
+            return None if p.pair == "eth_idr" else 4242
+
+    # Percobaan 1: btc & sol terkirim, eth gagal -> jendela terbuka.
+    _satu_siklus(conn, telegram=_GagalPair(), now=now, ctx=_ctx_dca())
+    for i in (1, 2):
+        _satu_siklus(conn, telegram=_GagalPair(), now=now + i * 1800,
+                     ctx=_ctx_dca())
+
+    telegram = _TelegramPerekam()
+    _satu_siklus(conn, telegram=telegram, now=now + 3 * 1800,
+                 ctx=_ctx_dca())
+    assert telegram.konfirmasi == []
+    pesan = [s for s in telegram.lines
+             if "eth_idr" in s and "tidak dicoba" in s]
+    assert len(pesan) == 1, telegram.lines
+
+    telegram2 = _TelegramPerekam()
+    _satu_siklus(conn, telegram=telegram2, now=now + 4 * 1800,
+                 ctx=_ctx_dca())
+    assert not any("eth_idr" in s and "tidak dicoba" in s
+                   for s in telegram2.lines), telegram2.lines
 
 
 def test_kirim_sebagian_hanya_mengulang_pair_yang_gagal(tmp_path):
@@ -1206,7 +1300,7 @@ def test_kirim_sebagian_hanya_mengulang_pair_yang_gagal(tmp_path):
     ).fetchall()) == 1
 
     telegram2 = _TelegramPerekam()
-    keluar = _satu_siklus(conn, telegram=telegram2, now=now + 300,
+    keluar = _satu_siklus(conn, telegram=telegram2, now=now + 1800,
                           ctx=_ctx_dca())
 
     assert keluar == "proposed"
@@ -1244,14 +1338,14 @@ def test_batas_retry_dca_dan_pemberitahuan_bulan_gagal(tmp_path):
 
     for i in range(3):
         telegram = _TelegramSelaluGagal()
-        _satu_siklus(conn, telegram=telegram, now=now + i * 300,
+        _satu_siklus(conn, telegram=telegram, now=now + i * 1800,
                      ctx=_ctx_dca())
         assert len(telegram.konfirmasi) == 3, (
             f"percobaan ke-{i + 1}: "
             f"{[p.pair for p in telegram.konfirmasi]}")
 
     telegram = _TelegramSelaluGagal()
-    keluar = _satu_siklus(conn, telegram=telegram, now=now + 900,
+    keluar = _satu_siklus(conn, telegram=telegram, now=now + 5400,
                           ctx=_ctx_dca())
 
     assert keluar == "kosong"

@@ -356,28 +356,30 @@ def hapus_take_profit_mode(conn, mode):
 
 
 def dca_bulan_ini(conn, rule, bulan):
-    """Pair DCA yang sudah terkirim dan jumlah percobaan gagal bulan ini.
+    """Pair DCA yang sudah terkirim dan percobaan gagal bulan ini.
 
     `bulan` berformat "YYYY-MM" waktu lokal. "Terkirim" berarti konfirmasi
     sudah sampai ke pengguna (`proposed`/`setuju`/`executed`); `undelivered`
-    adalah percobaan yang gagal dikirim dan boleh diulang. Baris audit
-    `dca_missed` (pair NULL) diabaikan.
+    adalah percobaan yang gagal dikirim dan boleh diulang. Nilai `gagal`
+    adalah `{pair: (jumlah, ts_terakhir)}` — `ts_terakhir` dipakai pemanggil
+    untuk menegakkan jarak minimal antar percobaan. Baris audit `dca_missed`
+    (pair NULL) diabaikan.
     """
     _ensure_table(conn)
     baris = conn.execute(
-        "SELECT pair, outcome, COUNT(*) FROM proposals "
+        "SELECT pair, outcome, COUNT(*), MAX(ts) FROM proposals "
         "WHERE rule = ? AND day LIKE ? GROUP BY pair, outcome",
         (rule, f"{bulan}-%"),
     ).fetchall()
     terkirim = set()
     gagal = {}
-    for pair, outcome, jumlah in baris:
+    for pair, outcome, jumlah, terakhir in baris:
         if pair is None:
             continue
         if outcome in ("proposed", "setuju", "executed"):
             terkirim.add(pair)
         elif outcome == "undelivered":
-            gagal[pair] = gagal.get(pair, 0) + jumlah
+            gagal[pair] = (gagal.get(pair, (0, None))[0] + jumlah, terakhir)
     return terkirim, gagal
 
 

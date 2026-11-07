@@ -94,6 +94,15 @@ HEARTBEAT_S = 300
 # setelah habis bulan ditutup dan pengguna diberi tahu.
 DCA_MAX_PERCOBAAN_KIRIM = 3
 
+# Jarak minimal antar percobaan kirim DCA (30 menit). Tanpa ini retry
+# mengikuti denyut 5 menit dan menghabiskan tiga percobaan dalam 10 menit
+# untuk gangguan yang mungkin pulih sejam kemudian.
+DCA_RETRY_MIN_INTERVAL_S = 1800
+
+# Tidak ada usulan/percobaan DCA baru setelah jam ini (waktu lokal). Jendela
+# yang sudah terbuka tetap bisa dijawab sampai batas 24 jamnya.
+DCA_JAM_TERAKHIR = 21
+
 # Jarak bangun antar pembacaan tombol Telegram. Jendela konfirmasi reaktif
 # 90 detik (`proposal.REACTIVE_WINDOW_S`) harus BISA dipenuhi pengguna:
 # kalau `getUpdates` hanya dibaca per denyut (300 dtk), setiap tekanan tombol
@@ -127,6 +136,9 @@ _SLOT_PENGINGAT = set()
 _OFFSET_TELEGRAM = {"offset": 0}
 # Bulan "YYYY-MM" yang sudah diberi tahu bahwa DCA-nya berakhir tanpa order.
 _SUDAH_DIBERITAHU_DCA_GAGAL = set()
+# (bulan, pair) yang sudah diberi tahu bahwa percobaan kirimnya habis
+# sementara jendela DCA masih terbuka.
+_SUDAH_DIBERITAHU_RETRY_HABIS = set()
 
 
 def reset_state():
@@ -135,6 +147,7 @@ def reset_state():
     _SLOT_PENGINGAT.clear()
     _OFFSET_TELEGRAM["offset"] = 0
     _SUDAH_DIBERITAHU_DCA_GAGAL.clear()
+    _SUDAH_DIBERITAHU_RETRY_HABIS.clear()
 
 
 def load_state(conn):
@@ -425,13 +438,48 @@ def _status_kirim_dca(conn, now):
 
 
 def _boleh_kirim_ulang_dca(conn, now, terkirim, gagal):
-    """True bila jendela masih awaiting dan ada pair gagal yang belum
-    mencapai batas percobaan."""
+    """True bila jendela masih awaiting dan ada pair gagal yang boleh diulang.
+
+    Tiga syarat per pair: belum terkirim, jumlah percobaan di bawah batas,
+    dan sudah lewat `DCA_RETRY_MIN_INTERVAL_S` sejak percobaan gagal
+    terakhir. Setelah `DCA_JAM_TERAKHIR` tidak ada percobaan baru sama
+    sekali — jendela yang sudah terbuka tetap bisa dijawab.
+    """
     if dca_window.dca_state(conn, now)[0] != "awaiting":
+        return False
+    if time.localtime(now).tm_hour >= DCA_JAM_TERAKHIR:
         return False
     return any(
         pair not in terkirim and jumlah < DCA_MAX_PERCOBAAN_KIRIM
-        for pair, jumlah in gagal.items()
+        and (terakhir is None
+             or now - terakhir >= DCA_RETRY_MIN_INTERVAL_S)
+        for pair, (jumlah, terakhir) in gagal.items()
+    )
+
+
+def _beritahu_retry_habis(conn, now, telegram, terkirim, gagal):
+    """Satu pesan per pair per bulan saat percobaan kirimnya habis.
+
+    Hanya untuk jendela yang SUDAH terbuka (sebagian pair terkirim). Bulan
+    yang belum tersentuh ditutup lewat `mark_skip` dan diberitahu oleh
+    `_beritahu_dca_berakhir`, bukan di sini.
+    """
+    if dca_window.dca_state(conn, now)[0] != "awaiting":
+        return
+    habis = sorted(
+        pair for pair, (jumlah, _ts) in gagal.items()
+        if pair not in terkirim and jumlah >= DCA_MAX_PERCOBAAN_KIRIM)
+    if not habis:
+        return
+    bulan = time.strftime("%Y-%m", time.localtime(now))
+    kunci = (bulan, tuple(habis))
+    if kunci in _SUDAH_DIBERITAHU_RETRY_HABIS:
+        return
+    _SUDAH_DIBERITAHU_RETRY_HABIS.add(kunci)
+    telegram.line(
+        f"Konfirmasi DCA {', '.join(habis)} gagal terkirim "
+        f"{DCA_MAX_PERCOBAAN_KIRIM} kali — tidak dicoba lagi bulan {bulan}. "
+        "Pair yang sudah terkirim tetap bisa dijawab."
     )
 
 
@@ -735,16 +783,27 @@ def tick_cycle(
     # yang sudah terbuka boleh retry HANYA untuk pair yang konfirmasinya
     # gagal; pair yang sudah terkirim atau habis percobaannya dilewati.
     terkirim_dca, gagal_dca = _status_kirim_dca(conn, now)
+    jam_ok = time.localtime(now).tm_hour < DCA_JAM_TERAKHIR
+    habis = {pair for pair, (jumlah, _ts) in gagal_dca.items()
+             if pair not in terkirim_dca
+             and jumlah >= DCA_MAX_PERCOBAAN_KIRIM}
+    retry_tertunda = any(
+        pair not in terkirim_dca and jumlah < DCA_MAX_PERCOBAAN_KIRIM
+        and terakhir is not None
+        and now - terakhir < DCA_RETRY_MIN_INTERVAL_S
+        for pair, (jumlah, terakhir) in gagal_dca.items())
     ctx = dataclasses.replace(
         ctx,
         dca_enabled=(
-            dca_window.boleh_usul_dca(conn, now)
+            (dca_window.boleh_usul_dca(conn, now) and (jam_ok or bool(habis)))
             or _boleh_kirim_ulang_dca(conn, now, terkirim_dca, gagal_dca)
         ),
         dca_lewati=(
             set(terkirim_dca)
-            | {pair for pair, jumlah in gagal_dca.items()
-               if jumlah >= DCA_MAX_PERCOBAAN_KIRIM}
+            | {pair for pair, (jumlah, terakhir) in gagal_dca.items()
+               if jumlah >= DCA_MAX_PERCOBAAN_KIRIM
+               or (terakhir is not None
+                   and now - terakhir < DCA_RETRY_MIN_INTERVAL_S)}
         ),
     )
 
@@ -831,9 +890,10 @@ def tick_cycle(
     if ctx.dca_enabled and not diulang:
         hasil_catat = _catat_dca(
             conn, now, usulan,
-            tunda=getattr(ctx, "dca_retry", False))
+            tunda=getattr(ctx, "dca_retry", False) or retry_tertunda)
     _beritahu_dca_berakhir(conn, now, telegram, gagal_dca,
                            baru_skip=hasil_catat == "skip")
+    _beritahu_retry_habis(conn, now, telegram, terkirim_dca, gagal_dca)
 
     # 6. Sakelar mode bayangan.
     apply_shadow_gate(conn, now=now)
