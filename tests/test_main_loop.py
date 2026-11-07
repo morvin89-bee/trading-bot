@@ -222,8 +222,9 @@ class _FetchPerekam:
         return {"result": list(self.updates)}
 
 
-def _update_tombol(aksi, id_usulan):
-    return {"update_id": 1, "callback_query": {"data": f"{aksi}:{id_usulan}"}}
+def _update_tombol(aksi, id_usulan, revisi=0):
+    return {"update_id": 1,
+            "callback_query": {"data": f"{aksi}:{id_usulan}:{revisi}"}}
 
 
 def _update_teks(teks):
@@ -1301,6 +1302,50 @@ def test_requote_dca_drift_8_persen_hangus_dan_ulang_tidak_mengusulkan_dca(
     assert telegram2.konfirmasi == [], (
         "perilaku /ulang berubah: usulan DCA baru dibuat setelah hangus")
     assert dca_window.dca_state(conn, now + 20)[0] == "awaiting"
+
+
+def test_setuju_pesan_lama_setelah_requote_ditolak(tmp_path):
+    """Temuan B: Setuju dari pesan SEBELUM re-quote tidak boleh dieksekusi.
+
+    Re-quote mengirim konfirmasi baru dengan angka berbeda; persetujuan pada
+    pesan lama berarti menyetujui angka yang sudah tidak berlaku. Hanya
+    revisi terbaru yang diterima; `client_order_id` (id usulan) tetap.
+    """
+    conn = _fresh_db(tmp_path)
+    now = _ts(day=1, hour=9, minute=5)
+    p = _usulan_dca(now, pair="btc_idr", price=1000.0, amount_idr=100000.0)
+    dca_window.mark_pending(conn, now)
+    shadow_log.record(conn, p, "proposed", "")
+    main_loop._ingat([p])
+
+    telegram = _TelegramPerekam()
+    fetch = _FetchPerekam([_update_tombol("setuju", p.id, revisi=0)])
+    _satu_siklus(conn, telegram=telegram, now=now + 10, ctx=_ctx_dca(),
+                 fetch=fetch, baca_harga=lambda pair: 1010.0)
+
+    assert len(telegram.konfirmasi) == 1, telegram.lines
+    baru = telegram.konfirmasi[0]
+    assert baru.revisi == 1
+    assert baru.id == p.id, "client_order_id tidak boleh berubah saat re-quote"
+    assert p.revisi == 1
+
+    # Klik Setuju pada pesan LAMA (revisi 0) -> ditolak tanpa eksekusi.
+    telegram2 = _TelegramPerekam()
+    fetch2 = _FetchPerekam([_update_tombol("setuju", p.id, revisi=0)])
+    _satu_siklus(conn, telegram=telegram2, now=now + 20, ctx=_ctx_dca(),
+                 fetch=fetch2, baca_harga=lambda pair: 1010.0)
+
+    assert any("revisi" in s.lower() or "pesan lama" in s.lower()
+               for s in telegram2.lines), telegram2.lines
+    assert shadow_log.outcome(conn, p.id) == "proposed"
+
+    # Klik Setuju pada pesan BARU (revisi 1) -> diterima.
+    telegram3 = _TelegramPerekam()
+    fetch3 = _FetchPerekam([_update_tombol("setuju", p.id, revisi=1)])
+    _satu_siklus(conn, telegram=telegram3, now=now + 30, ctx=_ctx_dca(),
+                 fetch=fetch3, baca_harga=lambda pair: 1010.0)
+
+    assert shadow_log.outcome(conn, p.id) == "setuju"
 
 
 def test_dca_gagal_di_gerbang_menutup_bulan_sekali(tmp_path):

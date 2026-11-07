@@ -81,31 +81,38 @@ def live_fetch(token: str, *, offset: int = 0, timeout: int = 0,
     return data
 
 
-def parse_update(update: dict) -> tuple[str, str] | None:
+def parse_update(update: dict) -> tuple[str, str, int] | None:
     """Extract callback data from inline keyboard or /ulang command.
     
     Args:
         update: Update object from Telegram getUpdates
     
     Returns:
-        Tuple of (action, id) for callback queries, ("ulang", "") for /ulang command,
-        or None for everything else
+        Tuple of (action, id, revisi) for callback queries, ("ulang", "", 0)
+        for /ulang command, or None for everything else. Data lama tanpa
+        bagian revisi dianggap revisi 0.
     """
     # Handle callback queries from inline keyboard
     if "callback_query" in update and "data" in update["callback_query"]:
         data = update["callback_query"]["data"]
-        if data.startswith(f"{BUTTON_SETUJU}:"):
-            return ("setuju", data.split(":", 1)[1])
-        elif data.startswith(f"{BUTTON_TUNDA}:"):
-            return ("tunda", data.split(":", 1)[1])
-        elif data.startswith(f"{BUTTON_BATAL}:"):
-            return ("batal", data.split(":", 1)[1])
+        for aksi in (BUTTON_SETUJU, BUTTON_TUNDA, BUTTON_BATAL):
+            if data.startswith(f"{aksi}:"):
+                bagian = data.split(":")
+                revisi = 0
+                if len(bagian) >= 3:
+                    try:
+                        revisi = int(bagian[-1])
+                    except ValueError:
+                        revisi = 0
+                id_usulan = ":".join(bagian[1:-1]) if len(bagian) >= 3 \
+                    else bagian[1]
+                return (aksi, id_usulan, revisi)
     
     # Handle /ulang command
     if "message" in update and "text" in update["message"]:
         text = update["message"]["text"]
         if text == "/ulang":
-            return ("ulang", "")
+            return ("ulang", "", 0)
     
     # Everything else returns None
     return None
@@ -132,11 +139,12 @@ class Telegram:
         Returns None on failure.
         """
         text = proposal.confirmation_text(p)
+        revisi = getattr(p, "revisi", 0)
         keyboard = [
             [
-                {"text": "Setuju", "callback_data": f"{BUTTON_SETUJU}:{p.id}"},
-                {"text": "Tunda", "callback_data": f"{BUTTON_TUNDA}:{p.id}"},
-                {"text": "Batal bulan ini", "callback_data": f"{BUTTON_BATAL}:{p.id}"},
+                {"text": "Setuju", "callback_data": f"{BUTTON_SETUJU}:{p.id}:{revisi}"},
+                {"text": "Tunda", "callback_data": f"{BUTTON_TUNDA}:{p.id}:{revisi}"},
+                {"text": "Batal bulan ini", "callback_data": f"{BUTTON_BATAL}:{p.id}:{revisi}"},
             ]
         ]
         reply_markup = {"inline_keyboard": keyboard}

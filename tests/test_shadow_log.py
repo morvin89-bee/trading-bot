@@ -140,6 +140,19 @@ def test_migrasi_tabel_lama_tetap_mengingat_ambang(tmp_path):
         ("btc_idr", 50.0): (0.0, 0.0, None)}
 
 
+def test_record_dan_pending_menyimpan_revisi(tmp_path):
+    """Revisi re-quote harus pulih setelah restart; pesan lama tetap ditolak."""
+    conn = _fresh_db(tmp_path)
+    p = proposal.new_proposal(_act(), rule="DCA bulanan", reserve_after=0,
+                              window_s=86400, now=0.0)
+    shadow_log.record(conn, p, "proposed")
+    p.revisi = 2
+    shadow_log.perbarui_harga(conn, p, "Re-quote DCA")
+    pulih = shadow_log.pending(conn, 1.0)
+    assert len(pulih) == 1
+    assert pulih[0].revisi == 2
+
+
 def test_rejected_count_is_the_shadow_reset_signal(tmp_path):
     conn = _fresh_db(tmp_path)
     for i, outcome in enumerate(("gate_rejected", "spread_rejected")):

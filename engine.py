@@ -535,14 +535,15 @@ def _requote_dca(conn: Any, p: proposal.Proposal, harga_sekarang: float, *,
 
     lama_harga, lama_qty = p.price_ref, p.qty
     baru = replace(
-        p, price_ref=harga_sekarang, qty=p.amount_idr / harga_sekarang)
+        p, price_ref=harga_sekarang, qty=p.amount_idr / harga_sekarang,
+        revisi=p.revisi + 1)
     if telegram.confirmation(baru) is None:
         telegram.line(
             f"Konfirmasi re-quote {p.pair} gagal dikirim — tidak ada order. "
             "Usulan lama tetap berlaku.")
         return "ignored"
 
-    p.price_ref, p.qty = baru.price_ref, baru.qty
+    p.price_ref, p.qty, p.revisi = baru.price_ref, baru.qty, baru.revisi
     catatan = (
         f"Re-quote DCA: harga {lama_harga} -> {harga_sekarang}, "
         f"qty {lama_qty} -> {p.qty}, nominal tetap {p.amount_idr}")

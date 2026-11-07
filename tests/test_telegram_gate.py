@@ -28,10 +28,32 @@ def test_confirmation_has_three_buttons_and_no_approve_all():
         return 42
     import telegram_gate
     tg = telegram_gate.Telegram("t", "c", send=fake_send)
-    assert tg.confirmation(_proposal()) == 42
+    p = _proposal()
+    assert tg.confirmation(p) == 42
     labels = [b["text"] for row in captured["markup"]["inline_keyboard"] for b in row]
     assert labels == ["Setuju", "Tunda", "Batal bulan ini"]
     assert "semua" not in " ".join(labels).lower()
+    data = [b["callback_data"] for row in captured["markup"]["inline_keyboard"]
+            for b in row]
+    assert all(d.endswith(":0") for d in data), data
+    assert all(len(d.encode("utf-8")) <= 64 for d in data), data
+
+
+def test_callback_data_maks_64_byte_untuk_id_terpanjang():
+    captured = {}
+
+    def fake_send(token, chat_id, text, reply_markup=None):
+        captured.update(markup=reply_markup)
+        return 42
+
+    import telegram_gate
+    p = _proposal()
+    p.id = "x" * 36
+    p.revisi = 999
+    telegram_gate.Telegram("t", "c", send=fake_send).confirmation(p)
+    data = [b["callback_data"] for row in captured["markup"]["inline_keyboard"]
+            for b in row]
+    assert all(len(d.encode("utf-8")) <= 64 for d in data), data
 
 
 def test_expiry_notifies_once_in_one_line():
@@ -52,14 +74,20 @@ def test_line_returns_false_rather_than_raising():
 
 def test_parse_callback_button():
     import telegram_gate
+    u = {"callback_query": {"id": "1", "data": "setuju:p-9:2"}}
+    assert telegram_gate.parse_update(u) == ("setuju", "p-9", 2)
+
+
+def test_parse_callback_lama_tanpa_revisi_dianggap_revisi_nol():
+    import telegram_gate
     u = {"callback_query": {"id": "1", "data": "setuju:p-9"}}
-    assert telegram_gate.parse_update(u) == ("setuju", "p-9")
+    assert telegram_gate.parse_update(u) == ("setuju", "p-9", 0)
 
 
 def test_parse_reply_ulang():
     import telegram_gate
     u = {"message": {"text": "/ulang"}}
-    assert telegram_gate.parse_update(u) == ("ulang", "")
+    assert telegram_gate.parse_update(u) == ("ulang", "", 0)
 
 
 def test_unrelated_message_is_none():

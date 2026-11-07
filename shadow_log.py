@@ -55,7 +55,8 @@ def _ensure_table(conn):
                 reserve_after REAL,
                 window_s INTEGER,
                 level REAL,
-                basis REAL
+                basis REAL,
+                revisi INTEGER NOT NULL DEFAULT 0
             )
             """
         )
@@ -65,7 +66,8 @@ def _ensure_table(conn):
     kolom = [baris[1] for baris in conn.execute("PRAGMA table_info(proposals)")]
     for nama, tipe in (("qty", "REAL"), ("reserve_after", "REAL"),
                        ("window_s", "INTEGER"), ("level", "REAL"),
-                       ("basis", "REAL")):
+                       ("basis", "REAL"),
+                       ("revisi", "INTEGER NOT NULL DEFAULT 0")):
         if nama not in kolom:
             conn.execute(f"ALTER TABLE proposals ADD COLUMN {nama} {tipe}")
 
@@ -95,8 +97,8 @@ def record(conn, p, outcome, note=""):
         """
         INSERT INTO proposals (
             id, ts, day, kind, pair, amount_idr, price_ref, rule, outcome,
-            note, qty, reserve_after, window_s, level, basis
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            note, qty, reserve_after, window_s, level, basis, revisi
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             p.id,
@@ -114,6 +116,7 @@ def record(conn, p, outcome, note=""):
             getattr(p, "window_s", None),
             getattr(p, "level", None),
             getattr(p, "basis", None),
+            getattr(p, "revisi", 0),
         ),
     )
     conn.commit()
@@ -167,7 +170,7 @@ def pending(conn, now):
     baris = conn.execute(
         """
         SELECT id, kind, pair, amount_idr, qty, price_ref, rule,
-               reserve_after, window_s, ts, level, basis
+               reserve_after, window_s, ts, level, basis, revisi
         FROM proposals
         WHERE outcome = 'proposed' AND ts IS NOT NULL
           AND window_s IS NOT NULL AND qty IS NOT NULL
@@ -183,6 +186,7 @@ def pending(conn, now):
             reserve_after=r["reserve_after"], window_s=r["window_s"],
             created_ts=r["ts"], status="proposed",
             level=r["level"], basis=r["basis"],
+            revisi=r["revisi"] or 0,
         )
         for r in baris
     ]
@@ -197,8 +201,9 @@ def perbarui_harga(conn, p, note=""):
     """
     _ensure_table(conn)
     conn.execute(
-        "UPDATE proposals SET price_ref = ?, qty = ?, note = ? WHERE id = ?",
-        (p.price_ref, p.qty, note, p.id),
+        "UPDATE proposals SET price_ref = ?, qty = ?, note = ?, revisi = ? "
+        "WHERE id = ?",
+        (p.price_ref, p.qty, note, getattr(p, "revisi", 0), p.id),
     )
     conn.commit()
 

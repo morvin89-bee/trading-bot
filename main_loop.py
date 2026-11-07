@@ -511,12 +511,16 @@ def _terapkan_setuju_dca(conn, usulan, hasil, *, shadow, now, telegram):
 
 
 def _jawab(conn, ctx, aksi, id_usulan, *, now, telegram, transport,
-           shadow, verdict):
+           shadow, verdict, revisi=0):
     """Teruskan satu jawaban pengguna ke `engine.on_answer`.
 
     `ctx.prices` WAJIB terisi dari ticker (kabel Task 12): `on_answer` membacanya
     untuk gerbang geser harga 0,5%. Kosong = setiap konfirmasi berbalik
     "ignored" tanpa alasan yang jujur.
+
+    `revisi` adalah nomor revisi pesan yang tombolnya ditekan. Re-quote
+    menaikkan revisi usulan; jawaban dari pesan lama (revisi lebih kecil)
+    DITOLAK — pengguna tidak boleh menyetujui angka yang sudah tidak berlaku.
 
     F46: jendela DCA hanya disentuh bila jawaban rujuk ke usulan DCA yang
     benar-benar dikenal — id tak dikenal berarti jenis usulan tidak
@@ -533,6 +537,13 @@ def _jawab(conn, ctx, aksi, id_usulan, *, now, telegram, transport,
     # DAN usulannya ber-rule DCA (F46) — Setuju pada take-profit tidak boleh
     # menutup jendela DCA, dan id tak dikenal tidak boleh menyentuh apa pun.
     usulan = _USULAN_MENUNGGU.get(id_usulan)
+    if usulan is not None and revisi != getattr(usulan, "revisi", 0):
+        telegram.line(
+            f"Usulan {id_usulan} berasal dari pesan lama (revisi {revisi}, "
+            f"terbaru {getattr(usulan, 'revisi', 0)}) — tidak ada order "
+            "dikirim. Tekan tombol pada pesan konfirmasi terbaru."
+        )
+        return "ignored"
     if aksi == telegram_gate.BUTTON_BATAL:
         if usulan is not None and usulan.rule == rules.RULE_DCA:
             if dca_window.mark_batal(conn, now):
@@ -645,7 +656,7 @@ def _proses_batch(conn, ctx, updates, *, now, telegram, transport, shadow,
             parsed = telegram_gate.parse_update(update)
             if parsed is None:
                 continue
-            aksi, id_usulan = parsed
+            aksi, id_usulan, revisi = parsed
             if aksi == "ulang":
                 diulang = True
             if baca_harga is not None:
@@ -663,6 +674,7 @@ def _proses_batch(conn, ctx, updates, *, now, telegram, transport, shadow,
             _jawab(
                 conn, ctx, aksi, id_usulan, now=now, telegram=telegram,
                 transport=transport, shadow=shadow, verdict=verdict,
+                revisi=revisi,
             )
         except Exception as e:
             # I2 (review 2026-10-18): offset sudah maju untuk SELURUH batch,
