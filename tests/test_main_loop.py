@@ -1478,6 +1478,29 @@ def test_dca_gagal_di_gerbang_menutup_bulan_sekali(tmp_path):
         "siklus kedua mengulang percobaan DCA — bulan harusnya sudah tutup")
 
 
+def test_dca_saldo_kurang_menutup_bulan_dengan_satu_pesan(tmp_path):
+    """Saldo bebas di bawah setoran bulanan: tidak ada DCA, satu pesan jujur,
+    dan bulan ditutup tanpa pesan "berakhir tanpa order" yang kedua."""
+    conn = _fresh_db(tmp_path)
+    now = _ts(day=1, hour=9, minute=5)
+    telegram = _TelegramPerekam()
+
+    keluar = _satu_siklus(conn, telegram=telegram, now=now,
+                          ctx=_ctx_dca(free_idr=100000.0))
+
+    assert keluar == "kosong"
+    assert telegram.konfirmasi == [], (
+        f"masih ada usulan DCA: {[p.pair for p in telegram.konfirmasi]}")
+    assert len([s for s in telegram.lines if "saldo" in s.lower()]) == 1, (
+        telegram.lines)
+    assert not any("berakhir tanpa order" in s for s in telegram.lines), (
+        telegram.lines)
+    baris = conn.execute(
+        "SELECT last_dca_date FROM bot_state WHERE id = 1").fetchone()
+    assert baris["last_dca_date"] == time.strftime(
+        "%Y-%m", time.localtime(now))
+
+
 def test_setuju_take_profit_tidak_menutup_jendela_dca(tmp_path):
     """F46: Setuju pada usulan TAKE-PROFIT tidak boleh menyentuh jendela
     DCA yang sedang `awaiting` — jendela hanya ditutup oleh jawaban atas
@@ -2162,7 +2185,9 @@ def test_sapa_awal_hanya_bila_ada_fetch(tmp_path):
 
     assert keluar == 0
     assert telegram.lines, "sapa awal harus terkirim begitu fetch ada"
-    assert "mode bayangan" in telegram.lines[0].lower()
+    # Pesan DCA (saldo 0 pada konteks kosong) boleh mendahului sapa; yang
+    # diuji di sini adalah sapa itu sendiri terkirim dan jujur soal mode.
+    assert any("mode bayangan" in s.lower() for s in telegram.lines)
 
 
 def test_banner_mode_bayangan_dicetak_sekali_saja(tmp_path, capsys):
@@ -2619,8 +2644,8 @@ def test_sapa_awal_mengikuti_mode_sebenarnya(tmp_path):
 
     assert keluar == 0
     assert telegram.lines, "sapa tetap wajib begitu poll pertama sukses"
-    assert "mode bayangan" not in telegram.lines[0].lower()
-    assert "eksekusi menyala" in telegram.lines[0].lower()
+    assert not any("mode bayangan" in s.lower() for s in telegram.lines)
+    assert any("eksekusi menyala" in s.lower() for s in telegram.lines)
 
 
 def test_sapa_awal_gagal_kirim_dicatat_jujur(tmp_path, capsys):

@@ -129,6 +129,11 @@ class Context:
     # last_day)} per mode; diisi `tick` dari `shadow_log` sebelum
     # `collect_actions`. State dipass masuk — `rules` tidak menyimpan apa pun.
     take_profit_sudah: dict = field(default_factory=dict)
+    # Hasil tick: True bila DCA bulan ini tidak diusulkan karena saldo bebas
+    # di bawah setoran. `main_loop` memakainya untuk menutup bulan tanpa
+    # pesan "berakhir tanpa order" kedua — pengguna sudah diberi tahu
+    # alasannya oleh `tick`.
+    dca_saldo_kurang: bool = False
 
 
 def collect_actions(ctx: Context, *, hari=None) -> List[rules.Action]:
@@ -235,6 +240,17 @@ def tick(
     # Flag hasil tick direset lebih dulu: nilai dari tick sebelumnya tidak
     # boleh membekukan keputusan bulan ini.
     ctx.dca_retry = False
+    # Saldo di bawah setoran = setoran bulan ini tidak ada. Satu pesan jelas
+    # (bukan penolakan gerbang per pair), lalu `main_loop` menutup bulan.
+    ctx.dca_saldo_kurang = bool(
+        getattr(ctx, "dca_enabled", False)
+        and ctx.free_idr < rules.MONTHLY_IDR)
+    if ctx.dca_saldo_kurang:
+        telegram.line(
+            f"Saldo bebas {alerts._rp(ctx.free_idr)} kurang dari setoran DCA "
+            f"bulanan {alerts._rp(rules.MONTHLY_IDR)} — DCA bulan ini "
+            "dilewati tanpa order. Isi saldo lalu tunggu bulan depan."
+        )
     if not actions:
         return []
 

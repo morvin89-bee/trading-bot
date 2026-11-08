@@ -9,9 +9,25 @@ def test_konstanta_bulanan_satu_sumber():
     assert rules.RULE_DCA == "dca_bulanan"
 
 
+def _seimbang():
+    """Portofolio tepat di bobot target saat kas = setoran bulanan.
+
+    `dca_split` menghitung kas sebagai bagian portofolio; tanpa ini kas
+    500.000 membuat IDR kelebihan bobot dan setoran dimiringkan ke aset.
+    """
+    return [
+        portfolio.Holding("btc_idr", "btc", 1.0, 2_750_000.0, 2_750_000.0,
+                          2_750_000.0, 2_750_000.0, 0.0, True),
+        portfolio.Holding("eth_idr", "eth", 1.0, 1_250_000.0, 1_250_000.0,
+                          1_250_000.0, 1_250_000.0, 0.0, True),
+        portfolio.Holding("sol_idr", "sol", 1.0, 500_000.0, 500_000.0,
+                          500_000.0, 500_000.0, 0.0, True),
+    ]
+
+
 def test_dca_actions_membagi_setoran_sesuai_bobot():
     aksi = rules.dca_actions(
-        [], 0.0,
+        _seimbang(), rules.MONTHLY_IDR,
         {"btc_idr": 1_000_000.0, "eth_idr": 500_000.0, "sol_idr": 100_000.0},
         max_order=275_000)
     assert [(a.pair, a.amount_idr) for a in aksi] == [
@@ -31,14 +47,15 @@ def test_dca_actions_memotong_di_batas_tanpa_membagi_sisa():
                           1_200_000.0, 900_000.0, 300_000.0, True),
     ]
     aksi = rules.dca_actions(
-        holdings, 0.0,
+        holdings, rules.MONTHLY_IDR,
         {"btc_idr": 1_000_000.0, "eth_idr": 500_000.0, "sol_idr": 100_000.0},
         max_order=275_000)
     assert [(a.pair, a.amount_idr) for a in aksi] == [("btc_idr", 275_000.0)]
 
 
 def test_dca_actions_melewati_aset_tanpa_harga():
-    aksi = rules.dca_actions([], 0.0, {"btc_idr": 1_000_000.0},
+    aksi = rules.dca_actions([], rules.MONTHLY_IDR,
+                             {"btc_idr": 1_000_000.0},
                              max_order=275_000)
     assert [a.pair for a in aksi] == ["btc_idr"]   # ETH & SOL tanpa harga: dilewati
 
@@ -48,7 +65,7 @@ def test_dca_actions_kosong_bila_semua_ke_cadangan():
     # alokasi < min_order yang dipindahkan ke cadangan IDR (bukan jalur
     # "tanpa harga" yang di sini tidak mungkin terjadi).
     aksi = rules.dca_actions(
-        [], 0.0,
+        [], 15_000,
         {"btc_idr": 1_000_000.0, "eth_idr": 500_000.0, "sol_idr": 100_000.0},
         monthly=15_000, max_order=275_000)
     assert aksi == []
@@ -57,7 +74,7 @@ def test_dca_actions_kosong_bila_semua_ke_cadangan():
 def test_dca_actions_melewati_atau_harga_negatif():
     # Harga negatif harus dianggap tidak jujur, sama seperti harga kosong.
     aksi = rules.dca_actions(
-        [], 0.0,
+        [], rules.MONTHLY_IDR,
         {"btc_idr": 1_000_000.0, "eth_idr": -500_000.0, "sol_idr": 100_000.0},
         max_order=275_000)
     assert [a.pair for a in aksi] == ["btc_idr", "sol_idr"]
@@ -65,9 +82,10 @@ def test_dca_actions_melewati_atau_harga_negatif():
 
 
 def test_dca_actions_alasan_indonesia_menyebut_dca():
-    aksi = rules.dca_actions([], 0.0, {"btc_idr": 1_000_000.0,
-                                       "eth_idr": 500_000.0,
-                                       "sol_idr": 100_000.0},
+    aksi = rules.dca_actions([], rules.MONTHLY_IDR,
+                             {"btc_idr": 1_000_000.0,
+                              "eth_idr": 500_000.0,
+                              "sol_idr": 100_000.0},
                              max_order=100_000)  # memaksa pemotongan
     # Ketiga aset punya harga -> TIGA aksi keluar (bukan satu).
     assert len(aksi) == 3

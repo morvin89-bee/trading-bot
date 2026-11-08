@@ -277,9 +277,15 @@ def dca_actions(holdings, idr_free, prices, *, max_order,
     `safeguards.MAX_ORDER_IDR`); `rules` tidak boleh mengimpor
     `safeguards` (circular). Aset tanpa harga jujur (`prices` kosong, nol,
     atau negatif) dilewati — `price_ref` tidak bisa diisi dengan jujur.
+
+    Saldo bebas di bawah `monthly` berarti setoran bulan ini tidak ada:
+    kembalikan daftar kosong, bukan usulan yang pasti ditolak gerbang satu
+    per satu. Pemanggil (`engine.tick`) yang memberi tahu pengguna.
     """
     if target is None:
         target = DEFAULT_TARGET
+    if idr_free < monthly:
+        return []
     nilai = {h.pair: h.value_idr for h in holdings}
     nilai["IDR"] = idr_free
     alokasi = dca_split(monthly, nilai, target, min_order=min_order)

@@ -28,6 +28,19 @@ def test_total_preserved_even_for_fractional_amount():
     assert abs(sum(out.values()) - 500000.75) < 1e-6
 
 
+def test_dca_actions_tanpa_saldo_cukup_tidak_mengusulkan():
+    """Setoran bulanan hanya diusulkan bila saldo bebas menutupinya.
+
+    Tanpa cek ini `dca_split` tetap membagi setoran yang tidak ada dan
+    gerbang per order menolak sebagian pair satu per satu — pengguna tidak
+    pernah tahu bahwa masalahnya saldo, bukan pasar.
+    """
+    harga = {"btc_idr": 1600.0, "eth_idr": 1400.0, "sol_idr": 350.0}
+    assert rules.dca_actions([], 499999, harga, max_order=275000) == []
+    cukup = rules.dca_actions([], 500000, harga, max_order=275000)
+    assert cukup, "kontrol: saldo tepat setoran harus menghasilkan aksi"
+
+
 def test_target_weights_must_sum_to_one():
     """Bobot target yang tidak berjumlah 1.0 bukan sekadar tidak rapi: total
     alokasi tidak lagi sama dengan setoran dan `IDR` menyerap selisihnya

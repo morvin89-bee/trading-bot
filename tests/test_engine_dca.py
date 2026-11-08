@@ -176,6 +176,24 @@ def test_tick_memberi_jendela_24_jam_untuk_dca(tmp_path):
         f"reserve_after usulan DCA: {[(p.pair, p.reserve_after) for p in dca]}")
 
 
+def test_tick_saldo_kurang_mengirim_satu_pesan_tanpa_usulan_dca(tmp_path):
+    """Saldo bebas < setoran bulanan: nol usulan DCA dan SATU pesan jelas.
+
+    Tanpa pesan khusus, pengguna hanya melihat penolakan gerbang per pair
+    (atau tidak melihat apa pun bila semua aksi kebetulan lolos), lalu
+    bulan ditutup tanpa alasan yang bisa ditindaklanjuti.
+    """
+    conn = sqlite3.connect(str(tmp_path / "tick_saldo.db"))
+    ctx = _ctx([], free_idr=100_000.0, reserve_idr=0.0, dca_enabled=True)
+    sent = []
+    props = engine.tick(conn, ctx, now=0.0, telegram=_tg(sent), shadow=True,
+                        verdict=lambda pair, **k: (True, 1.0))
+    assert props == [], f"tidak boleh ada usulan: {[p.pair for p in props]}"
+    assert ctx.dca_saldo_kurang is True
+    pesan = [s for s in sent if "saldo" in s.lower()]
+    assert len(pesan) == 1, sent
+
+
 def test_konteks_lama_tanpa_field_dca_tetap_terbaca_mati():
     # Kompatibilitas mundur: helper lama di `tests/test_engine.py` membangun
     # konteks lewat `SimpleNamespace` TANPA field `dca_enabled`.
