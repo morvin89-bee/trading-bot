@@ -763,7 +763,20 @@ def on_answer(conn: Any, ctx: Context, *, p: proposal.Proposal, answer: str,
     if proposal.is_expired(p, now):
         return "ignored"
 
-    # 2b. Gerbang geser harga 0,5% (spec L116, putusan R-E): angka yang
+    # 2b. Jual tidak boleh melebihi koin yang benar-benar dipegang: usulan
+    #     lahir dari konteks lama, dan kepemilikan bisa berkurang sebelum
+    #     tombol ditekan. Ragu = tidak ada order.
+    if p.kind == "SELL":
+        dimiliki = sum(
+            getattr(h, "qty", 0.0) for h in getattr(ctx, "holdings", [])
+            if getattr(h, "pair", None) == p.pair)
+        if p.qty is None or p.qty <= 0 or p.qty > dimiliki + 1e-9:
+            telegram.line(
+                f"Tolak jual {p.pair}: qty {p.qty} melebihi kepemilikan "
+                f"{dimiliki:.8f} koin — tidak ada order dikirim.")
+            return "gate_blocked"
+
+    # 2c. Gerbang geser harga 0,5% (spec L116, putusan R-E): angka yang
     #     dibaca pengguna di pesan konfirmasi harus masih mewakili harga
     #     sekarang. Harga hilang/tak terbaca pun berarti TIDAK ADA
     #     keputusan (§6.3) dan `price_still_valid` menolaknya.

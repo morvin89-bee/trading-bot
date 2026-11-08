@@ -765,6 +765,26 @@ def test_penolakan_spread_sama_hanya_sekali_per_hari(tmp_path):
     assert len([s for s in sent if "spread" in s.lower()]) == 2, sent
 
 
+def test_jual_melebihi_kepemilikan_ditolak(tmp_path):
+    """Qty jual tidak boleh melebihi koin yang benar-benar dipegang.
+
+    Usulan lahir dari konteks lama; bila kepemilikan sudah berkurang sebelum
+    Setuju ditekan, order jual berlebih harus ditolak sebelum transport.
+    """
+    conn = _fresh_db(tmp_path)
+    p = _proposal_take_profit(qty=2.0, qty_target=2.0)
+    t = _FakeTransport()
+    sent = []
+    out = engine.on_answer(conn, _pasangkan_harga(_ctx(), p), p=p,
+                           answer="setuju", now=1.0, transport=t,
+                           telegram=_tg(sent), shadow=False,
+                           verdict=lambda pair, **k: (True, 1.0))
+    assert out == "gate_blocked"
+    assert t.posted == []
+    assert shadow_log.outcome(conn, p.id) != "setuju"
+    assert any("kepemilikan" in s for s in sent), sent
+
+
 def test_halt_when_status_unknown_keeps_db_untouched(tmp_path, monkeypatch):
     # Review Focus #2 — 404 abadi bukan berarti batal
     tidur = _tanpa_tidur(monkeypatch)
