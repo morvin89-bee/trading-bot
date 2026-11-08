@@ -284,6 +284,11 @@ def tick(
     # meninggalkan tombol untuk usulan yang tidak pernah dikembalikan.
     siap_kirim: List[proposal.Proposal] = []
 
+    # Saldo berjalan: gerbang per aksi tidak boleh membaca saldo awal yang
+    # sama untuk semua BUY dalam satu tick — dua order yang masing-masing
+    # muat bisa bersama-sama melebihi saldo. SELL tidak mengurangi.
+    saldo_bebas = ctx.free_idr
+
     # 2. Proses setiap aksi
     for action in actions:
         pair = action.pair
@@ -367,7 +372,7 @@ def tick(
         # 4. Gerbang safeguard
         gate_reasons = safeguards.gates(
             action,
-            free_idr=ctx.free_idr,
+            free_idr=saldo_bebas,
             reserve_idr=ctx.reserve_idr,
             today_counts=ctx.today_counts,
             last_fill_ts=ctx.last_fill_ts,
@@ -430,6 +435,8 @@ def tick(
             now=now,
         )
         siap_kirim.append(prop)
+        if action.kind != "SELL":
+            saldo_bebas = max(0.0, saldo_bebas - action.amount_idr)
 
     # 6. Seluruh aksi sudah dinilai tanpa halt -> baru kirim konfirmasi.
     #    Kegagalan kirim per usulan tidak membatalkan usulan lain; untuk DCA

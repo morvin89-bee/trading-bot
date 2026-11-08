@@ -710,6 +710,32 @@ def test_expired_proposal_writes_no_order_and_nothing_to_db(tmp_path):
     # "setuju" pencatat, jadi nol tulisan di tabel mana pun
     assert _outcomes(conn) == []
 
+def test_saldo_berjalan_antar_aksi_dalam_satu_tick(tmp_path, monkeypatch):
+    """Dua BUY tidak boleh sama-sama lolos dengan saldo yang sama.
+
+    Gerbang per aksi membaca `ctx.free_idr` yang tidak berubah; tanpa saldo
+    berjalan, dua order 260.000 lolos dari saldo 500.000.
+    """
+    conn = _fresh_db(tmp_path)
+    aksi = []
+    for pair in ("btc_idr", "eth_idr"):
+        a = rules.Action("BUY", pair, 260000, 0.26, 1000.0, "uji saldo", True)
+        a._nama_aturan = proposal.RULE_RESERVE_BUY
+        aksi.append(a)
+    monkeypatch.setattr(engine, "collect_actions",
+                        lambda ctx, hari=None: aksi)
+    ctx = engine.Context(
+        holdings=[], prices={}, free_idr=500000.0, reserve_idr=0.0,
+        today_counts={}, last_fill_ts={}, held_pairs_24h=set())
+    sent = []
+    props = engine.tick(conn, ctx, now=0.0, telegram=_tg(sent), shadow=True,
+                        verdict=lambda pair, **k: (True, 1.0))
+    assert [p.pair for p in props] == ["btc_idr"], (
+        "kedua BUY lolos padahal saldo hanya Rp 500.000: "
+        f"{[(p.pair, p.amount_idr) for p in props]}")
+    assert any("kurang" in s for s in sent), sent
+
+
 def test_penolakan_spread_sama_hanya_sekali_per_hari(tmp_path):
     """Penolakan yang menetap tidak boleh dikirim ulang tiap tick.
 

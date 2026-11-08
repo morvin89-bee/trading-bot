@@ -685,7 +685,7 @@ def _ada_perintah_ulang(updates):
 
 
 def _proses_batch(conn, ctx, updates, *, now, telegram, transport, shadow,
-                  verdict, baca_harga=None):
+                  verdict, baca_harga=None, pembaca_konteks=None):
     """Proses SATU batch update; offset sudah maju oleh pemanggil.
 
     Mengembalikan True bila ada perintah `/ulang` di dalamnya — pemanggil
@@ -698,6 +698,12 @@ def _proses_batch(conn, ctx, updates, *, now, telegram, transport, shadow,
     SAAT INI, bukan harga denyut lima menit lalu (gerbang geser 0,5%, spec
     §6.3). Gagal membaca = `ctx.prices[pair] = None` → `price_still_valid`
     menolak → konfirmasi hangus. Tidak ada keputusan di atas harga basi.
+
+    `pembaca_konteks(conn)` (opsional) dipanggil sebelum jawaban pertama
+    diproses: saldo dan posisi bisa berubah sejak denyut terakhir (order
+    lain terisi), dan `on_answer` menilai gerbang dengan angka yang
+    diberikan. Gagal membaca = jawaban TIDAK diterapkan (ragu = jangan
+    kirim); pengguna diberi tahu dan bisa menekan tombol lagi.
     """
     diulang = False
     for update in updates:
@@ -706,6 +712,21 @@ def _proses_batch(conn, ctx, updates, *, now, telegram, transport, shadow,
             if parsed is None:
                 continue
             aksi, id_usulan, revisi = parsed
+            # `/ulang` selalu lewat denyut penuh yang sudah membaca konteks
+            # segar sebelum `tick_cycle`; membacanya lagi di sini hanya
+            # menggandakan panggilan pembaca tanpa menambah kebenaran.
+            if aksi != "ulang" and pembaca_konteks is not None:
+                try:
+                    ctx = pembaca_konteks(conn)
+                except Exception as e:
+                    telegram.line(
+                        "Saldo/pasar gagal dibaca ulang sebelum menjawab — "
+                        "jawaban tidak diterapkan. Tekan tombol lagi setelah "
+                        "pembacaan pulih.")
+                    print(
+                        "Pembaca konteks gagal sebelum menjawab — jawaban "
+                        f"tidak diterapkan: {_samarkan_pesan_galat(e)}")
+                    continue
             if aksi == "ulang":
                 diulang = True
             if baca_harga is not None:
@@ -739,7 +760,7 @@ def _proses_batch(conn, ctx, updates, *, now, telegram, transport, shadow,
 
 
 def _polling(conn, ctx, *, now, telegram, transport, shadow, verdict, fetch,
-             baca_harga=None):
+             baca_harga=None, pembaca_konteks=None):
     """Baca `getUpdates`, teruskan ke `on_answer` (satu-satunya konsumennya).
 
     Mengembalikan True bila ada perintah `/ulang` yang sudah menghasilkan
@@ -755,7 +776,8 @@ def _polling(conn, ctx, *, now, telegram, transport, shadow, verdict, fetch,
     _simpan_offset(conn, offset_baru)
     return _proses_batch(conn, ctx, updates, now=now, telegram=telegram,
                          transport=transport, shadow=shadow, verdict=verdict,
-                         baca_harga=baca_harga)
+                         baca_harga=baca_harga,
+                         pembaca_konteks=pembaca_konteks)
 
 
 def tick_cycle(
@@ -771,6 +793,7 @@ def tick_cycle(
     ctx=None,
     fetch=None,
     baca_harga=None,
+    pembaca_konteks=None,
 ):
     """Satu denyut jantung. Mengembalikan "halted" | "proposed" | "kosong".
 
@@ -845,7 +868,8 @@ def tick_cycle(
     # 3. Polling Telegram — wajib, bukan pelengkap (F6).
     diulang = _polling(conn, ctx, now=now, telegram=telegram,
                        transport=transport, shadow=shadow, verdict=verdict,
-                       fetch=fetch, baca_harga=baca_harga)
+                       fetch=fetch, baca_harga=baca_harga,
+                       pembaca_konteks=pembaca_konteks)
 
     # 4. Pengingat pasif DCA, maksimal satu pesan per slot jam (T-13.1).
     if dca_window.should_remind(conn, now):
@@ -1188,7 +1212,8 @@ def main(argv=None, *, conn=None, db_path=None, telegram=None,
                             tick_cycle(conn, now=sekarang, telegram=telegram,
                                        transport=transport, shadow=shadow,
                                        ctx=ctx, fetch=fetch,
-                                       baca_harga=baca_harga)
+                                       baca_harga=baca_harga,
+                                       pembaca_konteks=pembaca_konteks)
                         except Exception as e:
                             # Galat denyut = denyut dilewati, dicoba ulang pada
                             # bangun berikutnya (15 dtk) — proses TIDAK boleh
@@ -1230,7 +1255,8 @@ def main(argv=None, *, conn=None, db_path=None, telegram=None,
                                       telegram=telegram, transport=transport,
                                       shadow=shadow,
                                       verdict=spread.spread_verdict,
-                                      baca_harga=baca_harga)
+                                      baca_harga=baca_harga,
+                                      pembaca_konteks=pembaca_konteks)
                         if updates:
                             # Sabuk C1: batch berisi apa pun = periksa penolakan
                             # hari ini juga. Batch kosong mustahil meninggalkan

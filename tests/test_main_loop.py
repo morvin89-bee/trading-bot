@@ -1501,6 +1501,37 @@ def test_dca_saldo_kurang_menutup_bulan_dengan_satu_pesan(tmp_path):
         "%Y-%m", time.localtime(now))
 
 
+def test_jawaban_memakai_konteks_segar_sebelum_order(tmp_path):
+    """Setuju harus dinilai dengan saldo SEKARANG, bukan saldo denyut lama.
+
+    Konteks lama punya saldo Rp 100.000; pembaca konteks segar melaporkan
+    Rp 0. Order reserve buy Rp 60.000 hanya lolos bila jawaban memakai
+    konteks basi — dan itu berarti mengirim order tanpa dana.
+    """
+    conn = _fresh_db(tmp_path)
+    now = _ts(hour=12)
+    p = proposal.new_proposal(
+        rules.Action("BUY", "btc_idr", 60000, 0.06, 1000.0, "reserve buy", True),
+        rule=proposal.RULE_RESERVE_BUY, reserve_after=0.0,
+        window_s=proposal.REACTIVE_WINDOW_S, now=now)
+    main_loop._ingat([p])
+
+    segar = _ctx_kosong()
+    segar.prices = {"btc_idr": 1000.0}
+    transport = _TransportPerekam()
+    telegram = _TelegramPerekam()
+    fetch = _FetchPerekam([_update_tombol("setuju", p.id)])
+
+    _satu_siklus(conn, telegram=telegram, now=now + 1, ctx=_ctx(price=1000.0),
+                 transport=transport, shadow=False, fetch=fetch,
+                 pembaca_konteks=lambda conn: segar)
+
+    assert transport.posted == [], (
+        "order dikirim memakai saldo basi: "
+        f"{[o.get('amount_idr') for o in transport.posted]}")
+    assert any("kurang" in s for s in telegram.lines), telegram.lines
+
+
 def test_setuju_take_profit_tidak_menutup_jendela_dca(tmp_path):
     """F46: Setuju pada usulan TAKE-PROFIT tidak boleh menyentuh jendela
     DCA yang sedang `awaiting` — jendela hanya ditutup oleh jawaban atas
