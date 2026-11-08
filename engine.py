@@ -30,7 +30,9 @@ RULE_TAKE_PROFIT = "take_profit"
 # Pesan penolakan yang sudah dikirim pada satu hari lokal. Penolakan yang
 # menetap (spread lebar, pagu harian, harga hilang) terulang tiap tick;
 # tanpa dedupe pengguna menerima kalimat yang sama ~288 kali sehari dan
-# berhenti membacanya. Kunci = (pair, kind, teks); hari menjadi batas reset.
+# berhenti membacanya. Kunci = (pair, kind, KODE alasan) — teks boleh
+# berubah (angka spread/nominal) tanpa mengirim ulang alasan yang sama.
+# Hari menjadi batas reset. Catatan shadow_log tetap ditulis setiap tick.
 _PESAN_TERKIRIM = {"hari": None, "kunci": set()}
 
 
@@ -40,12 +42,12 @@ def reset_state():
     _PESAN_TERKIRIM["kunci"].clear()
 
 
-def _kirim_sekali(telegram, hari, pair, kind, teks):
+def _kirim_sekali(telegram, hari, pair, kind, kode, teks):
     """`telegram.line(teks)` paling banyak sekali per hari per alasan."""
     if _PESAN_TERKIRIM["hari"] != hari:
         _PESAN_TERKIRIM["hari"] = hari
         _PESAN_TERKIRIM["kunci"].clear()
-    kunci = (pair, kind, teks)
+    kunci = (pair, kind, kode)
     if kunci in _PESAN_TERKIRIM["kunci"]:
         return
     _PESAN_TERKIRIM["kunci"].add(kunci)
@@ -264,17 +266,20 @@ def tick(
     # Flag hasil tick direset lebih dulu: nilai dari tick sebelumnya tidak
     # boleh membekukan keputusan bulan ini.
     ctx.dca_retry = False
-    # Saldo di bawah setoran = setoran bulan ini tidak ada. Satu pesan jelas
-    # (bukan penolakan gerbang per pair), lalu `main_loop` menutup bulan.
+    # Saldo di bawah setoran = setoran bulan ini belum ada. Satu pesan jelas
+    # (bukan penolakan gerbang per pair), dan bulan TETAP TERBUKA: usulan
+    # muncul otomatis begitu saldo bebas mencapai setoran, sampai batas
+    # `boleh_usul_dca`. Nominal tidak dikecilkan.
     ctx.dca_saldo_kurang = bool(
         getattr(ctx, "dca_enabled", False)
         and ctx.free_idr < rules.MONTHLY_IDR)
     if ctx.dca_saldo_kurang:
-        telegram.line(
+        _kirim_sekali(
+            telegram, hari, "-", "DCA", "saldo",
             f"Saldo bebas {alerts._rp(ctx.free_idr)} kurang dari setoran DCA "
-            f"bulanan {alerts._rp(rules.MONTHLY_IDR)} — DCA bulan ini "
-            "dilewati tanpa order. Isi saldo lalu tunggu bulan depan."
-        )
+            f"bulanan {alerts._rp(rules.MONTHLY_IDR)} — belum ada usulan. "
+            "Isi saldo sebelum batas usulan bulan ini; usulan muncul "
+            "otomatis begitu saldo cukup.")
     if not actions:
         return []
 
@@ -322,7 +327,7 @@ def tick(
                     f"Harga hilang untuk pair {pair}",
                 )
             _kirim_sekali(
-                telegram, hari, pair, action.kind,
+                telegram, hari, pair, action.kind, "harga_hilang",
                 f"Harga {pair} tidak tersedia — proses dihentikan untuk "
                 "melindungi dana.")
             # Tidak ada konfirmasi yang terkirim pada tick ini. Bila DCA
@@ -362,7 +367,7 @@ def tick(
                     f"Spread {bps_atas:.1f} bps melebihi batas untuk {pair}",
                 )
             _kirim_sekali(
-                telegram, hari, pair, action.kind,
+                telegram, hari, pair, action.kind, "spread",
                 f"Order {action.kind} {pair} tidak dieksekusi: spread "
                 f"{bps_atas:.1f} bps melebihi batas "
                 f"{spread.MAX_SPREAD_BPS} bps.")
@@ -370,7 +375,7 @@ def tick(
             continue
 
         # 4. Gerbang safeguard
-        gate_reasons = safeguards.gates(
+        gate_reasons = safeguards.gates_berkode(
             action,
             free_idr=saldo_bebas,
             reserve_idr=ctx.reserve_idr,
@@ -402,11 +407,11 @@ def tick(
                     conn,
                     dummy_proposal,
                     "gate_rejected",
-                    "; ".join(gate_reasons),
+                    "; ".join(teks for _kode, teks in gate_reasons),
                 )
             # Kirim notifikasi untuk setiap alasan penolakan (sekali per hari)
-            for reason in gate_reasons:
-                _kirim_sekali(telegram, hari, pair, action.kind, reason)
+            for kode, teks in gate_reasons:
+                _kirim_sekali(telegram, hari, pair, action.kind, kode, teks)
             # Lanjut ke aksi berikutnya
             continue
 

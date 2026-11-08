@@ -744,12 +744,20 @@ def test_penolakan_spread_sama_hanya_sekali_per_hari(tmp_path):
     """
     conn = _fresh_db(tmp_path)
     sent = []
+    # Angka spread BERUBAH tiap tick; kunci dedupe memakai kode stabil,
+    # bukan teks, jadi alasan yang sama tetap hanya dikirim sekali.
     for i in range(2):                 # dua tick, hari lokal sama
         engine.tick(conn, _ctx(price=1400.0), now=i * 300.0,
                     telegram=_tg(sent), shadow=True,
-                    verdict=lambda pair, **k: (False, 99.0))
+                    verdict=lambda pair, i=i, **k: (False, 99.0 + i))
     pesan = [s for s in sent if "spread" in s.lower()]
     assert len(pesan) == 1, sent
+
+    # Dedupe hanya menekan Telegram; jejak shadow_log tetap lengkap.
+    baris = conn.execute(
+        "SELECT COUNT(*) FROM proposals WHERE outcome = 'spread_rejected'"
+    ).fetchone()[0]
+    assert baris == 2, f"shadow_log harus mencatat tiap tick, dapat {baris}"
 
     # Hari lokal berikutnya: penolakan yang sama boleh diberitahukan lagi.
     engine.tick(conn, _ctx(price=1400.0), now=86400.0, telegram=_tg(sent),
@@ -1229,6 +1237,7 @@ def test_tick_penolakan_spread_membulatkan_bps_ke_atas(tmp_path, monkeypatch):
     # ganti konstanta -> pesan ikut berubah.
     monkeypatch.setattr(spread, "MAX_SPREAD_BPS", 25)
     sent2 = []
+    engine.reset_state()   # hari yang sama, tetapi ini penolakan baru yang diuji
     engine.tick(conn, _ctx(), now=1.0, telegram=_tg(sent2), shadow=True,
                 verdict=lambda p, **k: (False, 30.004))
     assert any("melebihi batas 25 bps" in s for s in sent2), sent2

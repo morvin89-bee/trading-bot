@@ -26,6 +26,20 @@ def _act(pair="btc_idr", amount=100000):
     return rules.Action("BUY", pair, amount, 1.0, 100.0, "uji", True)
 
 
+def test_atap_eksplisit_tidak_ikut_naik_saat_setoran_naik():
+    """Atap adalah konstanta eksplisit; perubahan setoran memaksa keputusan.
+
+    Bila `MAX_ORDER_IDR` diturunkan otomatis dari `MONTHLY_IDR`, menaikkan
+    setoran bulanan akan diam-diam melonggarkan atap per order. Tes ini
+    mengunci rasio yang disetujui (55%) dan gagal keras bila salah satunya
+    berubah tanpa keputusan sadar.
+    """
+    assert safeguards.MAX_ORDER_IDR == 275_000
+    assert safeguards.MAX_ORDER_IDR == int(rules.MONTHLY_IDR * 0.55), (
+        "rasio atap per order bergeser dari 55% setoran bulanan — "
+        "periksa apakah pengaman uang sengaja dilonggarkan")
+
+
 def test_rejects_above_atap():
     a = _act(amount=300000)
     assert any("275.000" in r for r in safeguards.gates(a, **_ok()))

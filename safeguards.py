@@ -14,9 +14,11 @@ dipakai untuk memberi tahu pengguna — tidak ada penolakan diam-diam.
 import alerts
 import rules
 
-# Atap per order = 55% setoran bulanan. Diturunkan dari `rules.MONTHLY_IDR`
-# supaya menaikkan setoran tidak diam-diam membuat DCA satu pair menembus atap.
-MAX_ORDER_IDR = int(rules.MONTHLY_IDR * 0.55)
+# Atap per order = 55% setoran bulanan. SENGAJA konstanta eksplisit, bukan
+# `int(MONTHLY_IDR * 0.55)`: menaikkan setoran bulanan tidak boleh otomatis
+# melonggarkan pengaman uang. Tes konsistensi di tests/test_safeguards.py
+# gagal bila rasio ini bergeser, memaksa keputusan sadar.
+MAX_ORDER_IDR = 275_000
 MAX_PER_ASSET_PER_DAY = 3         # pagu per ASET per hari (bukan global)
 COOLDOWN_SECONDS = 1800           # jeda 30 menit setelah satu order terisi
 RESERVE_MAX_FRACTION = 0.5        # bagian cadangan yang boleh dipakai satu
@@ -28,7 +30,26 @@ def gates(action: rules.Action, *, free_idr, reserve_idr,
           today_counts: dict[str, int], last_fill_ts: dict[str, float],
           held_pairs_24h: set[str], now: float,
           rule: str = "") -> list[str]:
-    """Alasan penolakan `action` berbahasa Indonesia; kosong = lolos.
+    """Alasan penolakan berbahasa Indonesia; kosong = lolos.
+
+    Pembungkus tipis `gates_berkode` untuk pemanggil yang hanya butuh teks
+    (mis. `engine.on_answer`). Urutan dan isi alasan tidak berubah.
+    """
+    return [teks for _kode, teks in gates_berkode(
+        action, free_idr=free_idr, reserve_idr=reserve_idr,
+        today_counts=today_counts, last_fill_ts=last_fill_ts,
+        held_pairs_24h=held_pairs_24h, now=now, rule=rule)]
+
+
+def gates_berkode(action: rules.Action, *, free_idr, reserve_idr,
+                  today_counts: dict[str, int], last_fill_ts: dict[str, float],
+                  held_pairs_24h: set[str], now: float,
+                  rule: str = "") -> list[tuple[str, str]]:
+    """`(kode, teks)` per alasan penolakan; kosong = lolos.
+
+    Kode stabil dipakai `engine` sebagai kunci dedupe pesan: teks boleh
+    berubah (angka spread, nominal) tanpa membuat penolakan yang sama
+    dikirim ulang tiap tick.
 
     Urutan pemeriksaan (spec §6.4): atap per order -> pagu per aset hari ini
     -> jeda setelah terisi -> anti-loop beli/jual 24 jam -> gerbang saldo.
@@ -59,26 +80,26 @@ def gates(action: rules.Action, *, free_idr, reserve_idr,
     pair = action.pair
 
     if action.amount_idr > MAX_ORDER_IDR:
-        reasons.append(
+        reasons.append(("atap",
             f"Tolak {pair}: nominal {alerts._rp(action.amount_idr)} "
-            f"melebihi atap per order {alerts._rp(MAX_ORDER_IDR)}.")
+            f"melebihi atap per order {alerts._rp(MAX_ORDER_IDR)}."))
 
     hari_ini = today_counts.get(pair, 0)
     if hari_ini >= MAX_PER_ASSET_PER_DAY:
-        reasons.append(
+        reasons.append(("pagu_harian",
             f"Tolak {pair}: sudah {hari_ini} order hari ini, pagu "
-            f"{MAX_PER_ASSET_PER_DAY} order per aset per hari.")
+            f"{MAX_PER_ASSET_PER_DAY} order per aset per hari."))
 
     terisi = last_fill_ts.get(pair)
     if terisi is not None and now - terisi < COOLDOWN_SECONDS:
-        reasons.append(
+        reasons.append(("jeda",
             f"Tolak {pair}: jeda {COOLDOWN_SECONDS // 60} menit setelah "
-            f"order terisi belum selesai.")
+            f"order terisi belum selesai."))
 
     if pair in held_pairs_24h:
-        reasons.append(
+        reasons.append(("anti_loop_24j",
             f"Tolak {pair}: aset ini kena jeda 24 jam karena sudah ada "
-            f"beli/jual dalam 24 jam terakhir.")
+            f"beli/jual dalam 24 jam terakhir."))
 
     if action.kind != "SELL":     # ruling F15: sell tidak membelanjakan IDR
         if rule == "reserve_buy":
@@ -93,9 +114,9 @@ def gates(action: rules.Action, *, free_idr, reserve_idr,
             sumber_dana = (f"saldo bebas {alerts._rp(free_idr)} dikurangi "
                            f"cadangan {alerts._rp(reserve_idr)}")
         if tersedia < action.amount_idr:
-            reasons.append(
+            reasons.append(("saldo",
                 f"Tolak {pair}: {sumber_dana} = {alerts._rp(tersedia)}, "
-                f"kurang dari {alerts._rp(action.amount_idr)}.")
+                f"kurang dari {alerts._rp(action.amount_idr)}."))
 
     return reasons
 

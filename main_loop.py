@@ -915,7 +915,8 @@ def tick_cycle(
     if ctx.dca_enabled and not diulang:
         hasil_catat = _catat_dca(
             conn, now, usulan,
-            tunda=getattr(ctx, "dca_retry", False) or retry_tertunda)
+            tunda=(getattr(ctx, "dca_retry", False) or retry_tertunda
+                   or getattr(ctx, "dca_saldo_kurang", False)))
     if not getattr(ctx, "dca_saldo_kurang", False):
         _beritahu_dca_berakhir(conn, now, telegram, gagal_dca,
                                baru_skip=hasil_catat == "skip")

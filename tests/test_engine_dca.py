@@ -193,6 +193,11 @@ def test_tick_saldo_kurang_mengirim_satu_pesan_tanpa_usulan_dca(tmp_path):
     pesan = [s for s in sent if "saldo" in s.lower()]
     assert len(pesan) == 1, sent
 
+    # Tick berikutnya di hari yang sama: tidak ada pesan saldo kedua.
+    engine.tick(conn, ctx, now=300.0, telegram=_tg(sent), shadow=True,
+                verdict=lambda pair, **k: (True, 1.0))
+    assert len([s for s in sent if "saldo" in s.lower()]) == 1, sent
+
 
 def test_penolakan_gerbang_sama_hanya_sekali_per_hari(tmp_path):
     """Alasan gerbang yang sama (mis. pagu harian) dikirim sekali per hari."""
@@ -206,11 +211,29 @@ def test_penolakan_gerbang_sama_hanya_sekali_per_hari(tmp_path):
                     verdict=lambda pair, **k: (True, 1.0))
     pesan = [s for s in sent if "pagu" in s.lower()]
     assert len(pesan) == 3, sent       # satu per pair, bukan dua per pair
+    baris = conn.execute(
+        "SELECT COUNT(*) FROM proposals WHERE outcome = 'gate_rejected'"
+    ).fetchone()[0]
+    assert baris == 6, f"shadow_log harus mencatat tiap tick, dapat {baris}"
 
     engine.reset_state()               # proses baru: dedupe kosong
     engine.tick(conn, ctx, now=600.0, telegram=_tg(sent), shadow=True,
                 verdict=lambda pair, **k: (True, 1.0))
     assert len([s for s in sent if "pagu" in s.lower()]) == 6, sent
+
+
+def test_dua_kode_alasan_berbeda_tetap_dikirim_pada_hari_sama(tmp_path):
+    """Kode stabil tidak boleh menelan alasan yang BERBEDA."""
+    conn = sqlite3.connect(str(tmp_path / "tick_gate2.db"))
+    ctx = _ctx([], free_idr=600_000.0, reserve_idr=0.0, dca_enabled=True)
+    ctx.today_counts = {pair: safeguards.MAX_PER_ASSET_PER_DAY
+                        for pair in ("btc_idr", "eth_idr", "sol_idr")}
+    ctx.held_pairs_24h = {"btc_idr"}
+    sent = []
+    engine.tick(conn, ctx, now=0.0, telegram=_tg(sent), shadow=True,
+                verdict=lambda pair, **k: (True, 1.0))
+    assert len([s for s in sent if "pagu" in s.lower()]) == 3, sent
+    assert len([s for s in sent if "24 jam" in s.lower()]) == 1, sent
 
 
 def test_konteks_lama_tanpa_field_dca_tetap_terbaca_mati():

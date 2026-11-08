@@ -1478,9 +1478,13 @@ def test_dca_gagal_di_gerbang_menutup_bulan_sekali(tmp_path):
         "siklus kedua mengulang percobaan DCA — bulan harusnya sudah tutup")
 
 
-def test_dca_saldo_kurang_menutup_bulan_dengan_satu_pesan(tmp_path):
-    """Saldo bebas di bawah setoran bulanan: tidak ada DCA, satu pesan jujur,
-    dan bulan ditutup tanpa pesan "berakhir tanpa order" yang kedua."""
+def test_dca_saldo_kurang_tidak_menutup_bulan_dan_usul_begitu_saldo_cukup(tmp_path):
+    """Saldo kurang = pengecualian sempit, BUKAN penutup bulan DCA.
+
+    Bulan tetap terbuka sampai batas `boleh_usul_dca`; pesan saldo hanya
+    sekali per hari; nominal tidak dikecilkan; begitu `free_idr` mencapai
+    setoran, tick berikutnya langsung mengusulkan DCA penuh.
+    """
     conn = _fresh_db(tmp_path)
     now = _ts(day=1, hour=9, minute=5)
     telegram = _TelegramPerekam()
@@ -1496,9 +1500,80 @@ def test_dca_saldo_kurang_menutup_bulan_dengan_satu_pesan(tmp_path):
     assert not any("berakhir tanpa order" in s for s in telegram.lines), (
         telegram.lines)
     baris = conn.execute(
-        "SELECT last_dca_date FROM bot_state WHERE id = 1").fetchone()
-    assert baris["last_dca_date"] == time.strftime(
-        "%Y-%m", time.localtime(now))
+        "SELECT last_dca_date, dca_status FROM bot_state WHERE id = 1"
+    ).fetchone()
+    assert baris["last_dca_date"] is None, (
+        "bulan DCA tidak boleh ditutup hanya karena saldo kurang")
+    assert baris["dca_status"] is None
+
+    # Tick kedua hari yang sama: pesan saldo TIDAK diulang.
+    _satu_siklus(conn, telegram=telegram, now=now + 300,
+                 ctx=_ctx_dca(free_idr=100000.0))
+    assert len([s for s in telegram.lines if "saldo" in s.lower()]) == 1, (
+        telegram.lines)
+
+    # Setoran masuk: usulan muncul otomatis, nominal penuh (tidak dikecilkan).
+    telegram2 = _TelegramPerekam()
+    keluar = _satu_siklus(conn, telegram=telegram2, now=now + 3600,
+                          ctx=_ctx_dca(free_idr=rules.MONTHLY_IDR))
+    assert keluar == "proposed"
+    assert len(telegram2.konfirmasi) == 3, (
+        [p.pair for p in telegram2.konfirmasi])
+    assert all(p.rule == rules.RULE_DCA for p in telegram2.konfirmasi)
+    assert [(p.pair, p.amount_idr) for p in telegram2.konfirmasi] == [
+        ("btc_idr", 275000.0), ("eth_idr", 138000.0), ("sol_idr", 55000.0)], (
+        "nominal tidak boleh dikecilkan karena saldo sempat kurang")
+    assert not any("saldo" in s.lower() for s in telegram2.lines), (
+        telegram2.lines)
+
+
+def test_gagal_baca_konteks_tidak_menulis_setuju_dan_tombol_bisa_dipakai_lagi(tmp_path):
+    """Verifikasi 2: gagal baca konteks = jawaban TIDAK diterapkan.
+
+    Tidak ada baris `setuju` (tidak mengunci usulan) dan tombol yang sama
+    masih bisa dipakai pada siklus berikutnya setelah pembacaan pulih.
+    """
+    conn = _fresh_db(tmp_path)
+    now = _ts(hour=12)
+    p = proposal.new_proposal(
+        rules.Action("BUY", "btc_idr", 60000, 0.06, 1000.0, "reserve buy", True),
+        rule=proposal.RULE_RESERVE_BUY, reserve_after=0.0,
+        window_s=proposal.REACTIVE_WINDOW_S, now=now)
+    main_loop._ingat([p])
+
+    segar = _ctx_kosong()
+    segar.free_idr = 100000.0
+    segar.prices = {"btc_idr": 1000.0}
+    panggilan = []
+
+    def pembaca(conn):
+        panggilan.append(1)
+        if len(panggilan) == 1:
+            raise RuntimeError("bursa tidak menjawab")
+        return segar
+
+    telegram = _TelegramPerekam()
+    transport = _TransportPerekam()
+    fetch = _FetchPerekam([_update_tombol("setuju", p.id)])
+
+    _satu_siklus(conn, telegram=telegram, now=now + 1, ctx=_ctx_kosong(),
+                 transport=transport, shadow=False, fetch=fetch,
+                 pembaca_konteks=pembaca)
+
+    assert transport.posted == [], "tidak boleh ada order saat konteks gagal dibaca"
+    assert shadow_log.outcome(conn, p.id) is None, (
+        "kegagalan baca tidak boleh menulis 'setuju' dan mengunci usulan")
+    assert p.id in main_loop._USULAN_MENUNGGU, "usulan tidak boleh dilepas"
+    assert any("tidak diterapkan" in s for s in telegram.lines), telegram.lines
+
+    # Siklus berikutnya, pembacaan pulih: tombol yang sama masih berlaku.
+    telegram2 = _TelegramPerekam()
+    _satu_siklus(conn, telegram=telegram2, now=now + 2, ctx=_ctx_kosong(),
+                 transport=transport, shadow=False,
+                 fetch=_FetchPerekam([_update_tombol("setuju", p.id)]),
+                 pembaca_konteks=pembaca)
+    assert len(transport.posted) == 1, telegram2.lines
+    assert shadow_log.outcome(conn, p.id) in ("setuju", "executed")
 
 
 def test_jawaban_memakai_konteks_segar_sebelum_order(tmp_path):
