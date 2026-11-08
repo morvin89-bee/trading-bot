@@ -710,6 +710,27 @@ def test_expired_proposal_writes_no_order_and_nothing_to_db(tmp_path):
     # "setuju" pencatat, jadi nol tulisan di tabel mana pun
     assert _outcomes(conn) == []
 
+def test_penolakan_spread_sama_hanya_sekali_per_hari(tmp_path):
+    """Penolakan yang menetap tidak boleh dikirim ulang tiap tick.
+
+    Tick berjalan tiap lima menit; tanpa dedupe pengguna menerima kalimat
+    spread yang sama ~288 kali sehari dan berhenti membacanya.
+    """
+    conn = _fresh_db(tmp_path)
+    sent = []
+    for i in range(2):                 # dua tick, hari lokal sama
+        engine.tick(conn, _ctx(price=1400.0), now=i * 300.0,
+                    telegram=_tg(sent), shadow=True,
+                    verdict=lambda pair, **k: (False, 99.0))
+    pesan = [s for s in sent if "spread" in s.lower()]
+    assert len(pesan) == 1, sent
+
+    # Hari lokal berikutnya: penolakan yang sama boleh diberitahukan lagi.
+    engine.tick(conn, _ctx(price=1400.0), now=86400.0, telegram=_tg(sent),
+                shadow=True, verdict=lambda pair, **k: (False, 99.0))
+    assert len([s for s in sent if "spread" in s.lower()]) == 2, sent
+
+
 def test_halt_when_status_unknown_keeps_db_untouched(tmp_path, monkeypatch):
     # Review Focus #2 — 404 abadi bukan berarti batal
     tidur = _tanpa_tidur(monkeypatch)

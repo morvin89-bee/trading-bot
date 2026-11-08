@@ -148,6 +148,7 @@ def reset_state():
     _OFFSET_TELEGRAM["offset"] = 0
     _SUDAH_DIBERITAHU_DCA_GAGAL.clear()
     _SUDAH_DIBERITAHU_RETRY_HABIS.clear()
+    engine.reset_state()
 
 
 def load_state(conn):

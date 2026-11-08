@@ -27,6 +27,30 @@ import time
 
 RULE_TAKE_PROFIT = "take_profit"
 
+# Pesan penolakan yang sudah dikirim pada satu hari lokal. Penolakan yang
+# menetap (spread lebar, pagu harian, harga hilang) terulang tiap tick;
+# tanpa dedupe pengguna menerima kalimat yang sama ~288 kali sehari dan
+# berhenti membacanya. Kunci = (pair, kind, teks); hari menjadi batas reset.
+_PESAN_TERKIRIM = {"hari": None, "kunci": set()}
+
+
+def reset_state():
+    """Kosongkan dedupe pesan (dipakai tes dan `main_loop.reset_state`)."""
+    _PESAN_TERKIRIM["hari"] = None
+    _PESAN_TERKIRIM["kunci"].clear()
+
+
+def _kirim_sekali(telegram, hari, pair, kind, teks):
+    """`telegram.line(teks)` paling banyak sekali per hari per alasan."""
+    if _PESAN_TERKIRIM["hari"] != hari:
+        _PESAN_TERKIRIM["hari"] = hari
+        _PESAN_TERKIRIM["kunci"].clear()
+    kunci = (pair, kind, teks)
+    if kunci in _PESAN_TERKIRIM["kunci"]:
+        return
+    _PESAN_TERKIRIM["kunci"].add(kunci)
+    telegram.line(teks)
+
 
 def _catat_asal(peta: dict, action: rules.Action, nama: str) -> None:
     """Daftarkan asal `action` ke `peta` dengan nama aturan `nama`.
@@ -292,9 +316,10 @@ def tick(
                     "halted",
                     f"Harga hilang untuk pair {pair}",
                 )
-            telegram.line(
-                f"Harga {pair} tidak tersedia — proses dihentikan untuk melindungi dana."
-            )
+            _kirim_sekali(
+                telegram, hari, pair, action.kind,
+                f"Harga {pair} tidak tersedia — proses dihentikan untuk "
+                "melindungi dana.")
             # Tidak ada konfirmasi yang terkirim pada tick ini. Bila DCA
             # sedang aktif, percobaan belum tuntas: jangan tutup bulan.
             if getattr(ctx, "dca_enabled", False):
@@ -331,10 +356,11 @@ def tick(
                     "spread_rejected",
                     f"Spread {bps_atas:.1f} bps melebihi batas untuk {pair}",
                 )
-            telegram.line(
+            _kirim_sekali(
+                telegram, hari, pair, action.kind,
                 f"Order {action.kind} {pair} tidak dieksekusi: spread "
-                f"{bps_atas:.1f} bps melebihi batas {spread.MAX_SPREAD_BPS} bps."
-            )
+                f"{bps_atas:.1f} bps melebihi batas "
+                f"{spread.MAX_SPREAD_BPS} bps.")
             # Lanjut ke aksi berikutnya
             continue
 
@@ -373,9 +399,9 @@ def tick(
                     "gate_rejected",
                     "; ".join(gate_reasons),
                 )
-            # Kirim notifikasi untuk setiap alasan penolakan
+            # Kirim notifikasi untuk setiap alasan penolakan (sekali per hari)
             for reason in gate_reasons:
-                telegram.line(reason)
+                _kirim_sekali(telegram, hari, pair, action.kind, reason)
             # Lanjut ke aksi berikutnya
             continue
 

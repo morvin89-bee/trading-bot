@@ -194,6 +194,25 @@ def test_tick_saldo_kurang_mengirim_satu_pesan_tanpa_usulan_dca(tmp_path):
     assert len(pesan) == 1, sent
 
 
+def test_penolakan_gerbang_sama_hanya_sekali_per_hari(tmp_path):
+    """Alasan gerbang yang sama (mis. pagu harian) dikirim sekali per hari."""
+    conn = sqlite3.connect(str(tmp_path / "tick_gate.db"))
+    ctx = _ctx([], free_idr=600_000.0, reserve_idr=0.0, dca_enabled=True)
+    ctx.today_counts = {pair: safeguards.MAX_PER_ASSET_PER_DAY
+                        for pair in ("btc_idr", "eth_idr", "sol_idr")}
+    sent = []
+    for i in range(2):                 # dua tick, hari lokal sama
+        engine.tick(conn, ctx, now=i * 300.0, telegram=_tg(sent), shadow=True,
+                    verdict=lambda pair, **k: (True, 1.0))
+    pesan = [s for s in sent if "pagu" in s.lower()]
+    assert len(pesan) == 3, sent       # satu per pair, bukan dua per pair
+
+    engine.reset_state()               # proses baru: dedupe kosong
+    engine.tick(conn, ctx, now=600.0, telegram=_tg(sent), shadow=True,
+                verdict=lambda pair, **k: (True, 1.0))
+    assert len([s for s in sent if "pagu" in s.lower()]) == 6, sent
+
+
 def test_konteks_lama_tanpa_field_dca_tetap_terbaca_mati():
     # Kompatibilitas mundur: helper lama di `tests/test_engine.py` membangun
     # konteks lewat `SimpleNamespace` TANPA field `dca_enabled`.
