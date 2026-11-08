@@ -52,6 +52,7 @@ import indodax_api
 import indodax_transport
 import portfolio
 import portfolio_store
+import proposal
 import reconcile
 import rules
 import safeguards
