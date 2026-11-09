@@ -719,6 +719,36 @@ def test_usulan_menunggu_dipulihkan_setelah_restart(tmp_path):
     assert baris[0] == "setuju"
 
 
+def test_setuju_dca_tanpa_transport_di_luar_shadow_tidak_mengirim_order(
+        tmp_path):
+    """Sakelar nyala tanpa transport: tidak ada order, jendela TIDAK ditutup.
+
+    F40: `on_answer` butuh transport untuk ditanya status. Tanpa transport,
+    Setuju harus berhenti dengan pesan jujur — bukan AttributeError, bukan
+    bulan DCA yang tertutup seolah-olah order terkirim.
+    """
+    conn = _fresh_db(tmp_path)
+    telegram = _TelegramPerekam()
+    now = _ts(day=1, hour=9, minute=5)
+    _satu_siklus(conn, telegram=telegram, now=now, ctx=_ctx_dca())
+    p = next(p for p in telegram.konfirmasi if p.rule == rules.RULE_DCA)
+
+    fetch = _FetchPerekam([_update_tombol("setuju", p.id)])
+    telegram2 = _TelegramPerekam()
+    keluar = _satu_siklus(conn, telegram=telegram2, now=now + 60,
+                          ctx=_ctx_dca(), fetch=fetch,
+                          shadow=False, transport=None)
+
+    assert keluar != "sent"
+    assert any("Eksekusi belum dinyalakan" in b for b in telegram2.lines), (
+        telegram2.lines)
+    assert dca_window.dca_state(conn, now + 60)[0] == "awaiting", (
+        "jendela DCA tidak boleh tertutup tanpa order")
+    baris = conn.execute(
+        "SELECT outcome FROM proposals WHERE id = ?", (p.id,)).fetchone()
+    assert baris[0] != "setuju"
+
+
 def test_usulan_kedaluwarsa_tidak_dimuat_setelah_restart(tmp_path):
     """Usulan yang jendelanya sudah lewat tidak boleh hidup lagi setelah restart."""
     conn = _fresh_db(tmp_path)
@@ -2452,6 +2482,35 @@ def test_baca_harga_gagal_konfirmasi_hangus(tmp_path):
         "SELECT outcome FROM proposals WHERE id = ?", (p.id,)).fetchone()
     assert baris is not None and baris[0] == "proposed"
     assert any("hangus" in b for b in telegram.lines)
+
+
+def test_baca_harga_melempar_diperlakukan_sebagai_harga_hilang(tmp_path):
+    """Pembaca harga yang melempar tidak boleh meloloskan keputusan.
+
+    Exception diubah menjadi `ctx.prices[pair] = None` — `on_answer` lalu
+    menghanguskan konfirmasi, bukan memakai harga lama dari pesan.
+    """
+    conn = _fresh_db(tmp_path)
+    telegram = _TelegramPerekam()
+    now = _ts(hour=12)
+    p = _usulan_take_profit(now)
+    shadow_log.record(conn, p, "proposed", "")
+    main_loop._ingat([p])
+
+    def baca_harga(pair):
+        raise RuntimeError("ticker putus")
+
+    fetch = _FetchPerekam([_update_tombol("setuju", p.id)])
+    main_loop._polling(
+        conn, _ctx(price=1400.0), now=now, telegram=telegram, transport=None,
+        shadow=True, verdict=_ok_verdict, fetch=fetch, baca_harga=baca_harga)
+
+    baris = conn.execute(
+        "SELECT outcome FROM proposals WHERE id = ?", (p.id,)).fetchone()
+    assert baris is not None and baris[0] == "proposed", (
+        "konfirmasi tidak boleh diterapkan saat harga gagal dibaca")
+    assert any("hangus" in b for b in telegram.lines)
+
 
 
 # --------------------------------------------------------------------------

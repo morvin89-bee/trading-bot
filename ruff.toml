@@ -1,0 +1,10 @@
+# Pemindaian minimal: hanya kesalahan yang hampir pasti bug (F: nama/simbol
+# tak terdefinisi, impor tak terpakai) dan syntax error (E9). Gaya tidak
+# dipaksakan supaya diff tetap kecil dan fokus pada perilaku.
+line-length = 100
+
+# Arsip kode lama tidak dipelihara; jangan ikut dipindai.
+exclude = ["docs/archive"]
+
+[lint]
+select = ["F", "E9"]

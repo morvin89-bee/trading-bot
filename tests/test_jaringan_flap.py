@@ -10,7 +10,6 @@
 Semua tes TANPA jaringan dan TANPA kredensial: `urlopen`/`get` diganti
 tiruan, `_creds` disuntik nilai palsu.
 """
-import json
 
 
 def test_live_fetch_timeout_minimal_20_detik():
@@ -98,10 +97,6 @@ def test_v2_get_tanda_tangan_mencakup_recvwindow(monkeypatch):
     indodax_api._v2_get("/api/v2/account")
 
     query = urllib.parse.unquote(ditangkap["query"])
-    import hashlib
-    import hmac
-    harapan = hmac.new(b"SECRET", urllib.parse.quote(
-        query, safe="").encode(), hashlib.sha256).hexdigest()
     # Tanda tangan dihitung dari query yang SUDAH memuat recvWindow.
     assert "recvWindow" in query
     assert ditangkap["sign"], "tanda tangan tidak boleh kosong"

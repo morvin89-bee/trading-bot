@@ -1,2 +1,5 @@
 -r requirements.txt
 pytest>=8.0
+# Pemindai statis dan pengukur cakupan — alat pengembangan, bukan runtime bot.
+ruff==0.17.4
+coverage==7.17.2

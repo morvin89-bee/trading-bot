@@ -1,7 +1,6 @@
 """Tes mode bayangan — tidak pernah membuka jaringan."""
 import os
 import sqlite3
-import tempfile
 
 import proposal
 import rules

@@ -11,7 +11,6 @@ import time
 
 import engine
 import main_loop
-import spread
 
 HARGA = {"btc_idr": 1600.0, "eth_idr": 1400.0, "sol_idr": 350.0}
 LANGKAH_DENYUT = 300

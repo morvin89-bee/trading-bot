@@ -1090,7 +1090,6 @@ def main(argv=None, *, conn=None, db_path=None, telegram=None,
         _muat_usulan(conn, now=jam())
         _muat_offset(conn)
         transport = None
-        telah_menyala = False
         # Banner status dicetak SATU KALI PER KEADAAN — bukan tiap bangun
         # (irama 15 detik = ±5.760 baris/hari yang menelan baris kegagalan
         # asli), dan bukan sekali-per-proses yang membeku: perubahan status
@@ -1175,7 +1174,6 @@ def main(argv=None, *, conn=None, db_path=None, telegram=None,
             else:
                 if transport is None:
                     transport = transport_factory()
-                telah_menyala = True
 
             # Sapa awal TIDAK lagi dicetak di sini: klaim "polling aktif"
             # sebelum getUpdates pertama adalah bukti palsu (M2 review).

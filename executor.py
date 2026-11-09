@@ -1,6 +1,5 @@
 """Eksekutor: satu order, satu kali — tidak pernah membuka jaringan.
 """
-import re
 import time
 from typing import Protocol, Dict, Any
 

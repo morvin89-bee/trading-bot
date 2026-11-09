@@ -16,9 +16,7 @@ import safeguards
 import shadow_log
 import spread
 import sqlite3
-import tempfile
 import time
-from unittest.mock import Mock
 from portfolio import Holding
 
 def _rich_ctx():
@@ -941,6 +939,67 @@ def test_rekonsiliasi_filled_mempertahankan_catatan_take_profit(
     state = shadow_log.take_profit_state(conn, mode="live")
     assert state[("btc_idr", 50.0)][:2] == (0.25, 0.25)
 
+
+def test_status_final_rejected_setelah_kirim_menghapus_memori_tranche(
+        tmp_path, monkeypatch):
+    """Bursa menolak order yang sudah terkirim: level itu boleh diusulkan lagi.
+
+    Tanpa penghapusan, penolakan bursa mengunci level TP selamanya. Status
+    final `filled` TIDAK boleh menghapus (lihat tes di atas) — itu akan
+    membuat jual dobel.
+    """
+    _tanpa_tidur(monkeypatch)
+    conn = _fresh_db(tmp_path)
+    p = _proposal_take_profit()
+    t = _FakeTransport(status_sequence=["rejected"])
+    sent = []
+    out = engine.on_answer(conn, _pasangkan_harga(_ctx(), p), p=p,
+                           answer="setuju", now=10.0, transport=t,
+                           telegram=_tg(sent), shadow=False,
+                           verdict=lambda pair, **k: (True, 1.0))
+    assert out == "sent"
+    assert shadow_log.take_profit_state(conn, mode="live") == {}
+    assert any("ditolak bursa" in s for s in sent), sent
+
+
+def test_status_final_cancelled_setelah_kirim_menghapus_memori_tranche(
+        tmp_path, monkeypatch):
+    """Sama untuk `cancelled`: bursa membatalkan, tidak ada posisi berubah."""
+    _tanpa_tidur(monkeypatch)
+    conn = _fresh_db(tmp_path)
+    p = _proposal_take_profit()
+    t = _FakeTransport(status_sequence=["cancelled"])
+    sent = []
+    out = engine.on_answer(conn, _pasangkan_harga(_ctx(), p), p=p,
+                           answer="setuju", now=10.0, transport=t,
+                           telegram=_tg(sent), shadow=False,
+                           verdict=lambda pair, **k: (True, 1.0))
+    assert out == "sent"
+    assert shadow_log.take_profit_state(conn, mode="live") == {}
+    assert any("dibatalkan bursa" in s for s in sent), sent
+
+
+def test_balasan_hilang_lalu_bursa_menolak_menghapus_memori_tranche(
+        tmp_path, monkeypatch):
+    """Jalur balasan hilang: status final `rejected` juga menghapus catatan.
+
+    Tanpa ini, order yang balasannya hilang lalu ditolak bursa akan mengunci
+    level TP padahal tidak ada posisi yang berubah.
+    """
+    _tanpa_tidur(monkeypatch)
+    conn = _fresh_db(tmp_path)
+    p = _proposal_take_profit()
+    t = _FakeTransport(status_sequence=["rejected"], explode=True)
+    sent = []
+    out = engine.on_answer(conn, _pasangkan_harga(_ctx(), p), p=p,
+                           answer="setuju", now=10.0, transport=t,
+                           telegram=_tg(sent), shadow=False,
+                           verdict=lambda pair, **k: (True, 1.0))
+    assert out == "sent"
+    assert shadow_log.take_profit_state(conn, mode="live") == {}
+    assert any("ditolak bursa" in s for s in sent), sent
+
+
 def test_spread_rechecked_at_execution_time(tmp_path):
     # Review Focus #3 — lolos saat komposisi, melebar saat eksekusi
     p = _proposal(price_ref=1000.0)      # saat komposisi 10 bps
@@ -1176,7 +1235,7 @@ def test_on_answer_reserve_buy_lolos_gerbang_saldo_input_sungguhan(tmp_path,
     # Rp 50.000 = Rp 25.000 daya beli, beli Rp 25.000 (tepat di batas ->
     # lolos). Nama aturan datang dari proposal (p.rule), bukan dari
     # dihitung ulang (F36).
-    tidur = _tanpa_tidur(monkeypatch)
+    _tanpa_tidur(monkeypatch)
     conn = _fresh_db(tmp_path)
     ctx = _ctx()
     ctx.free_idr = 50_000.0
@@ -1260,7 +1319,7 @@ def test_on_answer_jawaban_kedua_setelah_balasan_hilang_tidak_kirim_ulang(
     # itu akan MELESET. Pengaman utamanya baris "setuju" di
     # shadow_log.proposals. Tanpa guard, jawaban kedua mengirim order
     # KEDUA dengan client_order_id yang sama persis.
-    tidur = _tanpa_tidur(monkeypatch)
+    _tanpa_tidur(monkeypatch)
     conn = _fresh_db(tmp_path)
     p = _fresh_proposal()
     ctx = _pasangkan_harga(_ctx(), p)
@@ -1358,7 +1417,7 @@ def test_on_answer_harga_masih_sah_dalam_05_persen_diteruskan(tmp_path,
     # Batas gerbang drift persis 0,5% (proposal.PRICE_DRIFT_TOL): 1608,0
     # vs 1600,0 = tepat +0,5% -> masih SAH (price_still_valid memakai
     # "<="), jadi usulan diteruskan, bukan hangus.
-    tidur = _tanpa_tidur(monkeypatch)
+    _tanpa_tidur(monkeypatch)
     conn = _fresh_db(tmp_path)
     p = _fresh_proposal()                 # price_ref 1600.0
     ctx = _ctx()

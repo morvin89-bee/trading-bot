@@ -55,6 +55,19 @@ def test_missing_price_is_invalid_not_zero():
     assert proposal.price_still_valid(p, 0.0) is False
 
 
+def test_harga_acuan_usulan_rusak_berarti_tidak_valid():
+    """`price_ref` kosong/nol juga menolak — bukan hanya harga sekarang.
+
+    Pembagi nol atau perbandingan tanpa acuan = ragu, jadi tidak ada order.
+    """
+    p = proposal.new_proposal(_act(price=1000.0), rule="r", reserve_after=0,
+                              window_s=90, now=0.0)
+    for rusak in (None, 0.0):
+        p.price_ref = rusak
+        assert proposal.price_still_valid(p, 1000.0) is False
+
+
+
 def test_sell_is_labelled_jual():
     p = proposal.new_proposal(_act(kind="SELL"), rule="r", reserve_after=0,
                               window_s=90, now=0.0)

@@ -113,3 +113,16 @@ def test_gives_up_unknown_after_three_asks_without_new_id():
 def test_unknown_is_never_reported_as_cancelled():
     t = _StatusTransport(responses=[{"code": -2013}] * 3)
     assert executor.resolve_status(t, "id", sleep=lambda s: None) != "cancelled"
+
+
+def test_status_cancelled_dan_rejected_dipetakan_apa_adanya():
+    """Pemetaan ini menentukan memori tranche TP dihapus atau tidak.
+
+    `unknown` bukan `cancelled`; `CANCELLED`/`REJECTED` dari bursa harus
+    sampai apa adanya supaya `engine` bisa menghapus catatan tranche.
+    """
+    for jawaban, harapan in (("CANCELLED", "cancelled"),
+                             ("REJECTED", "rejected")):
+        t = _StatusTransport(responses=[{"status": jawaban}])
+        assert executor.resolve_status(
+            t, "id", sleep=lambda s: None) == harapan

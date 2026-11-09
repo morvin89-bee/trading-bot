@@ -132,7 +132,8 @@ def test_pembaca_gagal_juga_tercatat_bertimestamp(tmp_path, monkeypatch,
         return main_loop._konteks_kosong()
 
     dasar = _ts(hour=12)
-    urutan = [dasar, dasar + 15, dasar + 300, dasar + 315]
+    # Nilai pertama dikonsumsi penjaga zona di `main()` sebelum loop.
+    urutan = [dasar, dasar, dasar + 15, dasar + 300, dasar + 315]
     indeks = [0]
 
     def jam():
