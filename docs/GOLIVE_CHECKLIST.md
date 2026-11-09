@@ -30,6 +30,30 @@ Tanggal: 2026-11-08 · Branch: `fix/review-p1`
       `MAX_ORDER_IDR`, `MAX_PER_ASSET_PER_DAY`, atau `GO_LIVE_SHADOW_DAYS`
       tanpa keputusan tertulis di `docs/REVIEW_2026-11-08.md`.
 
+### Preflight read-only (wajib, tepat sebelum menyalakan sakelar)
+
+```powershell
+python -m preflight
+```
+
+- [ ] Perintah di atas mencetak `GO — semua pemeriksaan lolos`. `NO-GO`
+      berarti **jangan** menyalakan `v1_enabled`; bereskan alasannya dulu.
+- [ ] Pemeriksaan yang dijalankan (semuanya read-only):
+      1. offset zona mesin `+07:00` (WIB) — sama dengan penjaga `main()`;
+      2. `portfolio.db` terbuka `mode=ro` dan migrasi skema sudah lengkap
+         (`bot_state`, `proposals`, `trades`, beserta kolom barunya);
+      3. izin kunci dari `.env` lolos `safeguards.permissions_ok`
+         (`canWithdraw` harus `False`, `canTrade` cocok dengan sakelar);
+      4. selisih jam mesin vs jam bursa ≤ 5 detik;
+      5. status mode bayangan: `shadow_day >= 7` (kecuali sakelar sudah
+         nyala);
+      6. jendela DCA bulan berjalan (tanpa menandai `missed`).
+- [ ] `python -m preflight` **tidak** membuat/mengubah `portfolio.db` dan
+      tidak mengirim order. Bukti: `git status` tetap bersih dan baris
+      `bot_state` tidak berubah setelah dijalankan.
+- [ ] Bila preflight dijalankan saat `v1_enabled = 1`, hasil `GO` berarti
+      kunci trade sudah terpasang dan jam/zona aman untuk order nyata.
+
 ## 2. Bukti shadow NYATA (bukan hanya tes)
 
 Tes membuktikan logika; hanya jalan sungguhan yang membuktikan akun, kunci,
