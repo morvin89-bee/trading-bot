@@ -785,6 +785,69 @@ def test_jual_melebihi_kepemilikan_ditolak(tmp_path):
     assert any("kepemilikan" in s for s in sent), sent
 
 
+def test_jual_seluruh_posisi_diizinkan(tmp_path):
+    """Qty == kepemilikan persis (jual penuh) BUKAN pelanggaran.
+
+    Pembanding adalah `ctx.holdings` (saldo bursa free+locked), bukan
+    hitungan trades; jual seluruh posisi adalah tujuan take-profit.
+    """
+    conn = _fresh_db(tmp_path)
+    p = _proposal_take_profit(qty=1.0, qty_target=1.0)
+    t = _FakeTransport()
+    out = engine.on_answer(conn, _pasangkan_harga(_ctx(), p), p=p,
+                           answer="setuju", now=1.0, transport=t,
+                           telegram=_tg([]), shadow=False,
+                           verdict=lambda pair, **k: (True, 1.0))
+    assert out != "gate_blocked"
+    assert len(t.posted) == 1, t.posted
+
+
+def test_selisih_desimal_kecil_tidak_menolak_jual(tmp_path):
+    """Toleransi 1e-9 menyerap galat pembulatan float, bukan selisih nyata."""
+    conn = _fresh_db(tmp_path)
+    t = _FakeTransport()
+    p = _proposal_take_profit(qty=1.0 + 1e-10, qty_target=1.0 + 1e-10)
+    out = engine.on_answer(conn, _pasangkan_harga(_ctx(), p), p=p,
+                           answer="setuju", now=1.0, transport=t,
+                           telegram=_tg([]), shadow=False,
+                           verdict=lambda pair, **k: (True, 1.0))
+    assert out != "gate_blocked"
+    assert len(t.posted) == 1, t.posted
+
+    (tmp_path / "kedua").mkdir()
+    conn2 = _fresh_db(tmp_path / "kedua")
+    t2 = _FakeTransport()
+    p2 = _proposal_take_profit(qty=1.0 + 1e-6, qty_target=1.0 + 1e-6)
+    out2 = engine.on_answer(conn2, _pasangkan_harga(_ctx(), p2), p=p2,
+                            answer="setuju", now=1.0, transport=t2,
+                            telegram=_tg([]), shadow=False,
+                            verdict=lambda pair, **k: (True, 1.0))
+    assert out2 == "gate_blocked"
+    assert t2.posted == []
+
+
+def test_saldo_bursa_lebih_kecil_dari_catatan_menolak_jual(tmp_path):
+    """Kepemilikan (saldo bursa) 0,5 < usulan 1,0: tidak ada order.
+
+    Catatan trades bisa bilang 1,0 koin, tetapi yang boleh dijual hanya yang
+    ada di bursa. Ragu = jangan kirim.
+    """
+    import dataclasses
+    conn = _fresh_db(tmp_path)
+    ctx = _ctx()
+    ctx.holdings = [dataclasses.replace(ctx.holdings[0], qty=0.5)]
+    p = _proposal_take_profit(qty=1.0, qty_target=1.0)
+    t = _FakeTransport()
+    sent = []
+    out = engine.on_answer(conn, _pasangkan_harga(ctx, p), p=p,
+                           answer="setuju", now=1.0, transport=t,
+                           telegram=_tg(sent), shadow=False,
+                           verdict=lambda pair, **k: (True, 1.0))
+    assert out == "gate_blocked"
+    assert t.posted == []
+    assert any("kepemilikan" in s for s in sent), sent
+
+
 def test_halt_when_status_unknown_keeps_db_untouched(tmp_path, monkeypatch):
     # Review Focus #2 — 404 abadi bukan berarti batal
     tidur = _tanpa_tidur(monkeypatch)
