@@ -1,2 +1,4 @@
 requests==2.32.3
 python-dotenv==1.0.1
+# Basis zona IANA untuk `zoneinfo` di Windows (dca_window memakai Asia/Jakarta).
+tzdata==2026.3

@@ -588,3 +588,14 @@ def test_mark_skip_tidak_mengarang_waktu_kirim(tmp_path):
     baris = conn.execute(
         "SELECT dca_sent_ts FROM bot_state WHERE id = 1").fetchone()
     assert baris[0] is None
+
+
+def test_zona_lokal_eksplisit_wib():
+    """Batas jam memakai Asia/Jakarta, bukan zona mesin (P6).
+
+    Epoch 0 = 1970-01-01 00:00 UTC = 07.00 WIB: kalau modul diam-diam ikut
+    zona mesin (mis. UTC di VPS), jam ini bergeser dan DND/jam kirim salah.
+    """
+    assert dca_window.ZONA_LOKAL.key == "Asia/Jakarta"
+    assert dca_window._lokal(0).hour == 7
+    assert dca_window._bulan(0) == "1970-01"

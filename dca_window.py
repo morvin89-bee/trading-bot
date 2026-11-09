@@ -7,8 +7,11 @@ Aturan (spec §7.2-7.3):
   Pengingat hanya mengembalikan True; pengirimannya urusan pemanggil (Task 14):
   maksimal satu pesan per slot pengingat.
 
-Semua perhitungan jam memakai time.localtime — memakai gmtime akan membuat
-setiap batas jam salah diam-diam.
+Semua perhitungan jam memakai zona eksplisit `Asia/Jakarta` (WIB), BUKAN
+`time.localtime` yang ikut pengaturan zona mesin. Bot yang pindah VPS dengan
+zona UTC tidak boleh diam-diam menggeser jam kirim 09.00, DND, dan batas 21.00.
+Modul lain (`main_loop`, `engine`) masih memakai `time.localtime`; mesin
+produksi WAJIB WIB — lihat `docs/GOLIVE_CHECKLIST.md`.
 
 Kepemilikan skema state (Ruling R-G, progress.md): tabel `bot_state` dibuat di
 sini oleh `ensure_bot_state` — bootstrap, karena kebutuhan pertama memang muncul
@@ -17,10 +20,20 @@ di Task 13. Task 14 WAJIB memakai tabel yang sama lewat `load_state`.
 Modul ini tidak pernah membuka jaringan, tidak pernah mengirim apa pun, tidak
 menyentuh kunci dagang, dan tidak pernah menempatkan order.
 """
-import time
+import sqlite3
 import types
+from datetime import datetime
+from zoneinfo import ZoneInfo
 
 import shadow_log
+
+# Zona eksplisit: batas jam DCA tidak boleh bergantung pada setelan mesin.
+ZONA_LOKAL = ZoneInfo("Asia/Jakarta")
+
+
+def _lokal(ts):
+    """Waktu WIB untuk `ts` — satu-satunya sumber jam modul ini."""
+    return datetime.fromtimestamp(ts, ZONA_LOKAL)
 
 DCA_SEND_HOUR = 9
 DCA_WINDOW_H = 24
@@ -40,7 +53,7 @@ def in_dnd(now_ts):
 
     Batas awal inklusif, batas akhir eksklusif: 23.00 masuk, 07.00 keluar.
     """
-    jam = time.localtime(now_ts).tm_hour
+    jam = _lokal(now_ts).hour
     mulai, akhir = DND
     if mulai <= akhir:
         return mulai <= jam < akhir
@@ -68,7 +81,14 @@ def ensure_bot_state(conn):
     `reserve_buy_enabled` TIDAK disimpan di sini (R-G): yang pertama sudah
     tersedia dari snapshots.contributions_idr, yang kedua berisiko ganda dengan
     v1_enabled.
+
+    CATATAN TRANSAKSI: fungsi ini MENULIS dan COMMIT (bootstrap), walau bisa
+    terpanggil dari jalur baca. Pemanggil tidak boleh menyandarkan tulisan
+    yang belum di-commit pada koneksi yang sama lalu berharap rollback.
     """
+    # `sqlite3.Row` supaya pembacaan memakai NAMA kolom, bukan indeks yang
+    # bergeser diam-diam saat skema bertambah. Row tetap mendukung `[0]`.
+    conn.row_factory = sqlite3.Row
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS bot_state (
@@ -89,9 +109,10 @@ def ensure_bot_state(conn):
     # `bot_state` adalah tabel milik proyek ini sendiri, bukan data warisan
     # produksi, jadi larangan R-G (dilarang ALTER pada tabel warisan) tidak berlaku
     # di sini. Tabel warisan `portfolio_store` tetap tidak disentuh.
-    # Indeks 1 = nama kolom, dipakai supaya tidak bergantung pada row_factory.
+    # Indeks 1 = nama kolom (PRAGMA tidak memakai row_factory); nama dibaca
+    # eksplisit supaya tidak bergantung pada urutan kolom PRAGMA.
     kolom = [
-        baris[1] for baris in conn.execute("PRAGMA table_info(bot_state)")
+        baris["name"] for baris in conn.execute("PRAGMA table_info(bot_state)")
     ]
     if "shadow_checked_day" not in kolom:
         conn.execute("ALTER TABLE bot_state ADD COLUMN shadow_checked_day TEXT")
@@ -108,16 +129,28 @@ def ensure_bot_state(conn):
 
 def _bulan(ts):
     """Kunci bulan "YYYY-MM" dihitung dari waktu lokal."""
-    return time.strftime("%Y-%m", time.localtime(ts))
+    return _lokal(ts).strftime("%Y-%m")
 
 
 def _baris(conn):
-    """Baca baris state tunggal (dibuat lebih dulu bila belum ada)."""
-    ensure_bot_state(conn)
-    return conn.execute(
+    """Baca baris state tunggal; bootstrap HANYA bila tabel/baris belum ada.
+
+    Jalur baca yang normal tidak menulis dan tidak commit — `ensure_bot_state`
+    (yang ber-commit karena bootstrap) hanya dipanggil saat tabel belum ada.
+    """
+    conn.row_factory = sqlite3.Row
+    kueri = (
         "SELECT last_dca_date, v1_enabled, shadow_day, dca_sent_ts, dca_status "
         "FROM bot_state WHERE id = 1"
-    ).fetchone()
+    )
+    try:
+        baris = conn.execute(kueri).fetchone()
+    except sqlite3.OperationalError:   # tabel belum pernah dibuat
+        baris = None
+    if baris is None:
+        ensure_bot_state(conn)
+        baris = conn.execute(kueri).fetchone()
+    return baris
 
 
 def mark_pending(conn, ts):
@@ -146,7 +179,8 @@ def mark_confirmed(conn, ts):
     bahwa jawabannya tidak berlaku.
     """
     baris = _baris(conn)
-    if not (baris[0] == _bulan(ts) and baris[4] == "awaiting"):
+    if not (baris["last_dca_date"] == _bulan(ts)
+            and baris["dca_status"] == "awaiting"):
         return False
     conn.execute(
         "UPDATE bot_state SET last_dca_date = ?, dca_status = 'confirmed' WHERE id = 1",
@@ -227,11 +261,12 @@ def mark_missed(conn, ts):
     catatan audit hilang diam-diam tanpa jejak.
     """
     baris = _baris(conn)
-    if baris[0] is None:
+    if baris["last_dca_date"] is None:
         return False  # tidak ada jendela — tidak boleh memalsukan bulan (T-13.6)
-    if baris[4] != "awaiting":
+    if baris["dca_status"] != "awaiting":
         return False  # confirmed / missed / batal tidak ditimpa dan tidak dicatat (T-13.6)
-    if baris[3] is None or ts < baris[3] + DCA_WINDOW_H * 3600:
+    if (baris["dca_sent_ts"] is None
+            or ts < baris["dca_sent_ts"] + DCA_WINDOW_H * 3600):
         return False  # jendela belum lewat — "tidak dibalas dalam 24 jam" di sini = pemalsuan angka (T-13.7)
     bulan = _bulan(ts)
     if not _catatan_missed_ada(conn, bulan):
@@ -293,9 +328,10 @@ def mark_batal(conn, ts):
     """
     baris = _baris(conn)
     bulan = _bulan(ts)
-    if baris[0] == bulan and baris[4] in ("confirmed", "missed"):
+    if (baris["last_dca_date"] == bulan
+            and baris["dca_status"] in ("confirmed", "missed")):
         return False  # sudah selesai bulan ini — tombol basi tidak menghapus keputusan (T-13.5)
-    if baris[0] not in (None, bulan):
+    if baris["last_dca_date"] not in (None, bulan):
         return False  # baris memegang bulan lain — tombol lintas-bulan tidak berlaku (T-13.5)
     conn.execute(
         "UPDATE bot_state SET last_dca_date = ?, dca_status = 'batal' WHERE id = 1",
@@ -330,7 +366,7 @@ def mark_skip(conn, ts):
     bila bulan ditutup.
     """
     baris = _baris(conn)
-    if baris[0] == _bulan(ts):
+    if baris["last_dca_date"] == _bulan(ts):
         return False  # bulan sudah ada — jendela/keputusan tidak ditimpa
     conn.execute(
         "UPDATE bot_state SET last_dca_date = ?, dca_status = 'batal' WHERE id = 1",
@@ -366,10 +402,10 @@ def boleh_usul_dca(conn, now_ts):
        Lewat ambang ini bulan dilewati (mark_skip), bulan depan jalan normal.
     """
     baris = _baris(conn)
-    if baris[0] == _bulan(now_ts):
+    if baris["last_dca_date"] == _bulan(now_ts):
         return False  # bulan ini sudah terkirim/batal/terkonfirmasi/terlewat
-    sekarang = time.localtime(now_ts)
-    if sekarang.tm_mday == 1 and sekarang.tm_hour < DCA_SEND_HOUR:
+    sekarang = _lokal(now_ts)
+    if sekarang.day == 1 and sekarang.hour < DCA_SEND_HOUR:
         return False  # tanggal 1, sebelum jam kirim 09.00
     return _bulan(now_ts + DCA_WINDOW_H * 3600) == _bulan(now_ts)
 
@@ -398,9 +434,9 @@ def dca_state(conn, now_ts):
     → ValueError — data rusak tidak boleh ditebak (review T-13.4 & Minor 2).
     """
     baris = _baris(conn)
-    if baris[0] != _bulan(now_ts):
+    if baris["last_dca_date"] != _bulan(now_ts):
         return ("none", 0.0)
-    status = baris[4]
+    status = baris["dca_status"]
     if status not in STATUS_DCA:
         raise ValueError(
             f"dca_status tak dikenal: {status!r}; nilai yang boleh {STATUS_DCA}. "
@@ -415,7 +451,7 @@ def dca_state(conn, now_ts):
         return ("none", 0.0)
     # status "awaiting" — waktu pengiriman selalu ikut tersimpan oleh mark_pending;
     # NULL di sini berarti data rusak, dan data rusak tidak boleh ditebak.
-    kirim = baris[3]
+    kirim = baris["dca_sent_ts"]
     if kirim is None:
         raise ValueError(
             "dca_sent_ts kosong padahal bulan DCA terisi — data rusak; "
@@ -441,7 +477,7 @@ def should_remind(conn, now_ts):
     tidak pernah menulis apa pun selain catatan "missed" yang wajib (F8), dan
     tidak pernah mengirim apa pun — pengiriman satu baris urusan pemanggil.
     """
-    jam = time.localtime(now_ts).tm_hour
+    jam = _lokal(now_ts).hour
     if jam not in REMINDER_HOURS:
         return False
     if in_dnd(now_ts):
