@@ -127,6 +127,28 @@ ACTIVE_HOURS = (dca_window.DND[1], dca_window.DND[0])   # (7, 23)
 # Lantai syarat sakelar (spec §9: "7-14 hari mode bayangan"). Nama, bukan literal.
 GO_LIVE_SHADOW_DAYS = 7
 
+# Offset zona mesin yang benar untuk seluruh jadwal bot: +07:00 (WIB).
+# `dca_window` memakai Asia/Jakarta eksplisit; modul lain masih localtime,
+# jadi mesin dengan offset lain DITOLAK start (ragu = jangan jalan).
+ZONA_OFFSET_DETIK = 7 * 3600
+
+
+def _offset_zona_lokal(now_ts):
+    """Offset zona lokal mesin (detik) pada `now_ts`; `None` bila tak terbaca."""
+    try:
+        return int(time.localtime(now_ts).tm_gmtoff)
+    except (AttributeError, OverflowError, OSError, ValueError):
+        return None
+
+
+def _teks_offset(detik):
+    """Format offset detik sebagai `+07:00` / `-03:30` untuk pesan."""
+    if detik is None:
+        return "tidak terbaca"
+    tanda = "+" if detik >= 0 else "-"
+    detik = abs(int(detik))
+    return f"{tanda}{detik // 3600:02d}:{(detik % 3600) // 60:02d}"
+
 # Keadaan proses (bukan persistensi):
 #   usulan yang menunggu jawaban pengguna — dipolling, bukan diambil dari DB,
 #   karena `engine.on_answer` butuh objek Proposal lengkap.
@@ -1026,6 +1048,20 @@ def main(argv=None, *, conn=None, db_path=None, telegram=None,
 
     jam = time.time if jam is None else jam
     tidur = time.sleep if tidur is None else tidur
+
+    # Penjaga zona: seluruh jadwal (09.00, DND, 21.00) adalah WIB. Mesin
+    # dengan offset lain menggeser semuanya diam-diam -> tolak start, sebelum
+    # basis data disentuh dan sebelum ada satu pun usulan.
+    offset = _offset_zona_lokal(jam())
+    if offset != ZONA_OFFSET_DETIK:
+        print(
+            f"Bot berhenti: zona waktu mesin {_teks_offset(offset)}, bukan "
+            "+07:00 (WIB). Atur zona mesin ke Asia/Jakarta — jam kirim DCA, "
+            "DND, dan batas 21.00 bergantung padanya. Tidak ada order yang "
+            "dikirim."
+        )
+        return 1
+
     conn_milik = False
 
     try:

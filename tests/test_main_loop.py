@@ -955,6 +955,44 @@ def test_pengingat_slot_berikutnya_tetap_dikirim(tmp_path):
 # main() — tidak pernah bisa membuat transport (R-2)
 # --------------------------------------------------------------------------
 
+def test_main_menolak_start_bila_offset_zona_bukan_wib(tmp_path, monkeypatch,
+                                                      capsys):
+    """Zona mesin bukan +07:00 = berhenti bersih, tanpa order.
+
+    Jam kirim DCA, DND, dan batas 21.00 semuanya WIB. Mesin UTC akan
+    menggeser semuanya diam-diam; lebih baik menolak start.
+    """
+    conn = _fresh_db(tmp_path)
+    telegram = _TelegramPerekam()
+    monkeypatch.setattr(main_loop, "_offset_zona_lokal", lambda _now: 0)
+
+    keluar = main_loop.main(
+        ["--siklus", "1"], conn=conn, telegram=telegram,
+        jam=lambda: _ts(hour=12), tidur=lambda _s: None,
+    )
+
+    keluaran = capsys.readouterr().out
+    assert keluar == 1
+    assert "zona waktu" in keluaran.lower()
+    assert "+00:00" in keluaran
+    assert telegram.konfirmasi == [], "tidak boleh ada usulan sebelum start"
+
+
+def test_main_menolak_start_tanpa_menyentuh_db(tmp_path, monkeypatch):
+    """Penjaga zona berjalan SEBELUM basis data dibuka/disiapkan."""
+    path = tmp_path / "belum_ada.db"
+    monkeypatch.setattr(main_loop, "_offset_zona_lokal", lambda _now: 0)
+
+    keluar = main_loop.main(
+        ["--siklus", "1"], db_path=str(path),
+        telegram=_TelegramPerekam(), jam=lambda: _ts(hour=12),
+        tidur=lambda _s: None,
+    )
+
+    assert keluar == 1
+    assert not path.exists(), "penjaga zona tidak boleh membuat basis data"
+
+
 def test_main_tanpa_pabrik_transport_melcatat_eksekusi_mati(tmp_path, capsys):
     conn = _fresh_db(tmp_path)
     tidur = []
@@ -2226,7 +2264,9 @@ def test_pembaca_gagal_denyut_dilewati_polling_ditahan(
         return main_loop._konteks_kosong()
 
     dasar = _ts(hour=12)
-    urutan = [dasar, dasar + 15, dasar + 300, dasar + 315]
+    # Nilai pertama dikonsumsi penjaga zona di `main()` sebelum loop; sisa
+    # urutan tetap seperti semula untuk denyut/polling.
+    urutan = [dasar, dasar, dasar + 15, dasar + 300, dasar + 315]
     indeks = [0]
 
     def jam():
@@ -2601,7 +2641,8 @@ def test_pemulihan_pembaca_dicetak_setelah_gagal(tmp_path, monkeypatch, capsys):
         return main_loop._konteks_kosong()
 
     dasar = _ts(hour=12)
-    urutan = [dasar, dasar + 15, dasar + 300, dasar + 315]
+    # Nilai pertama dikonsumsi penjaga zona di `main()` sebelum loop.
+    urutan = [dasar, dasar, dasar + 15, dasar + 300, dasar + 315]
     indeks = [0]
 
     def jam():
