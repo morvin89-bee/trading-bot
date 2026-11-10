@@ -65,6 +65,30 @@ def parse_balances(info):
     return out
 
 
+def parse_free_balances(info):
+    """Ubah respons `account_info()` menjadi {koin: saldo BEBAS}.
+
+    Koin terkunci tidak boleh dijual, jadi tidak ikut dijumlahkan. Nol
+    tetap disertakan: pair yang seluruh koinnya terkunci harus terbaca 0,
+    bukan "tidak ada data" yang lalu jatuh ke saldo total. Bentuk v1 tidak
+    membedakan free/locked, jadi seluruh saldo dianggap bebas.
+    """
+    out = {}
+    if isinstance(info, dict) and isinstance(info.get("balances"), list):
+        for b in info["balances"]:
+            try:
+                qty = float(b.get("free") or 0)
+            except (TypeError, ValueError):
+                continue
+            asset = str(b.get("asset") or "").strip().lower()
+            if not asset:
+                continue
+            key = "IDR" if asset in ("idr", "rp") else asset
+            out[key] = qty
+        return out
+    return parse_balances(info)
+
+
 def fetch_balances():
     """Ambil saldo asli dari Indodax (read-only)."""
     return parse_balances(indodax_api.account_info())
@@ -81,6 +105,9 @@ class Holding:
     cost_basis_idr: float | None
     unrealized_idr: float | None
     basis_known: bool
+    # Saldo yang benar-benar bisa dijual (free). `None` = pemanggil lama
+    # tidak membedakan terkunci; gerbang jual jatuh ke `qty`.
+    qty_free: float | None = None
 
 
 def _accumulate(trades):
@@ -124,11 +151,14 @@ def realized_pnl(trades):
             for pair, s in _accumulate(trades).items()}
 
 
-def compute_holdings(trades, balances, prices):
+def compute_holdings(trades, balances, prices, free_balances=None):
     """Bentuk daftar `Holding` dari saldo, harga, dan riwayat transaksi.
 
-    Kuantitas diambil dari `balances` (otoritatif). Harga rata-rata hanya
-    tersedia bila ada riwayat pembelian untuk koin itu (`basis_known`).
+    Kuantitas diambil dari `balances` (otoritatif) dan tetap dipakai untuk
+    valuasi. `free_balances` (bila diisi) disimpan terpisah sebagai
+    `qty_free`; gerbang jual memakai angka itu karena koin terkunci tidak
+    bisa dijual. Harga rata-rata hanya tersedia bila ada riwayat pembelian
+    untuk koin itu (`basis_known`).
     """
     state = _accumulate(trades)
     out = []
@@ -141,6 +171,8 @@ def compute_holdings(trades, balances, prices):
         s = state.get(pair)
         price = prices.get(pair)
         value = qty * price if price else 0.0
+        qty_free = (None if free_balances is None
+                    else float(free_balances.get(coin, 0.0)))
         if s and s["buys_exist"]:
             avg = (s["cost"] / s["qty_bought"]) if s["qty_bought"] > 0 else 0.0
             cost_basis = s["cost"]
@@ -154,7 +186,7 @@ def compute_holdings(trades, balances, prices):
             unrealized = None
             basis_known = False
         out.append(Holding(pair, coin, qty, avg, price, value, cost_basis,
-                           unrealized, basis_known))
+                           unrealized, basis_known, qty_free))
     out.sort(key=lambda h: h.value_idr, reverse=True)
     return out
 

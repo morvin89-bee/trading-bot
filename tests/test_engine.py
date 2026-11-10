@@ -1653,3 +1653,20 @@ def test_usulan_lama_tanpa_client_order_id_memakai_id_lama(tmp_path):
     assert out == "sent"
     assert t.posted[0]["client_order_id"] == executor.client_id(p)
     assert t.queried_ids == [executor.client_id(p)]
+
+def test_jual_ditolak_bila_koin_terkunci(tmp_path):
+    """Gerbang jual memakai saldo FREE: koin terkunci tidak boleh dijual."""
+    conn = _fresh_db(tmp_path)
+    p = _fresh_proposal()
+    ctx = _pasangkan_harga(_ctx(), p)
+    ctx.holdings[0].qty_free = 0.0
+    t = _FakeTransport(status_sequence=["filled"])
+    sent = []
+
+    out = engine.on_answer(conn, ctx, p=p, answer="setuju", now=0.0,
+                           transport=t, telegram=_tg(sent), shadow=False,
+                           verdict=lambda pair, **k: (True, 1.0))
+
+    assert out == "gate_blocked"
+    assert t.posted == []
+    assert any("terkunci" in s or "bebas" in s for s in sent), sent

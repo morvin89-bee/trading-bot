@@ -841,17 +841,25 @@ def on_answer(conn: Any, ctx: Context, *, p: proposal.Proposal, answer: str,
     if proposal.is_expired(p, now):
         return "ignored"
 
-    # 2b. Jual tidak boleh melebihi koin yang benar-benar dipegang: usulan
-    #     lahir dari konteks lama, dan kepemilikan bisa berkurang sebelum
-    #     tombol ditekan. Ragu = tidak ada order.
+    # 2b. Jual tidak boleh melebihi koin yang benar-benar BEBAS: usulan
+    #     lahir dari konteks lama, dan kepemilikan bisa berkurang atau
+    #     terkunci sebelum tombol ditekan. Valuasi portofolio tetap memakai
+    #     total (`qty`); hanya gerbang jual yang memakai `qty_free`.
+    #     Ragu = tidak ada order.
     if p.kind == "SELL":
         dimiliki = sum(
-            getattr(h, "qty", 0.0) for h in getattr(ctx, "holdings", [])
+            (h.qty_free if getattr(h, "qty_free", None) is not None
+             else getattr(h, "qty", 0.0))
+            for h in getattr(ctx, "holdings", [])
             if getattr(h, "pair", None) == p.pair)
         if p.qty is None or p.qty <= 0 or p.qty > dimiliki + 1e-9:
+            total = sum(
+                getattr(h, "qty", 0.0) for h in getattr(ctx, "holdings", [])
+                if getattr(h, "pair", None) == p.pair)
             telegram.line(
                 f"Tolak jual {p.pair}: qty {p.qty} melebihi kepemilikan "
-                f"{dimiliki:.8f} koin — tidak ada order dikirim.")
+                f"bebas {dimiliki:.8f} koin ({total:.8f} total; sisanya "
+                "terkunci) — tidak ada order dikirim.")
             return "gate_blocked"
 
     # 2c. Gerbang geser harga 0,5% (spec L116, putusan R-E): angka yang

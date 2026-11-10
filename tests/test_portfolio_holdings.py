@@ -8,6 +8,15 @@ def test_basis_unknown_for_coin_without_trades():
     assert bch.value_idr == 0.000583 * 7_500_000
 
 
+def test_compute_holdings_membawa_saldo_bebas_terpisah():
+    h = p.compute_holdings([], {"btc": 0.001}, {"btc_idr": 1000.0},
+                           free_balances={"btc": 0.0004})
+    btc = h[0]
+    assert btc.qty == 0.001                 # valuasi tetap total
+    assert btc.value_idr == 1.0
+    assert btc.qty_free == 0.0004           # gerbang jual memakai angka ini
+
+
 def test_rewards_increase_qty_without_raising_basis():
     trades = [dict(pair="eth_idr", side="buy", price=40_000_000, qty=0.001,
                    quote=40_000, fee=0, ts=1),

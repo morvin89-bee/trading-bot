@@ -387,8 +387,11 @@ def baca_konteks(conn, *, now=None, sinkron=portfolio.sync_trades,
 
     coins = {k: v for k, v in portfolio.parse_balances(info).items()
              if k != "IDR"}
+    free_coins = {k: v for k, v in portfolio.parse_free_balances(info).items()
+                  if k != "IDR"}
     trades = portfolio_store.list_trades(conn)
-    holdings = portfolio.compute_holdings(trades, coins, prices)
+    holdings = portfolio.compute_holdings(
+        trades, coins, prices, free_balances=free_coins)
 
     hari_ini = time.strftime("%Y-%m-%d", time.localtime(now))
     today_counts: dict = {}
