@@ -50,6 +50,7 @@ import dca_window
 import engine
 import indodax_api
 import indodax_transport
+import pair_meta
 import portfolio
 import portfolio_store
 import proposal
@@ -910,6 +911,12 @@ def tick_cycle(
     #    siklus ini. Usulan ulang memakai aksi dan `now` yang sama persis
     #    dengan tick ini, jadi `proposal.new_proposal` akan menghasilkan id
     #    kembar dan `shadow_log` menimpanya (atau gagal IntegrityError).
+    #    Metadata pair disegarkan maksimal sekali sehari; kegagalan jaringan
+    #    dibiarkan -> `engine.tick` halt karena metadata basi (fail closed).
+    try:
+        pair_meta.refresh(conn, now=now)
+    except Exception:
+        pass
     try:
         usulan = [] if diulang else engine.tick(
             conn, ctx, now=now, telegram=telegram, shadow=shadow,

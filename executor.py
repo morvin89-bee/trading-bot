@@ -4,6 +4,7 @@ import time
 from typing import Protocol, Dict, Any
 
 import proposal
+import rules
 
 
 MAX_CLIENT_ID_LEN = 36
@@ -72,7 +73,9 @@ def payload_for(p: proposal.Proposal, client_order_id: str, recv_window_ms: int 
         "pair": p.pair,
         "type": p.kind.lower(),
         "price": p.price_ref,
-        "amount": p.qty,
+        # String titik tetap, bukan float: urlencode atas float mentah bisa
+        # menghasilkan notasi ilmiah (mis. "5e-05") yang tidak diterima bursa.
+        "amount": (None if p.qty is None else rules.qty_teks_tetap(p.qty)),
     }
 
 

@@ -71,7 +71,8 @@ def test_payload_carries_pair_type_price_amount():
     assert pl["pair"] == "btc_idr"
     assert pl["type"] == "buy"             # sisi ala catatan trade (v1: `type`)
     assert pl["price"] == 1000.0           # harga limit = price_ref
-    assert pl["amount"] == 275.0           # jumlah koin (v1: `amount` = qty)
+    # String titik tetap: float mentah lewat urlencode bisa jadi "5e-05".
+    assert pl["amount"] == "275.0"         # jumlah koin (v1: `amount` = qty)
 
 
 class _StatusTransport:

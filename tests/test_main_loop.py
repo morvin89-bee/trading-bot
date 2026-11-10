@@ -1588,8 +1588,10 @@ def test_dca_saldo_kurang_tidak_menutup_bulan_dan_usul_begitu_saldo_cukup(tmp_pa
     assert len(telegram2.konfirmasi) == 3, (
         [p.pair for p in telegram2.konfirmasi])
     assert all(p.rule == rules.RULE_DCA for p in telegram2.konfirmasi)
-    assert [(p.pair, p.amount_idr) for p in telegram2.konfirmasi] == [
-        ("btc_idr", 275000.0), ("eth_idr", 138000.0), ("sol_idr", 55000.0)], (
+    hasil = [(p.pair, p.amount_idr) for p in telegram2.konfirmasi]
+    assert [pair for pair, _ in hasil] == ["btc_idr", "eth_idr", "sol_idr"]
+    assert [nominal for _, nominal in hasil] == pytest.approx(
+        [275000.0, 138000.0, 55000.0]), (
         "nominal tidak boleh dikecilkan karena saldo sempat kurang")
     assert not any("saldo" in s.lower() for s in telegram2.lines), (
         telegram2.lines)

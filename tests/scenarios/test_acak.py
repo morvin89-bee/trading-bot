@@ -77,7 +77,7 @@ def _simulasikan(tmp_path, seed, monkeypatch):
         usulan = main_loop._USULAN_MENUNGGU.get(cid)
         orders.append(dict(
             id=cid, pair=payload["pair"], type=payload["type"],
-            amount=payload["amount"], price=payload["price"],
+            amount=float(payload["amount"]), price=payload["price"],
             rule=(usulan.rule if usulan is not None else "?"),
             jam=jam_kini[0]))
         return asli(transport_, payload, cid)

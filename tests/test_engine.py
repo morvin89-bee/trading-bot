@@ -583,7 +583,7 @@ def test_reserve_buy_lolos_gerbang_karena_nama_aturan_reserve_buy(tmp_path):
     # perilaku ini berubah di ronde F31 tapi belum pernah dipatok lewat
     # engine.tick. Angka: Rp 500.000 - tranche Rp 125.000 (0,25 x monthly
     # Rp 500.000) = Rp 375.000.
-    assert beli[0].reserve_after == 375_000.0
+    assert beli[0].reserve_after == pytest.approx(375_000.0)
     # Pesan konfirmasi pengguna juga menampilkan nama itu (bukan "Turun")
     assert "Aturan: reserve_buy" in proposal.confirmation_text(beli[0])
     # Tidak boleh ada penolakan yang tercatat — penolakan abadi = sistem
@@ -717,7 +717,7 @@ def test_saldo_berjalan_antar_aksi_dalam_satu_tick(tmp_path, monkeypatch):
     conn = _fresh_db(tmp_path)
     aksi = []
     for pair in ("btc_idr", "eth_idr"):
-        a = rules.Action("BUY", pair, 260000, 0.26, 1000.0, "uji saldo", True)
+        a = rules.Action("BUY", pair, 260000, 260.0, 1000.0, "uji saldo", True)
         a._nama_aturan = proposal.RULE_RESERVE_BUY
         aksi.append(a)
     monkeypatch.setattr(engine, "collect_actions",
@@ -1225,7 +1225,7 @@ def test_on_answer_submit_dan_tanya_status_memakai_id_sama(tmp_path,
     assert pl["pair"] == p.pair              # "btc_idr"
     assert pl["type"] == p.kind.lower()      # "sell" — sisi ala catatan trade
     assert pl["price"] == p.price_ref        # 1600.0 — harga limit
-    assert pl["amount"] == p.qty             # 0.25 — jumlah koin (v1: `amount`)
+    assert pl["amount"] == "0.25"            # 0.25 koin (v1: `amount`)
 
 def test_on_answer_reserve_buy_lolos_gerbang_saldo_input_sungguhan(tmp_path,
                                                                    monkeypatch):
@@ -1481,7 +1481,7 @@ def test_requote_dca_drift_15_persen_kirim_konfirmasi_baru(tmp_path):
     assert len(konfirmasi) == 1
     baru = konfirmasi[0]
     assert baru.id == p.id
-    assert baru.amount_idr == 100000.0
+    assert baru.amount_idr == pytest.approx(100000.0)
     assert baru.price_ref == 1015.0
     assert baru.qty == pytest.approx(100000.0 / 1015.0)
     assert p.price_ref == 1015.0
@@ -1508,7 +1508,7 @@ def test_requote_dca_drift_15_persen_kirim_konfirmasi_baru(tmp_path):
     assert out2 == "sent"
     assert len(t.posted) == 1
     assert t.posted[0]["price"] == 1015.0
-    assert t.posted[0]["amount"] == pytest.approx(100000.0 / 1015.0)
+    assert float(t.posted[0]["amount"]) == pytest.approx(100000.0 / 1015.0)
     assert t.posted[0]["client_order_id"] == p.id
 
 

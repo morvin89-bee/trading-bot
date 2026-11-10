@@ -5,6 +5,7 @@ di sini deterministik dan mudah diuji.
 """
 
 from dataclasses import dataclass
+from decimal import Decimal, ROUND_DOWN
 
 # Bobot target: BTC 55%, ETH 25%, SOL 10%, cadangan IDR 10%.
 DEFAULT_TARGET = {
@@ -18,6 +19,33 @@ DEFAULT_TARGET = {
 MONTHLY_IDR = 500000
 # Nama aturan DCA untuk provenance (F32) dan gerbang F46.
 RULE_DCA = "dca_bulanan"
+
+
+def bulatkan_qty_bawah(qty, increment):
+    """Bulatkan qty KE BAWAH ke kelipatan presisi bursa; hasil `Decimal`.
+
+    Tidak pernah ke atas: qty yang lebih besar dari nominal yang disetujui
+    berarti order menghabiskan uang lebih banyak dari yang disetujui
+    pengguna. `Decimal(str(...))` dipakai supaya float mentah tidak
+    membawa galat biner ke pembulatan.
+    """
+    inc = Decimal(str(increment))
+    if inc <= 0:
+        raise ValueError("increment qty harus lebih besar dari nol")
+    nilai = Decimal(str(qty))
+    if nilai <= 0:
+        return Decimal(0)
+    return (nilai / inc).to_integral_value(rounding=ROUND_DOWN) * inc
+
+
+def qty_teks_tetap(qty):
+    """String titik tetap tanpa notasi ilmiah — bentuk payload bursa.
+
+    `str(5e-05)` menghasilkan "5e-05"; `urlencode` atas float mentah bisa
+    mengirim notasi ilmiah ke bursa. Format `f` selalu titik tetap.
+    """
+    return format(Decimal(str(qty)), "f")
+
 
 
 def dca_split(amount_idr, holdings_value, target=None, min_order=10000):

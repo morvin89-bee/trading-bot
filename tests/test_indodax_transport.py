@@ -59,7 +59,7 @@ def test_post_order_pakai_kunci_koin_bukan_amount():
     assert params["type"] == "buy"
     assert params["order_type"] == "limit"
     assert params["price"] == 1000.0
-    assert params["btc"] == 0.001          # kunci koin, bukan "amount"
+    assert params["btc"] == "0.001"        # kunci koin, bukan "amount"
     assert "amount" not in params          # "amount" tidak ada di Indodax
     assert params["client_order_id"] == "cid-1"
 
@@ -73,7 +73,7 @@ def test_post_order_sell_juga_pakai_kunci_koin():
 
     _, params = palsu.panggilan[0]
     assert params["type"] == "sell"
-    assert params["btc"] == 0.001
+    assert params["btc"] == "0.001"
 
 
 def test_post_order_mengembalikan_balasan_bursa():

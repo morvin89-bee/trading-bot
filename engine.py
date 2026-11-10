@@ -15,6 +15,7 @@ import actions_merge
 import alerts
 import executor
 import math
+import pair_meta
 import proposal
 import rules
 import safeguards
@@ -23,6 +24,7 @@ import spread
 import sqlite3
 import telegram_gate
 import time
+from decimal import Decimal
 
 
 RULE_TAKE_PROFIT = "take_profit"
@@ -374,6 +376,64 @@ def tick(
             # Lanjut ke aksi berikutnya
             continue
 
+        # 3b. Metadata pair + pembulatan qty SEBELUM gerbang. Qty wajib
+        #     kelipatan presisi bursa dan tidak pernah dibulatkan ke atas;
+        #     nominal dihitung ulang dari qty terbulat supaya angka di pesan
+        #     dan payload sama. Metadata hilang/basi = BERHENTI: menebak
+        #     presisi berarti order bisa ditolak bursa atau kelebihan koin.
+        meta = pair_meta.get(conn, pair, now=now)
+        if meta is None:
+            if shadow:
+                shadow_log.record(
+                    conn,
+                    proposal.Proposal(
+                        id=f"meta_halt_{pair}_{int(now * 1_000_000)}",
+                        kind=action.kind,
+                        pair=pair,
+                        amount_idr=0.0,
+                        qty=0.0,
+                        price_ref=0.0,
+                        rule="halt",
+                        reserve_after=0.0,
+                        window_s=0,
+                        created_ts=now,
+                        status="halted",
+                    ),
+                    "halted",
+                    f"Metadata pair {pair} hilang atau basi",
+                )
+            _kirim_sekali(
+                telegram, hari, pair, action.kind, "metadata",
+                f"Metadata pair {pair} tidak tersedia atau basi — proses "
+                "dihentikan untuk melindungi dana.")
+            if getattr(ctx, "dca_enabled", False):
+                ctx.dca_retry = True
+            return []
+
+        if action.qty is None or action.price_ref is None:
+            _kirim_sekali(
+                telegram, hari, pair, action.kind, "angka_hilang",
+                f"Order {action.kind} {pair} tidak dieksekusi: qty/harga "
+                "tidak tersedia — tidak ada angka yang bisa dibulatkan.")
+            continue
+
+        qty_bulat = rules.bulatkan_qty_bawah(
+            action.qty, meta.quantity_increment)
+        amount_bulat = qty_bulat * Decimal(str(action.price_ref))
+        if (amount_bulat < Decimal(str(meta.min_base_idr))
+                or qty_bulat < Decimal(str(meta.min_traded))):
+            _kirim_sekali(
+                telegram, hari, pair, action.kind, "minimum",
+                f"Order {action.kind} {pair} tidak dieksekusi: nilai "
+                f"{alerts._rp(float(amount_bulat))} / "
+                f"{rules.qty_teks_tetap(qty_bulat)} koin di bawah minimum "
+                f"bursa ({alerts._rp(meta.min_base_idr)} / "
+                f"{rules.qty_teks_tetap(meta.min_traded)} koin).")
+            continue
+
+        action = replace(
+            action, qty=float(qty_bulat), amount_idr=float(amount_bulat))
+
         # 4. Gerbang safeguard
         gate_reasons = safeguards.gates_berkode(
             action,
@@ -588,19 +648,37 @@ def _requote_dca(conn: Any, p: proposal.Proposal, harga_sekarang: float, *,
         return "ignored"
 
     lama_harga, lama_qty = p.price_ref, p.qty
+    meta = pair_meta.get(conn, p.pair, now=now)
+    if meta is None:
+        telegram.line(
+            f"Metadata pair {p.pair} tidak tersedia atau basi — re-quote "
+            "dibatalkan, tidak ada order.")
+        return "ignored"
+    qty_bulat = rules.bulatkan_qty_bawah(
+        p.amount_idr / harga_sekarang, meta.quantity_increment)
+    amount_bulat = qty_bulat * Decimal(str(harga_sekarang))
+    if (amount_bulat < Decimal(str(meta.min_base_idr))
+            or qty_bulat < Decimal(str(meta.min_traded))):
+        telegram.line(
+            f"Re-quote {p.pair} jatuh di bawah minimum bursa — tidak ada "
+            "order. Usulan lama tetap berlaku.")
+        return "ignored"
     baru = replace(
-        p, price_ref=harga_sekarang, qty=p.amount_idr / harga_sekarang,
-        revisi=p.revisi + 1)
+        p, price_ref=harga_sekarang, qty=float(qty_bulat),
+        amount_idr=float(amount_bulat), revisi=p.revisi + 1)
     if telegram.confirmation(baru) is None:
         telegram.line(
             f"Konfirmasi re-quote {p.pair} gagal dikirim — tidak ada order. "
             "Usulan lama tetap berlaku.")
         return "ignored"
 
-    p.price_ref, p.qty, p.revisi = baru.price_ref, baru.qty, baru.revisi
+    p.price_ref, p.qty, p.amount_idr = (
+        baru.price_ref, baru.qty, baru.amount_idr)
+    p.revisi = baru.revisi
     catatan = (
         f"Re-quote DCA: harga {lama_harga} -> {harga_sekarang}, "
-        f"qty {lama_qty} -> {p.qty}, nominal tetap {p.amount_idr}")
+        f"qty {lama_qty} -> {p.qty}, nominal {p.amount_idr} (dibulatkan ke "
+        "bawah sesuai presisi bursa)")
     shadow_log.perbarui_harga(conn, p, catatan)
     # Baris audit terpisah: catatan di atas akan tertimpa saat order selesai.
     shadow_log.record(
