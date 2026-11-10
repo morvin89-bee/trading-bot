@@ -861,7 +861,7 @@ def test_halt_when_status_unknown_keeps_db_untouched(tmp_path, monkeypatch):
     # dikirim tepat sekali, lalu bertanya status maksimal tiga kali dengan
     # ID yang sama (spec §6.1) dan tetap berhenti — tidak ada kirim ulang
     assert len(t.posted) == 1
-    assert t.queried_ids == [p.id] * 3
+    assert t.queried_ids == [executor.client_id(p)] * 3
     assert tidur == [2, 5, 10]           # backoff berjalan, tanpa jam dinding
     # kegagalan tidak boleh hilang tanpa jejak (G7)
     assert any("berhenti" in s for s in sent), sent
@@ -1159,7 +1159,7 @@ def test_on_answer_balasan_hilang_berhenti_tanpa_kirim_ulang(tmp_path,
                            shadow=False, verdict=lambda pair, **k: (True, 1.0))
     assert out == "halted"
     assert len(t.posted) == 1            # satu percobaan; tidak ada percobaan kedua
-    assert t.queried_ids == [p.id] * 3   # ditanya 3x dengan id yang sama
+    assert t.queried_ids == [executor.client_id(p)] * 3   # ditanya 3x dengan id yang sama
     assert tidur == [2, 5, 10]           # backoff [2, 5, 10], tanpa jam dinding
     assert _db_rows(conn) == []          # status belum pasti -> DB nol sentuh
     assert sent, "kegagalan pengiriman wajib sampai ke pengguna (G7)"
@@ -1213,7 +1213,7 @@ def test_on_answer_submit_dan_tanya_status_memakai_id_sama(tmp_path,
                            verdict=lambda pair, **k: (True, 1.0))
     assert out == "sent"
     cid = t.posted[0]["client_order_id"]
-    assert cid == p.id and t.queried_ids == [p.id]
+    assert cid == executor.client_id(p) and t.queried_ids == [executor.client_id(p)]
     assert len(cid) <= 36 and re.fullmatch(r"[0-9A-Za-z_-]+", cid)
     assert t.posted[0]["order_type"] == "limit"
     assert t.posted[0]["recvWindow"] == 15000
@@ -1305,7 +1305,7 @@ def test_on_answer_jawaban_kedua_diabaikan_tanpa_order_baru(tmp_path,
                             verdict=verdict_spy)
     assert out2 == "ignored"
     assert len(t.posted) == 1              # order kedua TIDAK pernah terkirim
-    assert t.queried_ids == [p.id]         # guard berhenti sebelum transport
+    assert t.queried_ids == [executor.client_id(p)]         # guard berhenti sebelum transport
     assert _db_rows(conn) == [{"status": "filled"}]   # tetap satu baris
     assert panggilan["verdict"] == 1       # jawaban kedua berhenti di langkah 0
     assert tidur == [2]                    # tidak ada percobaan status kedua
@@ -1356,7 +1356,7 @@ def test_on_answer_balasan_hilang_lalu_status_final_ditulis(tmp_path,
                            verdict=lambda pair, **k: (True, 1.0))
     assert out == "sent"
     assert len(t.posted) == 1              # tidak pernah kirim ulang
-    assert t.queried_ids == [p.id]         # ditanya dengan id yang sama
+    assert t.queried_ids == [executor.client_id(p)]         # ditanya dengan id yang sama
     assert tidur == [2]                    # berhenti pada percobaan pertama
     assert _db_rows(conn) == [{"status": "filled"}]   # DB baru setelah final
     assert _outcomes(conn) == ["executed"]
@@ -1509,7 +1509,7 @@ def test_requote_dca_drift_15_persen_kirim_konfirmasi_baru(tmp_path):
     assert len(t.posted) == 1
     assert t.posted[0]["price"] == 1015.0
     assert float(t.posted[0]["amount"]) == pytest.approx(100000.0 / 1015.0)
-    assert t.posted[0]["client_order_id"] == p.id
+    assert t.posted[0]["client_order_id"] == executor.client_id(p)
 
 
 def test_requote_dca_gagal_kirim_konfirmasi_tidak_mengubah_usulan(tmp_path):
@@ -1601,3 +1601,55 @@ def test_on_answer_produksi_setelah_tick_tanpa_bentrok_primary_key(tmp_path):
         "SELECT outcome FROM proposals WHERE id = ?", (p.id,)).fetchall()
     assert [r[0] for r in rows] == ["setuju"]   # satu baris, diperbarui
     assert len(_outcomes(conn)) == len(props)   # tiap usulan tepat satu baris
+
+def test_client_order_id_tersimpan_dan_dipulihkan(tmp_path):
+    """Id kirim disimpan saat usulan dibuat; pemulihan restart memakainya."""
+    conn = _fresh_db(tmp_path)
+    conn.row_factory = sqlite3.Row
+    p = _proposal()
+    shadow_log.record(conn, p, "proposed", "")
+
+    baris = conn.execute(
+        "SELECT client_order_id FROM proposals WHERE id = ?", (p.id,)
+    ).fetchone()
+    assert baris[0] == p.client_order_id
+    assert p.client_order_id != p.id
+
+    pulih = shadow_log.pending(conn, now=1.0)[0]
+    assert pulih.client_order_id == p.client_order_id
+
+
+def test_on_answer_memakai_client_order_id_tersimpan(tmp_path):
+    conn = _fresh_db(tmp_path)
+    p = _fresh_proposal()
+    t = _FakeTransport(status_sequence=["filled"])
+
+    out = engine.on_answer(conn, _pasangkan_harga(_ctx(), p), p=p,
+                           answer="setuju", now=0.0, transport=t,
+                           telegram=_tg([]), shadow=False,
+                           verdict=lambda pair, **k: (True, 1.0))
+
+    assert out == "sent"
+    assert t.posted[0]["client_order_id"] == p.client_order_id
+    assert t.queried_ids == [p.client_order_id]
+    baris = conn.execute(
+        "SELECT 1 FROM order_status WHERE client_order_id = ?",
+        (p.client_order_id,)).fetchone()
+    assert baris is not None
+
+
+def test_usulan_lama_tanpa_client_order_id_memakai_id_lama(tmp_path):
+    """Baris lama (sebelum kolom baru) tetap memakai id lamanya, bukan tebakan."""
+    conn = _fresh_db(tmp_path)
+    p = _fresh_proposal()
+    p.client_order_id = None
+    t = _FakeTransport(status_sequence=["filled"])
+
+    out = engine.on_answer(conn, _pasangkan_harga(_ctx(), p), p=p,
+                           answer="setuju", now=0.0, transport=t,
+                           telegram=_tg([]), shadow=False,
+                           verdict=lambda pair, **k: (True, 1.0))
+
+    assert out == "sent"
+    assert t.posted[0]["client_order_id"] == executor.client_id(p)
+    assert t.queried_ids == [executor.client_id(p)]

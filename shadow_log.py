@@ -56,7 +56,8 @@ def _ensure_table(conn):
                 window_s INTEGER,
                 level REAL,
                 basis REAL,
-                revisi INTEGER NOT NULL DEFAULT 0
+                revisi INTEGER NOT NULL DEFAULT 0,
+                client_order_id TEXT
             )
             """
         )
@@ -67,7 +68,8 @@ def _ensure_table(conn):
     for nama, tipe in (("qty", "REAL"), ("reserve_after", "REAL"),
                        ("window_s", "INTEGER"), ("level", "REAL"),
                        ("basis", "REAL"),
-                       ("revisi", "INTEGER NOT NULL DEFAULT 0")):
+                       ("revisi", "INTEGER NOT NULL DEFAULT 0"),
+                       ("client_order_id", "TEXT")):
         if nama not in kolom:
             conn.execute(f"ALTER TABLE proposals ADD COLUMN {nama} {tipe}")
 
@@ -97,8 +99,9 @@ def record(conn, p, outcome, note=""):
         """
         INSERT INTO proposals (
             id, ts, day, kind, pair, amount_idr, price_ref, rule, outcome,
-            note, qty, reserve_after, window_s, level, basis, revisi
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            note, qty, reserve_after, window_s, level, basis, revisi,
+            client_order_id
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             p.id,
@@ -117,6 +120,7 @@ def record(conn, p, outcome, note=""):
             getattr(p, "level", None),
             getattr(p, "basis", None),
             getattr(p, "revisi", 0),
+            getattr(p, "client_order_id", None),
         ),
     )
     conn.commit()
@@ -170,7 +174,8 @@ def pending(conn, now):
     baris = conn.execute(
         """
         SELECT id, kind, pair, amount_idr, qty, price_ref, rule,
-               reserve_after, window_s, ts, level, basis, revisi
+               reserve_after, window_s, ts, level, basis, revisi,
+               client_order_id
         FROM proposals
         WHERE outcome = 'proposed' AND ts IS NOT NULL
           AND window_s IS NOT NULL AND qty IS NOT NULL
@@ -187,6 +192,7 @@ def pending(conn, now):
             created_ts=r["ts"], status="proposed",
             level=r["level"], basis=r["basis"],
             revisi=r["revisi"] or 0,
+            client_order_id=r["client_order_id"],
         )
         for r in baris
     ]

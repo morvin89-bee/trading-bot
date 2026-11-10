@@ -12,12 +12,18 @@ STATUS_BACKOFF_S = (2, 5, 10)
 
 
 def make_client_order_id(prefix: str, now: float) -> str:
-    """Buat client order id dari prefix + timestamp, potong ke 36 karakter."""
-    raw = f"{prefix}-{int(now)}"
-    if len(raw) <= MAX_CLIENT_ID_LEN:
-        return raw
-    # Potong dari akhir jika terlalu panjang
-    return raw[:MAX_CLIENT_ID_LEN]
+    """Buat client order id dari prefix + timestamp, hash id penuh (<=36)."""
+    return proposal.client_order_id_for(f"{prefix}-{int(now)}")
+
+
+def client_id(p: proposal.Proposal) -> str:
+    """Id kirim untuk `p`: id hash tersimpan, atau id lama bila belum ada.
+
+    Usulan yang dibuat sebelum kolom `client_order_id` ada tetap memakai
+    id lamanya — tidak di-hash ulang, karena id itulah yang mungkin sudah
+    tercatat di bursa.
+    """
+    return getattr(p, "client_order_id", None) or p.id
 
 
 class SubmissionUncertain(Exception):

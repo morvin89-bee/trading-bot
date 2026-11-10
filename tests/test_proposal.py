@@ -107,6 +107,32 @@ def test_id_sub_second_distinct_and_client_order_id_safe():
     assert set(d.id) <= set(string.ascii_letters + string.digits + "_-")
 
 
+def test_client_order_id_hash_memisahkan_id_yang_dulu_terpotong_sama():
+    # Dulu client_order_id = potongan 36 karakter pertama id usulan. Dua id
+    # yang berbagi 36 karakter pertama menjadi SATU id di bursa: order kedua
+    # dianggap duplikat. Hash id PENUH memisahkannya.
+    a = "x" * 40 + "1"
+    b = "x" * 40 + "2"
+    assert a[:36] == b[:36]
+
+    ca = proposal.client_order_id_for(a)
+    cb = proposal.client_order_id_for(b)
+
+    assert ca != cb
+    assert proposal.client_order_id_for(a) == ca      # deterministik
+    assert ca.startswith("x" * proposal.CLIENT_ID_PREFIX_MAX)  # awalan terbaca
+    for cid in (ca, cb):
+        assert len(cid) <= proposal.CLIENT_ID_MAX
+        assert set(cid) <= set(string.ascii_letters + string.digits + "_-")
+
+
+def test_new_proposal_membawa_client_order_id_hash():
+    p = proposal.new_proposal(_act(), rule="r", reserve_after=0,
+                              window_s=90, now=100.0)
+    assert p.client_order_id == proposal.client_order_id_for(p.id)
+    assert p.client_order_id != p.id
+
+
 def test_qty_line_never_uses_scientific_notation():
     # Rp 275.000 pada aset mahal menghasilkan qty di bawah 0,0001 —
     # "3e-05" tidak terbaca orang awam di pesan yang memutuskan uang.

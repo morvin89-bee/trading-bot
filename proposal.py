@@ -10,6 +10,8 @@ kadaluarsa jendela (`is_expired`) dan geser harga > 0,5%
 jaringan, tidak punya dan tidak pernah mengirim kemampuan order.
 """
 from dataclasses import dataclass
+import hashlib
+import re
 
 import alerts
 import rules
@@ -21,6 +23,10 @@ DCA_MAX_DRIFT_PCT = 0.03    # batas re-quote KHUSUS DCA (keputusan 2026-11-06):
                             # 0,5% < geser <= 3% -> harga/qty dihitung ulang;
                             # di atas 3% konfirmasi hangus, jendela tetap awaiting
 FEE_PCT = 0.002             # perkiraan fee taker yang diketengahkan (§6.2)
+# Batas `client_order_id` yang terdokumentasi (F18): <= 36 karakter dari
+# [0-9A-Za-z_-]. Awalan terbaca dipertahankan; sisanya hash id PENUH.
+CLIENT_ID_MAX = 36
+CLIENT_ID_PREFIX_MAX = 20
 RULE_RESERVE_BUY = "reserve_buy"   # ejaan yang sama persis dengan yang
 # dibaca `safeguards.gates` (ruling F15); jangan diubah sepihak — ejaan
 # lain diam-diam jatuh ke gerbang saldo DCA dan menolak reserve buy sah
@@ -48,6 +54,22 @@ class Proposal:
     # Nomor revisi pesan konfirmasi. Re-quote menaikkannya; callback dari
     # pesan lama (revisi lebih kecil) ditolak. `client_order_id` tetap = id.
     revisi: int = 0
+    # Id yang dikirim ke bursa (hash deterministik dari `id` penuh).
+    # `None` = usulan lama sebelum kolom ini ada: pakai `id` apa adanya.
+    client_order_id: str | None = None
+
+
+def client_order_id_for(pid: str) -> str:
+    """Id kirim <= 36 karakter: awalan terbaca + hash id PENUH.
+
+    Pemotongan lama (`raw[:36]`) membuat dua id usulan yang berbagi 36
+    karakter pertama menjadi SATU `client_order_id`; bursa lalu menganggap
+    order kedua duplikat. Hash id penuh memisahkannya, awalan tetap terbaca.
+    """
+    bersih = re.sub(r"[^0-9A-Za-z_-]", "-", str(pid))
+    awalan = bersih[:CLIENT_ID_PREFIX_MAX]
+    sisa = CLIENT_ID_MAX - len(awalan) - 1
+    return f"{awalan}-{hashlib.sha256(str(pid).encode('utf-8')).hexdigest()[:sisa]}"
 
 
 def new_proposal(action: rules.Action, *, rule: str, reserve_after: float,
@@ -70,14 +92,14 @@ def new_proposal(action: rules.Action, *, rule: str, reserve_after: float,
       (Task 4, **belum dibangun** — jangan mengandalkan id sebagai
       pengganti penyatuan itu).
 
-    Panjang aman untuk `client_order_id` (<=36 karakter dari
-    `[0-9A-Za-z_-]`): "sell" (4) + "_" + pair + "_" + mikrodetik (<=16
-    selama `now` < 1e10 detik, s/d tahun 2286) -> pasangan <=13 karakter
-    selalu muat (pasangan Indodax terpanjang hari ini 9). Diverifikasi
-    `test_id_sub_second_distinct_and_client_order_id_safe`.
+    `client_order_id` (<=36 karakter dari `[0-9A-Za-z_-]`) dihitung
+    `client_order_id_for(id)` — hash id PENUH, bukan potongan 36 karakter
+    pertama. Diverifikasi `test_id_sub_second_distinct_and_client_order_id_safe`
+    dan `test_client_order_id_hash_memisahkan_id_yang_dulu_terpotong_sama`.
     """
+    id_usulan = f"{action.kind.lower()}_{action.pair}_{int(now * 1_000_000)}"
     return Proposal(
-        id=f"{action.kind.lower()}_{action.pair}_{int(now * 1_000_000)}",
+        id=id_usulan,
         kind=action.kind,
         pair=action.pair,
         amount_idr=action.amount_idr,
@@ -93,6 +115,7 @@ def new_proposal(action: rules.Action, *, rule: str, reserve_after: float,
         basis=getattr(action, "basis", None),
         qty_target=getattr(action, "qty_target", None),
         sisa_qty=getattr(action, "sisa_qty", 0.0),
+        client_order_id=client_order_id_for(id_usulan),
     )
 
 

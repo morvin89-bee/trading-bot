@@ -2047,6 +2047,7 @@ def test_dca_konfirmasi_menghasilkan_satuan_order_end_to_end(tmp_path):
         "usulan DCA tidak terkirim; konfirmasi: "
         f"{[(p.rule, p.pair) for p in telegram.konfirmasi]}")
     id_usulan = dca[0].id
+    cid = dca[0].client_order_id
 
     # 2. Siklus berikutnya — mode hidup, transport perekam siap mencatat
     #    SETIAPA order. Harga sama persis supaya gerbang geser 0,5% tidak
@@ -2071,15 +2072,15 @@ def test_dca_konfirmasi_menghasilkan_satuan_order_end_to_end(tmp_path):
     assert payload["order_type"] == "limit"
     assert payload["type"] == "buy"
     assert payload["pair"] == dca[0].pair
-    # Gerbang verifikasi F7: client_order_id = id proposal yang dikirim.
-    assert payload["client_order_id"] == id_usulan
+    # Gerbang verifikasi F7: client_order_id = id kirim hash milik proposal.
+    assert payload["client_order_id"] == cid
 
     # Satu baris order_status dengan status final dan nama aturan DCA
     # (penulisan langkah 8 `engine.on_answer`; kolom & nilai dari skema
     # nyata di `engine._tulis_status_order`).
     baris_status = conn.execute(
         "SELECT status, rule FROM order_status WHERE client_order_id = ?",
-        (id_usulan,),
+        (cid,),
     ).fetchone()
     assert baris_status is not None, "tidak ada baris order_status tertulis"
     assert baris_status["status"] == "filled"

@@ -74,9 +74,13 @@ def _simulasikan(tmp_path, seed, monkeypatch):
     asli = executor.submit_once
 
     def catat(transport_, payload, cid):
-        usulan = main_loop._USULAN_MENUNGGU.get(cid)
+        usulan = next(
+            (p for p in main_loop._USULAN_MENUNGGU.values()
+             if executor.client_id(p) == cid), None)
         orders.append(dict(
-            id=cid, pair=payload["pair"], type=payload["type"],
+            id=(usulan.id if usulan is not None else cid),
+            client_order_id=cid,
+            pair=payload["pair"], type=payload["type"],
             amount=float(payload["amount"]), price=payload["price"],
             rule=(usulan.rule if usulan is not None else "?"),
             jam=jam_kini[0]))

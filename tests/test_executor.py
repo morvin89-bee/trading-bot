@@ -43,6 +43,15 @@ def test_client_order_id_is_stable_charset_and_length():
     assert len(cid) <= 36 and re.fullmatch(r"[0-9A-Za-z_-]+", cid)
 
 
+def test_client_order_id_tidak_memotong_dua_prefix_menjadi_sama():
+    """Prefix panjang dulu dipotong di 36 karakter: dua id berbeda menjadi
+    satu di bursa. Hash id penuh membuat keduanya tetap berbeda."""
+    a = executor.make_client_order_id("x" * 40, 1.0)
+    b = executor.make_client_order_id("x" * 40, 2.0)
+    assert a != b
+    assert len(a) <= 36 and len(b) <= 36
+
+
 def test_never_resends_after_lost_reply():
     # Review Focus #1
     t = _ExplodingTransport()

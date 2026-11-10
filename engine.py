@@ -570,7 +570,7 @@ def _tulis_status_order(conn: Any, p: proposal.Proposal, status: str, *,
             qty, price_ref, rule, status
         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
-        (p.id, ts, p.pair, p.kind, p.amount_idr,
+        (executor.client_id(p), ts, p.pair, p.kind, p.amount_idr,
          p.qty, p.price_ref, p.rule, status),
     )
     conn.commit()
@@ -601,7 +601,7 @@ def _sudah_dijawab(conn: Any, p: proposal.Proposal) -> bool:
     try:
         baris = conn.execute(
             "SELECT 1 FROM order_status WHERE client_order_id = ?",
-            (p.id,)).fetchone()
+            (executor.client_id(p),)).fetchone()
     except sqlite3.OperationalError:
         return False
     return baris is not None
@@ -748,7 +748,7 @@ def _beritahu_status(p: proposal.Proposal, status: str,
         sisi = {"BUY": "beli", "SELL": "jual"}.get(p.kind, p.kind)
         telegram.line(
             f"{p.pair} {sisi} {alerts._rp(p.amount_idr)} berhasil diisi, "
-            f"order_id: {p.id}")
+            f"order_id: {executor.client_id(p)}")
     elif status == "cancelled":
         telegram.line(
             f"{p.pair} order {p.id} dibatalkan bursa, tidak ada posisi berubah")
@@ -956,14 +956,15 @@ def on_answer(conn: Any, ctx: Context, *, p: proposal.Proposal, answer: str,
     #    adalah tanggung jawab query status (Task 7)", spec §6.1/L398
     #    "maks 3 kali bertanya, jeda [2, 5, 10]") TANPA PERNAH mengirim
     #    ulang dan TANPA mengarang status (prinsip ragu = tidak kirim).
-    payload = executor.payload_for(p, p.id)
+    cid = executor.client_id(p)
+    payload = executor.payload_for(p, cid)
     try:
-        executor.submit_once(transport, payload, p.id)
+        executor.submit_once(transport, payload, cid)
     except executor.SubmissionUncertain:
         telegram.line(
             f"Balasan pengiriman order {p.pair} hilang — tidak dikirim "
-            f"ulang; status ditanya ke bursa (id: {p.id}).")
-        status = executor.resolve_status(transport, p.id)
+            f"ulang; status ditanya ke bursa (id: {cid}).")
+        status = executor.resolve_status(transport, cid)
         if status == "unknown":
             # Ragu = jangan jual dobel: tranche dianggap selesai sampai status
             # final membuktikan sebaliknya (rejected/cancelled menghapusnya).
@@ -971,7 +972,7 @@ def on_answer(conn: Any, ctx: Context, *, p: proposal.Proposal, answer: str,
             telegram.line(
                 f"Status order {p.pair} masih belum pasti setelah tiga kali "
                 "ditanya — berhenti, tidak dikirim ulang. Periksa manual di "
-                f"bursa (id: {p.id}).")
+                f"bursa (id: {cid}).")
             return "halted"
         # Status final -> BARU di sini portfolio.db ditulis (spec §6.6),
         # satu baris, lalu catat ke log usulan dan beri tahu pengguna.
@@ -987,7 +988,7 @@ def on_answer(conn: Any, ctx: Context, *, p: proposal.Proposal, answer: str,
     # 8. Tanya status dengan id yang sama (maks tiga kali, backoff [2, 5,
     #    10] — di dalam `executor.resolve_status`). Masih "unknown" ->
     #    berhenti dan beri tahu; DB disentuh nol kali.
-    status = executor.resolve_status(transport, p.id)
+    status = executor.resolve_status(transport, cid)
     if status == "unknown":
         # Ragu = jangan jual dobel: tranche dianggap selesai sampai status
         # final membuktikan sebaliknya (rejected/cancelled menghapusnya).
@@ -995,7 +996,7 @@ def on_answer(conn: Any, ctx: Context, *, p: proposal.Proposal, answer: str,
         telegram.line(
             f"Status order {p.pair} tidak pasti setelah tiga kali ditanya "
             "— berhenti, tidak dikirim ulang. Periksa manual di bursa "
-            f"(id: {p.id}).")
+            f"(id: {cid}).")
         return "halted"
 
     # Status final dari bursa -> BARU di sini portfolio.db ditulis
