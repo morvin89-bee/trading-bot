@@ -25,20 +25,29 @@ langkah di sini.
 3. **Preflight bayangan.** `python -m preflight --target bayangan` → exit `0`
    dan `v1_enabled = 0`. Ini membuktikan DB, skema, **metadata pair**, dan jam
    bursa sehat SEBELUM kunci live dipasang.
-4. **Ganti kunci + nyalakan sakelar dalam satu operasi.** Hentikan proses bot,
-   pasang `INDODAX_KEY`/`INDODAX_SECRET` live (trade-only, tanpa tarik dana)
-   beserta `INDODAX_CAN_TRADE`/`INDODAX_CAN_WITHDRAW` di `.env`, lalu jalankan
-   langkah 5 **sebelum** proses dinyalakan. Setelah GO: nyalakan bot, lalu
+4. **Preflight live dengan kunci baca-saja (sebelum mengganti kunci).**
+   Bot masih mati, `canTrade=False`, sakelar `0`: `python -m preflight` →
+   `GO` (exit `0`). Langkah ini memverifikasi DB, skema, metadata, jam, dan
+   hari bayangan tanpa kunci trade terpasang. Bila gagal di sini, jangan
+   lanjut.
+5. **Ganti kunci + nyalakan sakelar dalam satu operasi, lalu preflight live
+   sekali lagi.** Pasang `INDODAX_KEY`/`INDODAX_SECRET` live (trade-only,
+   tanpa tarik dana) beserta `INDODAX_CAN_TRADE=1`/`INDODAX_CAN_WITHDRAW=0`
+   di `.env`, lalu nyalakan sakelar **selagi bot masih mati**:
    ```powershell
    python -c "import sqlite3,main_loop; c=sqlite3.connect('portfolio.db'); print(main_loop.aktifkan_live(c))"
    ```
-   harus mencetak `True`. Tidak boleh ada jendela "sakelar nyala, kunci belum
-   pasti": kunci dan sakelar berubah dalam satu urutan, dengan preflight live
-   di antaranya. (Kunci dibaca ulang dari `.env` tiap panggilan, tetapi restart
-   tetap wajib agar tidak ada keadaan proses lama yang tertinggal.)
-5. **Preflight live.** `python -m preflight` → `GO — semua pemeriksaan lolos`
-   (exit `0`). Exit `1`/`2` = jangan nyalakan sakelar. Periksa juga bahwa
-   `main_loop.load_state(c)` masih `v1_enabled: False` saat preflight berjalan.
+   harus mencetak `True`. Segera jalankan `python -m preflight` lagi: kini
+   `canTrade=True` dan `v1_enabled=1`, jadi hasilnya harus `GO`. Bila
+   `NO-GO`/`TAK TERBACA`: **batalkan** dengan
+   `set_shadow_day(c, 0)` + kembalikan kunci baca-saja, dan jangan nyalakan
+   bot. Baru setelah preflight kedua `GO`, nyalakan bot.
+   *Mengapa begini:* `permissions_ok` menuntut `canTrade` **sama dengan**
+   sakelar, jadi kunci trade dengan sakelar mati selalu NO-GO (lihat §1b).
+   Urutan lama (kunci dulu → preflight → sakelar) mustahil GO. Jendela
+   "sakelar nyala, bot mati" aman karena tidak ada proses yang bisa
+   mengirim order; yang harus dihindari adalah bot hidup dengan kunci dan
+   sakelar tidak sejalan.
 6. **Order live pertama minimal.** Biarkan bot mengusulkan DCA apa adanya;
    jangan menaikkan nominal atau memotong gerbang. Setujui **satu** usulan
    pair dengan nominal terkecil yang lolos gerbang, bukan semuanya sekaligus,
@@ -54,6 +63,9 @@ langkah di sini.
       python -c "import sqlite3,main_loop; c=sqlite3.connect('portfolio.db'); main_loop.set_shadow_day(c, 0); print(main_loop.load_state(c))"
       ```
       → `v1_enabled: False`.
+   b2. Kembalikan `.env` ke kunci baca-saja (`INDODAX_CAN_TRADE=0`) supaya
+       bot yang (tidak sengaja) dihidupkan lagi tidak memegang kunci trade
+       dengan sakelar mati — keadaan itu halt, bukan order.
    c. Tutup usulan yang masih menunggu (tombolnya jadi inert, bukan order):
       ```powershell
       python -c "import sqlite3,time,shadow_log,rules; c=sqlite3.connect('portfolio.db'); shadow_log.void_pending(c, rules.RULE_DCA, time.time(), 'batal manual')"
@@ -123,6 +135,57 @@ python -m preflight --target bayangan
 - [ ] Keluaran preflight hanya memuat hasil pemeriksaan; tidak pernah nilai
       kunci API atau isi `.env`.
 
+## 1b. Matriks izin × sakelar (hasil yang diharapkan)
+
+`permissions_ok` (dipakai `main_loop` dan `engine` sebelum order) dan
+preflight menilai izin dengan aturan yang **sama**. Tabel ini adalah
+kontraknya; tes `test_permissions_ok_matriks_izin_dan_sakelar` dan
+`test_preflight_matriks_izin_dan_sakelar` menguji 36 kombinasi yang sama.
+
+Bacaan kolom:
+
+- **runtime** = `permissions_ok`; `HALT` berarti bot berhenti dan tidak ada
+  order. Runtime tidak punya keadaan "tak terbaca": ragu = HALT.
+- **live/bayangan** = hasil preflight pada target itu (dengan
+  `shadow_day >= 7`; lantai hari bayangan diuji terpisah).
+- `GAGAL` → exit `1`; `TAK TERBACA` → exit `2`; bila ada `GAGAL`, exit `1`
+  menang.
+
+| canTrade | canWithdraw | v1_enabled | runtime | preflight live | preflight bayangan |
+|---|---|---|---|---|---|
+| True | True | 0 | HALT | GAGAL | GAGAL |
+| True | False | 0 | HALT | GAGAL | GAGAL |
+| True | None | 0 | HALT | TAK TERBACA | TAK TERBACA |
+| False | True | 0 | HALT | GAGAL | GAGAL |
+| False | False | 0 | **OK** | **GO** | **GO** |
+| False | None | 0 | HALT | TAK TERBACA | TAK TERBACA |
+| None | True | 0 | HALT | TAK TERBACA | TAK TERBACA |
+| None | False | 0 | HALT | TAK TERBACA | TAK TERBACA |
+| None | None | 0 | HALT | TAK TERBACA | TAK TERBACA |
+| True | True | 1 | HALT | GAGAL | GAGAL |
+| True | False | 1 | **OK** | **GO** | GAGAL (mode) |
+| True | None | 1 | HALT | TAK TERBACA | TAK TERBACA + GAGAL (mode) |
+| False | True | 1 | HALT | GAGAL | GAGAL |
+| False | False | 1 | HALT | GAGAL | GAGAL |
+| False | None | 1 | HALT | TAK TERBACA | TAK TERBACA + GAGAL (mode) |
+| None | True | 1 | HALT | TAK TERBACA | TAK TERBACA + GAGAL (mode) |
+| None | False | 1 | HALT | TAK TERBACA | TAK TERBACA + GAGAL (mode) |
+| None | None | 1 | HALT | TAK TERBACA | TAK TERBACA + GAGAL (mode) |
+
+Hanya **dua** keadaan yang GO untuk target live: `canTrade=False` +
+sakelar `0` (siap bayangan) dan `canTrade=True` + sakelar `1` (siap live).
+`canWithdraw=True` tidak pernah GO.
+
+**Temuan urutan (butir 2).** Keadaan "kunci trade terpasang, sakelar masih
+0" (baris 2 dan 3 tabel) selalu GAGAL di preflight live. Jadi urutan lama
+"pasang kunci trade → preflight live → nyalakan sakelar" **mustahil GO**;
+yang benar adalah preflight live dengan kunci baca-saja, lalu kunci trade +
+`aktifkan_live` bersamaan, lalu preflight live sekali lagi (§0 langkah 4–5).
+Tidak ada kode produksi yang diubah untuk ini: `permissions_ok` sengaja
+menuntut kunci dan sakelar sejalan, dan melonggarkannya berarti membuka
+jendela "kunci trade aktif saat sakelar mati".
+
+
 ## 2. Bukti shadow NYATA (bukan hanya tes)
 
 Tes membuktikan logika; hanya jalan sungguhan yang membuktikan akun, kunci,
@@ -162,8 +225,11 @@ sendiri harus sudah dibatasi.
       (lakukan di luar bot, sekali, nominal kecil — bukan lewat kode bot).
 - [ ] `canWithdraw` terbaca `False` oleh `indodax_api`; bila `None`
       (tidak terbaca), bot berhenti — itu perilaku yang benar, bukan bug.
-- [ ] Kunci yang dipakai mode bayangan dan mode live adalah kunci yang sama
-      dengan izin yang sama; tidak ada kunci "sementara" berizin lebih.
+- [ ] Kunci yang dipakai mode bayangan **baca-saja** (`canTrade=False`) dan
+      kunci mode live **trade-only**; tidak pernah ada kunci berizin lebih
+      dari yang dibutuhkan mode itu. `permissions_ok` menuntut `canTrade`
+      sama dengan sakelar, jadi kunci trade saat sakelar mati (dan
+      sebaliknya) = halt.
 
 ## 4. Lingkungan
 

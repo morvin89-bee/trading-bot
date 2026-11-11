@@ -1,7 +1,13 @@
 __pycache__/
 *.pyc
 .env
+.env.*
+!.env.example
 *.db
+*.db-wal
+*.db-shm
+*.db-journal
+*.backup*
 deskflow.log*
 *.log
 *.log.*
