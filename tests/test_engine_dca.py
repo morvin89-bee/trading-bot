@@ -13,6 +13,7 @@ kelupaan dengan `JaringanDibuka`). Angka fixture diverifikasi terhadap
 `rules.take_profit_actions` yang asli — bukan angka karangan.
 """
 import engine
+import pair_meta
 import proposal
 import rules
 import safeguards
@@ -252,3 +253,49 @@ def test_konteks_lama_tanpa_field_dca_tetap_terbaca_mati():
     nyala = engine.collect_actions(ctx)
     assert rules.RULE_DCA in {engine.rule_name(a) for a in nyala}, (
         "kontrol: data cukup untuk DCA bila atribut sakelar ada")
+
+
+def _meta(pair, *, min_base):
+    return pair_meta.Meta(pair=pair, quantity_increment="1e-08",
+                          min_base_idr=min_base, min_traded=0.0,
+                          fee_pct=0.002, fetched_ts=0.0)
+
+
+def _tick_dca(tmp_path, monkeypatch, *, min_base):
+    conn = sqlite3.connect(str(tmp_path / "tranche.db"))
+    monkeypatch.setattr(
+        pair_meta, "get",
+        lambda conn, pair, *, now, max_age_s=pair_meta.MAX_AGE_S:
+        _meta(pair, min_base=min_base))
+    ctx = _ctx([], free_idr=600_000.0, reserve_idr=0.0, dca_enabled=True)
+    sent = []
+    props = engine.tick(conn, ctx, now=0.0, telegram=_tg(sent), shadow=True,
+                        verdict=lambda pair, **k: (True, 1.0))
+    return props, sent
+
+
+def test_tranche_dca_di_bawah_dua_kali_minimum_hanya_peringatan(
+        tmp_path, monkeypatch):
+    """Tranche terkecil < 2x minimum bursa = PERINGATAN, bukan halt.
+
+    Tranche DCA fixture: btc Rp 275.000, eth Rp 138.000, sol Rp 55.000.
+    Minimum Rp 30.000 membuat sol (55.000) masih lolos minimum tetapi di
+    bawah 2x minimum (60.000) — satu-satunya pair yang diperingatkan.
+    """
+    props, sent = _tick_dca(tmp_path, monkeypatch, min_base=30_000.0)
+
+    assert {p.pair for p in props} == {"btc_idr", "eth_idr", "sol_idr"}, (
+        f"peringatan tidak boleh membatalkan usulan: {[p.pair for p in props]}")
+    peringatan = [s for s in sent if "Peringatan" in s]
+    assert len(peringatan) == 1, sent
+    assert "sol_idr" in peringatan[0]
+    assert "2×" in peringatan[0]
+    assert "dihentikan" not in peringatan[0].lower()
+
+
+def test_tranche_dca_cukup_dua_kali_minimum_tanpa_peringatan(
+        tmp_path, monkeypatch):
+    props, sent = _tick_dca(tmp_path, monkeypatch, min_base=10_000.0)
+
+    assert {p.pair for p in props} == {"btc_idr", "eth_idr", "sol_idr"}
+    assert not [s for s in sent if "Peringatan" in s], sent

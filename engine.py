@@ -29,6 +29,12 @@ from decimal import Decimal
 
 RULE_TAKE_PROFIT = "take_profit"
 
+# Tranche DCA di bawah sekian kali minimum bursa hanya DIPERINGATKAN, bukan
+# ditolak: ukuran setoran milik pengguna, dan minimum bursa bisa bergeser
+# (minimum koin dihitung bursa dari harga). Dua kali memberi ruang satu
+# langkah harga sebelum qty terbulat jatuh di bawah minimum.
+PERINGATAN_TRANCHE_X = 2
+
 # Pesan penolakan yang sudah dikirim pada satu hari lokal. Penolakan yang
 # menetap (spread lebar, pagu harian, harga hilang) terulang tiap tick;
 # tanpa dedupe pengguna menerima kalimat yang sama ~288 kali sehari dan
@@ -430,6 +436,24 @@ def tick(
                 f"bursa ({alerts._rp(meta.min_base_idr)} / "
                 f"{rules.qty_teks_tetap(meta.min_traded)} koin).")
             continue
+
+        # 3c. Peringatan (BUKAN halt): tranche DCA yang hanya ~1x minimum
+        #     mudah jatuh di bawah minimum setelah qty dibulatkan ke bawah
+        #     atau harga bergerak. Order tetap diusulkan — ukuran setoran
+        #     milik pengguna, bukan keputusan bot.
+        batas = Decimal(str(meta.min_base_idr)) * PERINGATAN_TRANCHE_X
+        batas_koin = Decimal(str(meta.min_traded)) * PERINGATAN_TRANCHE_X
+        if (rule == rules.RULE_DCA
+                and (amount_bulat < batas or qty_bulat < batas_koin)):
+            _kirim_sekali(
+                telegram, hari, pair, action.kind, "tranche_kecil",
+                f"Peringatan: tranche DCA {pair} "
+                f"{alerts._rp(float(amount_bulat))} di bawah "
+                f"{PERINGATAN_TRANCHE_X}× minimum bursa "
+                f"({alerts._rp(meta.min_base_idr)} / "
+                f"{rules.qty_teks_tetap(meta.min_traded)} koin). Order tetap "
+                "diusulkan; bila harga bergerak, qty bisa dibulatkan ke "
+                "bawah minimum dan ditolak bursa.")
 
         action = replace(
             action, qty=float(qty_bulat), amount_idr=float(amount_bulat))
