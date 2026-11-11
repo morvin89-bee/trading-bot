@@ -9,6 +9,65 @@ Tanggal: 2026-11-08 · Branch: `fix/review-p1`
 
 ---
 
+## 0. Urutan go-live — jalankan berurutan, jangan lompat
+
+Delapan langkah ini adalah **urutannya**. Bagian 1–5 di bawah adalah rincian
+dan bukti, bukan urutan; jangan mengerjakannya lebih dulu lalu melewati
+langkah di sini.
+
+1. **Cadangkan basis data.** Hentikan bot (atau pastikan tidak sedang menulis),
+   lalu salin `portfolio.db` ke nama bertanggal
+   (`portfolio.db.backup<ddmmyyyy>`). Jangan menimpa salinan lama. Bukti:
+   `git status` tidak memuat `portfolio.db`.
+2. **Cek WIB.** `python -c "import time; print(time.strftime('%z %Z'))"`
+   harus `+0700`. Preflight juga memeriksa offset `+07:00`. Zona salah =
+   NO-GO: DND 23.00–07.00 dan batas 21.00 bergeser.
+3. **Preflight bayangan.** `python -m preflight --target bayangan` → exit `0`
+   dan `v1_enabled = 0`. Ini membuktikan DB, skema, **metadata pair**, dan jam
+   bursa sehat SEBELUM kunci live dipasang.
+4. **Ganti kunci + nyalakan sakelar dalam satu operasi.** Hentikan proses bot,
+   pasang `INDODAX_KEY`/`INDODAX_SECRET` live (trade-only, tanpa tarik dana)
+   beserta `INDODAX_CAN_TRADE`/`INDODAX_CAN_WITHDRAW` di `.env`, lalu jalankan
+   langkah 5 **sebelum** proses dinyalakan. Setelah GO: nyalakan bot, lalu
+   ```powershell
+   python -c "import sqlite3,main_loop; c=sqlite3.connect('portfolio.db'); print(main_loop.aktifkan_live(c))"
+   ```
+   harus mencetak `True`. Tidak boleh ada jendela "sakelar nyala, kunci belum
+   pasti": kunci dan sakelar berubah dalam satu urutan, dengan preflight live
+   di antaranya. (Kunci dibaca ulang dari `.env` tiap panggilan, tetapi restart
+   tetap wajib agar tidak ada keadaan proses lama yang tertinggal.)
+5. **Preflight live.** `python -m preflight` → `GO — semua pemeriksaan lolos`
+   (exit `0`). Exit `1`/`2` = jangan nyalakan sakelar. Periksa juga bahwa
+   `main_loop.load_state(c)` masih `v1_enabled: False` saat preflight berjalan.
+6. **Order live pertama minimal.** Biarkan bot mengusulkan DCA apa adanya;
+   jangan menaikkan nominal atau memotong gerbang. Setujui **satu** usulan
+   pair dengan nominal terkecil yang lolos gerbang, bukan semuanya sekaligus,
+   lalu tunggu status `filled`.
+7. **Pemeriksaan manual (jam pertama).** `client_order_id` di bursa sama
+   dengan id usulan; tombol Setuju kedua diabaikan ("sudah dijawab"); saldo
+   dan posisi cocok dengan riwayat bursa; `shadow_log` berisi `executed`;
+   tidak ada pesan halt yang tak dijelaskan.
+8. **Cara membatalkan (kapan pun, urutan ini).**
+   a. Matikan proses bot **dan** auto-revive-nya supaya tidak ada denyut baru.
+   b. Paksa sakelar mati:
+      ```powershell
+      python -c "import sqlite3,main_loop; c=sqlite3.connect('portfolio.db'); main_loop.set_shadow_day(c, 0); print(main_loop.load_state(c))"
+      ```
+      → `v1_enabled: False`.
+   c. Tutup usulan yang masih menunggu (tombolnya jadi inert, bukan order):
+      ```powershell
+      python -c "import sqlite3,time,shadow_log,rules; c=sqlite3.connect('portfolio.db'); shadow_log.void_pending(c, rules.RULE_DCA, time.time(), 'batal manual')"
+      ```
+   d. Tutup jendela DCA bulan berjalan dengan `dca_window.mark_batal(conn, ts)`
+      (sama dengan tombol Batal) agar tidak ada pengingat/penutupan otomatis.
+   e. Periksa bursa lewat web/app untuk order yang mungkin sudah terkirim. Bot
+      tidak punya jalur "batalkan order bursa"; order terbuka dibatalkan manual
+      di bursa.
+   f. Baru setelah itu selidiki penyebabnya. Jangan menyalakan ulang sebelum
+      preflight exit `0` dan sakelar tetap `False` sampai Anda siap.
+
+---
+
 ## 1. Bukti otomatis (wajib, ulangi tepat sebelum go-live)
 
 - [ ] `python -m pytest -q` → seluruh suite lulus, nol `skipped` yang
@@ -50,12 +109,14 @@ python -m preflight --target bayangan
       1. offset zona mesin `+07:00` (WIB) — sama dengan penjaga `main()`;
       2. `portfolio.db` terbuka `mode=ro` dan migrasi skema sudah lengkap
          (`bot_state`, `proposals`, `trades`, beserta kolom barunya);
-      3. izin kunci dari `.env` lolos `safeguards.permissions_ok`
+      3. metadata pair (`pair_meta`) untuk semua koin yang dilacak masih segar
+         — hilang/basi = NO-GO karena engine pasti halt;
+      4. izin kunci dari `.env` lolos `safeguards.permissions_ok`
          (`canWithdraw` harus `False`, `canTrade` cocok dengan sakelar);
-      4. selisih jam mesin vs jam bursa ≤ 5 detik;
-      5. status mode bayangan: `shadow_day >= 7` (kecuali sakelar sudah
+      5. selisih jam mesin vs jam bursa ≤ 5 detik;
+      6. status mode bayangan: `shadow_day >= 7` (kecuali sakelar sudah
          nyala, atau target `bayangan`);
-      6. jendela DCA bulan berjalan (tanpa menandai `missed`).
+      7. jendela DCA bulan berjalan (tanpa menandai `missed`).
 - [ ] `python -m preflight` **tidak** membuat/mengubah `portfolio.db` dan
       tidak mengirim order. Bukti: `git status` tetap bersih dan baris
       `bot_state` tidak berubah setelah dijalankan.
@@ -122,8 +183,8 @@ sendiri harus sudah dibatasi.
       Telegram.
 - [ ] `client_order_id` di bursa sama dengan id usulan (idempotensi).
 - [ ] Tombol Setuju kedua pada usulan yang sama diabaikan ("sudah dijawab").
-- [ ] Bila ada yang tidak sesuai: matikan dengan
-      `set_shadow_day(conn, 0)` (memaksa `v1_enabled = 0`), jangan menunggu.
+- [ ] Bila ada yang tidak sesuai: ikuti **§0 langkah 8** (matikan proses,
+      `set_shadow_day(conn, 0)`, tutup usulan), jangan menunggu.
 
 ---
 
