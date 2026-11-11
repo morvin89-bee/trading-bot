@@ -61,6 +61,41 @@ def test_get_menolak_metadata_hilang_basi_atau_dari_masa_depan(tmp_path):
     assert pair_meta._get(conn, "btc_idr", now=dasar - 1) is None
 
 
+def test_refresh_gagal_dibatasi_waktu_bukan_tiap_tick(tmp_path):
+    """Percobaan gagal juga memakai cap waktu: denyut 5 menit tidak boleh
+    membanjiri bursa dengan percobaan setiap tick."""
+    conn = _conn(tmp_path)
+    panggilan = []
+
+    def gagal():
+        panggilan.append(1)
+        raise RuntimeError("jaringan putus")
+
+    dasar = 1_760_000_000.0
+    with pytest.raises(RuntimeError):
+        pair_meta._refresh(conn, now=dasar, fetch=gagal)
+
+    # Dalam RETRY_S: tidak ada percobaan baru (dan tidak melempar).
+    assert pair_meta._refresh(conn, now=dasar + 60, fetch=gagal) == 0
+    assert len(panggilan) == 1
+
+    # Setelah RETRY_S: boleh mencoba lagi.
+    with pytest.raises(RuntimeError):
+        pair_meta._refresh(
+            conn, now=dasar + pair_meta.RETRY_S + 1, fetch=gagal)
+    assert len(panggilan) == 2
+
+
+def test_umur_tertua_none_saat_kosong_dan_mengikuti_baris_tertua(tmp_path):
+    conn = _conn(tmp_path)
+    assert pair_meta.umur_tertua(conn, now=0.0) is None
+
+    dasar = 1_760_000_000.0
+    pair_meta._refresh(conn, now=dasar, fetch=lambda: ROWS)
+    assert pair_meta.umur_tertua(
+        conn, now=dasar + 10) == pytest.approx(10.0)
+
+
 def test_qty_dibulatkan_ke_bawah_tidak_pernah_ke_atas():
     assert rules.bulatkan_qty_bawah(1.23456789, "1e-08") == Decimal(
         "1.23456789")

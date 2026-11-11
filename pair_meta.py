@@ -9,15 +9,18 @@ Arti field mengikuti dokumentasi resmi Indodax (`Public-RestAPI.md`):
 - `trade_fee_percent`   : fee taker dalam PERSEN (0,2 = 0,2%).
 
 Metadata disimpan di SQLite dengan cap waktu dan disegarkan paling banyak
-sekali sehari. `get` TIDAK menulis dan TIDAK menebak: metadata hilang/basi
-mengembalikan `None`, dan pemanggil (engine) wajib berhenti — bukan memakai
-angka lama atau membulatkan tanpa batas bursa.
+sekali sehari. Percobaan yang GAGAL juga dibatasi `RETRY_S`: denyut bot
+lima menit tidak boleh berarti percobaan jaringan tiap lima menit. `get`
+TIDAK menulis dan TIDAK menebak: metadata hilang/basi mengembalikan `None`,
+dan pemanggil (engine) wajib berhenti — bukan memakai angka lama atau
+membulatkan tanpa batas bursa.
 """
 import sqlite3
 from dataclasses import dataclass
 
 PAIRS_URL = "https://indodax.com/api/pairs"
 MAX_AGE_S = 86400            # metadata lebih tua dari ini = basi -> halt
+RETRY_S = 900                # percobaan gagal berikutnya paling cepat 15 menit
 
 
 @dataclass(frozen=True)
@@ -45,6 +48,35 @@ def _ensure_table(conn):
         )
         """
     )
+
+
+def _ensure_state(conn):
+    """Tabel satu baris untuk cap waktu percobaan terakhir (sukses/gagal)."""
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS pair_meta_state (
+            id INTEGER PRIMARY KEY CHECK (id = 1),
+            last_attempt_ts REAL NOT NULL
+        )
+        """
+    )
+
+
+def _percobaan_terakhir(conn):
+    try:
+        row = conn.execute(
+            "SELECT last_attempt_ts FROM pair_meta_state WHERE id = 1"
+        ).fetchone()
+    except sqlite3.OperationalError:
+        return None
+    return None if row is None else float(row[0])
+
+
+def _catat_percobaan(conn, now):
+    conn.execute(
+        "INSERT OR REPLACE INTO pair_meta_state (id, last_attempt_ts) "
+        "VALUES (1, ?)", (float(now),))
+    conn.commit()
 
 
 def _parse(rows, now):
@@ -78,13 +110,21 @@ def _ambil():
 def _refresh(conn, *, now, fetch=None):
     """Segarkan cache bila sudah basi; kembalikan jumlah pair yang ditulis.
 
-    Idempoten: pemanggilan berikutnya dalam 24 jam tidak membuka jaringan.
+    Idempoten: metadata yang masih segar tidak membuka jaringan. Percobaan
+    GAGAL juga dicap waktunya SEBELUM jaringan, jadi kegagalan beruntun
+    dibatasi `RETRY_S` dan tidak mengikuti denyut bot.
     """
     _ensure_table(conn)
+    _ensure_state(conn)
     baris = conn.execute("SELECT MAX(fetched_ts) FROM pair_meta").fetchone()
     terakhir = baris[0] if baris else None
     if terakhir is not None and 0 <= float(now) - float(terakhir) < MAX_AGE_S:
         return 0
+    percobaan = _percobaan_terakhir(conn)
+    if (percobaan is not None
+            and 0 <= float(now) - percobaan < RETRY_S):
+        return 0
+    _catat_percobaan(conn, now)
     data = _parse((fetch or _ambil)(), now)
     if not data:
         raise ValueError(
@@ -129,3 +169,18 @@ def _get(conn, pair, *, now, max_age_s=MAX_AGE_S):
 def get(conn, pair, *, now, max_age_s=MAX_AGE_S):
     """Pembungkus `_get` (tes menyuntikkan metadata lewat nama ini)."""
     return _get(conn, pair, now=now, max_age_s=max_age_s)
+
+
+def umur_tertua(conn, *, now):
+    """Umur baris metadata TERTUA dalam detik; `None` bila belum ada.
+
+    Dipakai pemanggil untuk memberi tahu pengguna HANYA ketika metadata
+    benar-benar basi, bukan setiap kali percobaan penyegaran gagal.
+    """
+    try:
+        row = conn.execute("SELECT MIN(fetched_ts) FROM pair_meta").fetchone()
+    except sqlite3.OperationalError:
+        return None
+    if row is None or row[0] is None:
+        return None
+    return float(now) - float(row[0])

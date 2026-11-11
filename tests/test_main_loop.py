@@ -25,6 +25,7 @@ import pytest
 import dca_window
 import engine
 import main_loop
+import pair_meta
 import proposal
 import rules
 import shadow_log
@@ -267,6 +268,54 @@ def _bersihkan_state():
 # --------------------------------------------------------------------------
 # should_run_habitual — DND satu sumber kebenaran (R-4)
 # --------------------------------------------------------------------------
+
+def test_refresh_metadata_gagal_dicatat_dan_diberitahu_sekali_sehari(
+        tmp_path, monkeypatch, caplog):
+    """Kegagalan refresh tidak boleh hilang diam-diam; pesan basi 1x/hari."""
+    conn = _fresh_db(tmp_path)
+    now = _ts(day=1, hour=9, minute=5)
+
+    def rusak(conn, *, now, fetch=None):
+        raise RuntimeError("jaringan putus")
+
+    monkeypatch.setattr(pair_meta, "refresh", rusak)
+    monkeypatch.setattr(pair_meta, "umur_tertua",
+                        lambda conn, *, now: None)
+    telegram = _TelegramPerekam()
+
+    _satu_siklus(conn, telegram=telegram, now=now, ctx=_ctx_kosong())
+    basi = [s for s in telegram.lines if "metadata" in s.lower()]
+    assert len(basi) == 1, telegram.lines
+    assert "basi" in basi[0].lower()
+
+    # Tick berikutnya hari yang sama: tidak diulang.
+    _satu_siklus(conn, telegram=telegram, now=now + 300,
+                 ctx=_ctx_kosong())
+    assert len([s for s in telegram.lines
+                if "metadata" in s.lower()]) == 1, telegram.lines
+    assert any("metadata" in r.message.lower() for r in caplog.records), (
+        [r.message for r in caplog.records])
+
+
+def test_refresh_metadata_gagal_tanpa_basi_tidak_mengganggu(tmp_path,
+                                                            monkeypatch):
+    """Cache masih segar: kegagalan percobaan ulang dicatat, tanpa alarm."""
+    conn = _fresh_db(tmp_path)
+    now = _ts(day=1, hour=9, minute=5)
+
+    def rusak(conn, *, now, fetch=None):
+        raise RuntimeError("jaringan putus")
+
+    monkeypatch.setattr(pair_meta, "refresh", rusak)
+    monkeypatch.setattr(pair_meta, "umur_tertua",
+                        lambda conn, *, now: 60.0)
+    telegram = _TelegramPerekam()
+
+    _satu_siklus(conn, telegram=telegram, now=now, ctx=_ctx_kosong())
+
+    assert not any("metadata" in s.lower() for s in telegram.lines), (
+        telegram.lines)
+
 
 def test_habitual_skips_dnd_hours():
     assert main_loop.should_run_habitual(_ts(hour=3)) is False

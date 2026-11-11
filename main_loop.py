@@ -163,6 +163,8 @@ _SUDAH_DIBERITAHU_DCA_GAGAL = set()
 # (bulan, pair) yang sudah diberi tahu bahwa percobaan kirimnya habis
 # sementara jendela DCA masih terbuka.
 _SUDAH_DIBERITAHU_RETRY_HABIS = set()
+# Tanggal lokal yang sudah diberi tahu bahwa metadata pair basi/hilang.
+_SUDAH_DIBERITAHU_METADATA = set()
 
 
 def reset_state():
@@ -172,6 +174,7 @@ def reset_state():
     _OFFSET_TELEGRAM["offset"] = 0
     _SUDAH_DIBERITAHU_DCA_GAGAL.clear()
     _SUDAH_DIBERITAHU_RETRY_HABIS.clear()
+    _SUDAH_DIBERITAHU_METADATA.clear()
     engine.reset_state()
 
 
@@ -914,12 +917,23 @@ def tick_cycle(
     #    siklus ini. Usulan ulang memakai aksi dan `now` yang sama persis
     #    dengan tick ini, jadi `proposal.new_proposal` akan menghasilkan id
     #    kembar dan `shadow_log` menimpanya (atau gagal IntegrityError).
-    #    Metadata pair disegarkan maksimal sekali sehari; kegagalan jaringan
-    #    dibiarkan -> `engine.tick` halt karena metadata basi (fail closed).
+    #    Metadata pair disegarkan maksimal sekali sehari; percobaan gagal
+    #    dibatasi `pair_meta.RETRY_S`. Kegagalan tidak boleh hilang diam-diam:
+    #    dicatat (rahasia disamarkan) dan pengguna diberi tahu SEKALI per hari
+    #    hanya bila cache benar-benar basi — engine lalu halt (fail closed).
     try:
         pair_meta.refresh(conn, now=now)
-    except Exception:
-        pass
+    except Exception as e:
+        _catat_denyut_dilewatkan(f"metadata pair gagal disegarkan: {e}")
+        umur = pair_meta.umur_tertua(conn, now=now)
+        hari_ini = time.strftime("%Y-%m-%d", time.localtime(now))
+        if ((umur is None or umur > pair_meta.MAX_AGE_S)
+                and hari_ini not in _SUDAH_DIBERITAHU_METADATA):
+            _SUDAH_DIBERITAHU_METADATA.add(hari_ini)
+            telegram.line(
+                "Metadata pair (presisi qty / minimum bursa) basi atau "
+                "belum tersedia — order baru ditahan sampai penyegaran "
+                "berhasil. Periksa koneksi ke indodax.com.")
     try:
         usulan = [] if diulang else engine.tick(
             conn, ctx, now=now, telegram=telegram, shadow=shadow,

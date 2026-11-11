@@ -4,11 +4,13 @@ Pemeriksaan yang menentukan GO/NO-GO, semuanya TANPA menulis apa pun:
 
 1. offset zona mesin harus +07:00 (WIB) — sama dengan penjaga di `main()`;
 2. basis data bisa dibuka `mode=ro` dan skemanya sudah dimigrasikan;
-3. izin kunci API dari `.env` (`canWithdraw` harus False, `canTrade` cocok
+3. metadata pair (`pair_meta`) untuk semua koin yang dilacak masih segar —
+   engine membulatkan qty dari metadata ini dan halt bila hilang/basi;
+4. izin kunci API dari `.env` (`canWithdraw` harus False, `canTrade` cocok
    dengan sakelar) — dinilai `safeguards.permissions_ok`;
-4. selisih jam mesin dengan jam bursa masih di bawah toleransi;
-5. status mode bayangan (hari ke-N) terhadap lantai `GO_LIVE_SHADOW_DAYS`;
-6. jendela DCA bulan berjalan.
+5. selisih jam mesin dengan jam bursa masih di bawah toleransi;
+6. status mode bayangan (hari ke-N) terhadap lantai `GO_LIVE_SHADOW_DAYS`;
+7. jendela DCA bulan berjalan.
 
 `--target live` (default) menuntut lantai hari bayangan. `--target bayangan`
 memeriksa "boleh mulai mode bayangan?": lantai hari TIDAK dipersyaratkan,
@@ -36,6 +38,8 @@ import time
 import dca_window
 import indodax_transport
 import main_loop
+import pair_meta
+import portfolio
 import portfolio_store
 import safeguards
 
@@ -93,6 +97,22 @@ def _periksa_db(conn):
         else:
             hasil.append((True, f"migrasi {nama}", "semua kolom ada"))
     return hasil
+
+
+def _periksa_meta(conn, now):
+    """Metadata pair semua koin yang dilacak masih segar (read-only).
+
+    Engine membulatkan qty dari metadata ini; hilang/basi berarti order
+    dihalt. Preflight harus menolak GO pada keadaan yang pasti halt itu.
+    """
+    pairs = sorted(portfolio.COIN_PAIRS.values())
+    basi = [pair for pair in pairs
+            if pair_meta._get(conn, pair, now=now) is None]
+    if basi:
+        return (False, "metadata pair",
+                f"basi/hilang: {', '.join(basi)} "
+                f"(batas {pair_meta.MAX_AGE_S:.0f} detik)")
+    return (True, "metadata pair", "segar untuk: " + ", ".join(pairs))
 
 
 def _baca_state(conn):
@@ -183,6 +203,7 @@ def periksa(*, db_path=None, sekarang=None, baca_izin=None,
         conn = _buka_ro(db_path)
         hasil.append((True, "db", f"terbuka read-only: {db_path}"))
         hasil.extend(_periksa_db(conn))
+        hasil.append(_periksa_meta(conn, now))
         state = _baca_state(conn)
     except sqlite3.Error as e:
         hasil.append((None, "db", f"tidak bisa dibuka read-only: {e}"))

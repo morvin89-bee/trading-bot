@@ -2,6 +2,8 @@
 import sqlite3
 
 import dca_window
+import pair_meta
+import portfolio
 import portfolio_store
 import preflight
 import shadow_log
@@ -15,13 +17,21 @@ def _now(day=1, hour=9):
         (kini.tm_year, kini.tm_mon, day, hour, 0, 0, 0, 0, -1)))
 
 
-def _db(tmp_path, *, shadow_day=7, v1=0, dca_status=None, dca_ts=None):
+def _db(tmp_path, *, now, shadow_day=7, v1=0, dca_status=None, dca_ts=None,
+        meta_ts=None):
     """Basis data lengkap seperti setelah bot berjalan sekali (bukan migrasi)."""
     path = tmp_path / "portfolio.db"
     conn = portfolio_store.connect(str(path))
     portfolio_store.init_db(conn)
     dca_window.ensure_bot_state(conn)
     shadow_log._ensure_table(conn)
+    pair_meta._ensure_table(conn)
+    ts = now if meta_ts is None else meta_ts
+    for pair in portfolio.COIN_PAIRS.values():
+        conn.execute(
+            "INSERT OR REPLACE INTO pair_meta (pair, quantity_increment, "
+            "min_base_idr, min_traded, fee_pct, fetched_ts) "
+            "VALUES (?, '1e-08', 10000.0, 0.0, 0.002, ?)", (pair, ts))
     conn.execute(
         "UPDATE bot_state SET shadow_day = ?, v1_enabled = ? WHERE id = 1",
         (shadow_day, v1))
@@ -52,7 +62,7 @@ def _tidak_terbaca(hasil):
 
 def test_semua_lolos_berarti_go(tmp_path, monkeypatch):
     now = _now()
-    path, conn = _db(tmp_path)
+    path, conn = _db(tmp_path, now=now)
     conn.close()
 
     hasil = _periksa(path, monkeypatch, now)
@@ -65,7 +75,7 @@ def test_semua_lolos_berarti_go(tmp_path, monkeypatch):
 
 def test_offset_zona_bukan_wib_no_go(tmp_path, monkeypatch):
     now = _now()
-    path, conn = _db(tmp_path)
+    path, conn = _db(tmp_path, now=now)
     conn.close()
     monkeypatch.setattr(preflight.main_loop, "_offset_zona_lokal",
                         lambda _n: 0)
@@ -79,7 +89,7 @@ def test_offset_zona_bukan_wib_no_go(tmp_path, monkeypatch):
 
 def test_can_withdraw_aktif_no_go(tmp_path, monkeypatch):
     now = _now()
-    path, conn = _db(tmp_path)
+    path, conn = _db(tmp_path, now=now)
     conn.close()
 
     hasil = _periksa(path, monkeypatch, now, baca_izin=lambda: (False, True))
@@ -91,7 +101,7 @@ def test_can_withdraw_aktif_no_go(tmp_path, monkeypatch):
 
 def test_izin_tidak_terbaca_exit_2(tmp_path, monkeypatch):
     now = _now()
-    path, conn = _db(tmp_path)
+    path, conn = _db(tmp_path, now=now)
     conn.close()
 
     hasil = _periksa(path, monkeypatch, now, baca_izin=lambda: (None, None))
@@ -105,7 +115,7 @@ def test_izin_tidak_terbaca_exit_2(tmp_path, monkeypatch):
 
 def test_selisih_jam_bursa_besar_no_go(tmp_path, monkeypatch):
     now = _now()
-    path, conn = _db(tmp_path)
+    path, conn = _db(tmp_path, now=now)
     conn.close()
 
     hasil = _periksa(path, monkeypatch, now,
@@ -116,7 +126,7 @@ def test_selisih_jam_bursa_besar_no_go(tmp_path, monkeypatch):
 
 def test_jam_bursa_gagal_dibaca_exit_2(tmp_path, monkeypatch):
     now = _now()
-    path, conn = _db(tmp_path)
+    path, conn = _db(tmp_path, now=now)
     conn.close()
 
     def rusak():
@@ -160,7 +170,7 @@ def test_gagal_menang_atas_tak_terbaca(tmp_path, monkeypatch):
 
 def test_target_bayangan_tidak_menuntut_hari_bayangan(tmp_path, monkeypatch):
     now = _now()
-    path, conn = _db(tmp_path, shadow_day=0)
+    path, conn = _db(tmp_path, now=now, shadow_day=0)
     conn.close()
 
     hasil = _periksa(path, monkeypatch, now, target="bayangan")
@@ -178,7 +188,7 @@ def test_target_bayangan_tidak_menuntut_hari_bayangan(tmp_path, monkeypatch):
 
 def test_target_bayangan_menolak_sakelar_eksekusi_nyala(tmp_path, monkeypatch):
     now = _now()
-    path, conn = _db(tmp_path, shadow_day=0, v1=1)
+    path, conn = _db(tmp_path, now=now, shadow_day=0, v1=1)
     conn.close()
 
     hasil = _periksa(path, monkeypatch, now, target="bayangan",
@@ -190,7 +200,7 @@ def test_target_bayangan_menolak_sakelar_eksekusi_nyala(tmp_path, monkeypatch):
 def test_target_tidak_dikenal_ditolak(tmp_path, monkeypatch):
     import pytest
     now = _now()
-    path, conn = _db(tmp_path)
+    path, conn = _db(tmp_path, now=now)
     conn.close()
 
     with pytest.raises(ValueError):
@@ -199,7 +209,7 @@ def test_target_tidak_dikenal_ditolak(tmp_path, monkeypatch):
 
 def test_keluaran_tidak_memuat_rahasia(tmp_path, monkeypatch, capsys):
     now = _now()
-    path, conn = _db(tmp_path)
+    path, conn = _db(tmp_path, now=now)
     conn.close()
 
     preflight.main(db_path=path, sekarang=lambda: now,
@@ -209,6 +219,31 @@ def test_keluaran_tidak_memuat_rahasia(tmp_path, monkeypatch, capsys):
     assert "GO" in keluar
     for terlarang in ("SECRET", "API_KEY", "api_key", "token"):
         assert terlarang not in keluar, keluar
+
+
+def test_metadata_pair_basi_no_go(tmp_path, monkeypatch):
+    now = _now()
+    path, conn = _db(tmp_path, now=now, meta_ts=now - pair_meta.MAX_AGE_S - 1)
+    conn.close()
+
+    hasil = _periksa(path, monkeypatch, now)
+
+    assert _gagal(hasil) == ["metadata pair"], hasil
+    pesan = next(p for ok, n, p in hasil if n == "metadata pair")
+    assert "basi" in pesan
+
+
+def test_metadata_pair_hilang_no_go(tmp_path, monkeypatch):
+    """Tabel metadata belum pernah terisi = engine akan halt; jangan GO."""
+    now = _now()
+    path, conn = _db(tmp_path, now=now)
+    conn.execute("DELETE FROM pair_meta")
+    conn.commit()
+    conn.close()
+
+    hasil = _periksa(path, monkeypatch, now)
+
+    assert _gagal(hasil) == ["metadata pair"], hasil
 
 
 def test_migrasi_bot_state_belum_diterapkan_no_go(tmp_path, monkeypatch):
@@ -237,7 +272,7 @@ def test_jendela_dca_lewat_tidak_menulis_missed(tmp_path, monkeypatch):
     # Tanggal 15 supaya "25 jam lalu" tetap di bulan yang sama.
     now = _now(day=15)
     kirim = now - 25 * 3600
-    path, conn = _db(tmp_path, dca_status="awaiting", dca_ts=kirim)
+    path, conn = _db(tmp_path, now=now, dca_status="awaiting", dca_ts=kirim)
     bulan = dca_window._bulan(kirim)
 
     hasil = _periksa(path, monkeypatch, now)
@@ -257,7 +292,7 @@ def test_jendela_dca_lewat_tidak_menulis_missed(tmp_path, monkeypatch):
 
 def test_dca_status_rusak_no_go(tmp_path, monkeypatch):
     now = _now()
-    path, conn = _db(tmp_path, dca_status="aneh", dca_ts=now)
+    path, conn = _db(tmp_path, now=now, dca_status="aneh", dca_ts=now)
     conn.close()
 
     hasil = _periksa(path, monkeypatch, now)
@@ -267,7 +302,7 @@ def test_dca_status_rusak_no_go(tmp_path, monkeypatch):
 
 def test_bukti_bayangan_belum_cukup_no_go(tmp_path, monkeypatch):
     now = _now()
-    path, conn = _db(tmp_path, shadow_day=2)
+    path, conn = _db(tmp_path, now=now, shadow_day=2)
     conn.close()
 
     hasil = _periksa(path, monkeypatch, now)
@@ -279,7 +314,7 @@ def test_bukti_bayangan_belum_cukup_no_go(tmp_path, monkeypatch):
 
 def test_sakelar_nyala_tidak_menuntut_hari_bayangan(tmp_path, monkeypatch):
     now = _now()
-    path, conn = _db(tmp_path, shadow_day=0, v1=1)
+    path, conn = _db(tmp_path, now=now, shadow_day=0, v1=1)
     conn.close()
 
     hasil = _periksa(path, monkeypatch, now, baca_izin=lambda: (True, False))
