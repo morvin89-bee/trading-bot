@@ -317,6 +317,66 @@ def test_refresh_metadata_gagal_tanpa_basi_tidak_mengganggu(tmp_path,
         telegram.lines)
 
 
+def test_dca_metadata_hilang_tidak_menutup_bulan_dan_tidak_pakai_jatah(
+        tmp_path, monkeypatch):
+    """Metadata hilang = prasyarat gagal: bulan TETAP terbuka, jatah utuh."""
+    conn = _fresh_db(tmp_path)
+    now = _ts(day=1, hour=9, minute=5)
+
+    def hilang(conn, pair, *, now, max_age_s=pair_meta.MAX_AGE_S):
+        return None
+
+    monkeypatch.setattr(pair_meta, "get", hilang)
+    telegram = _TelegramPerekam()
+
+    keluar = _satu_siklus(conn, telegram=telegram, now=now, ctx=_ctx_dca())
+
+    assert keluar == "kosong"
+    baris = conn.execute(
+        "SELECT last_dca_date, dca_status FROM bot_state WHERE id = 1"
+    ).fetchone()
+    assert baris["last_dca_date"] is None, "bulan tidak boleh ditutup"
+    assert baris["dca_status"] is None
+    gagal = conn.execute(
+        "SELECT COUNT(*) FROM proposals WHERE outcome = 'undelivered'"
+    ).fetchone()[0]
+    assert gagal == 0, "jatah retry tidak boleh terpakai"
+    pesan = [s for s in telegram.lines if "metadata" in s.lower()]
+    assert len(pesan) == 1, telegram.lines
+
+    # Tick berikutnya hari yang sama: pesan tidak diulang.
+    _satu_siklus(conn, telegram=telegram, now=now + 300, ctx=_ctx_dca())
+    assert len([s for s in telegram.lines
+                if "metadata" in s.lower()]) == 1, telegram.lines
+
+
+def test_dca_minimum_satu_pair_tidak_membatalkan_pair_lain(tmp_path,
+                                                           monkeypatch):
+    """Minimum bursa untuk satu pair hanya melewati pair itu."""
+    conn = _fresh_db(tmp_path)
+    now = _ts(day=1, hour=9, minute=5)
+
+    def meta(conn, pair, *, now, max_age_s=pair_meta.MAX_AGE_S):
+        # Minimum nominal BTC sengaja mustahil; ETH/SOL normal.
+        min_base = 10_000_000.0 if pair == "btc_idr" else 0.0
+        return pair_meta.Meta(pair, "1e-08", min_base, 0.0, 0.002, now)
+
+    monkeypatch.setattr(pair_meta, "get", meta)
+    telegram = _TelegramPerekam()
+
+    keluar = _satu_siklus(conn, telegram=telegram, now=now, ctx=_ctx_dca())
+
+    assert keluar == "proposed"
+    pair_terkirim = {p.pair for p in telegram.konfirmasi}
+    assert pair_terkirim == {"eth_idr", "sol_idr"}, pair_terkirim
+    assert any("btc_idr" in s and "minimum" in s for s in telegram.lines), (
+        telegram.lines)
+    # Jendela DCA tetap terbuka untuk pair yang berhasil terkirim.
+    status = conn.execute(
+        "SELECT dca_status FROM bot_state WHERE id = 1").fetchone()[0]
+    assert status == "awaiting"
+
+
 def test_habitual_skips_dnd_hours():
     assert main_loop.should_run_habitual(_ts(hour=3)) is False
     assert main_loop.should_run_habitual(_ts(hour=12)) is True
