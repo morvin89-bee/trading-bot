@@ -1,6 +1,6 @@
-"""Preflight read-only sebelum go-live: `python -m preflight`.
+"""Preflight read-only sebelum go-live: `python -m preflight [--target X]`.
 
-Tujuh pemeriksaan yang menentukan GO/NO-GO, semuanya TANPA menulis apa pun:
+Pemeriksaan yang menentukan GO/NO-GO, semuanya TANPA menulis apa pun:
 
 1. offset zona mesin harus +07:00 (WIB) — sama dengan penjaga di `main()`;
 2. basis data bisa dibuka `mode=ro` dan skemanya sudah dimigrasikan;
@@ -10,6 +10,15 @@ Tujuh pemeriksaan yang menentukan GO/NO-GO, semuanya TANPA menulis apa pun:
 5. status mode bayangan (hari ke-N) terhadap lantai `GO_LIVE_SHADOW_DAYS`;
 6. jendela DCA bulan berjalan.
 
+`--target live` (default) menuntut lantai hari bayangan. `--target bayangan`
+memeriksa "boleh mulai mode bayangan?": lantai hari TIDAK dipersyaratkan,
+tetapi sakelar eksekusi harus tetap mati.
+
+Tiga hasil per pemeriksaan: `True` = lolos, `False` = dievaluasi dan gagal,
+`None` = TIDAK BISA DIEVALUASI (DB tak terbuka, izin tak terbaca, jam bursa
+gagal dibaca). Kode keluar: 0 = GO, 1 = NO-GO (ada kegagalan yang bisa
+dievaluasi; menang atas 2), 2 = tidak bisa dievaluasi.
+
 Basis data dibuka `file:...?mode=ro`: tidak ada `CREATE`, `ALTER`, atau
 `INSERT`. `dca_window.dca_state` SENGAJA tidak dipakai karena transisi
 "awaiting lewat 24 jam" menulis `mark_missed`; jendela dihitung ulang di
@@ -17,8 +26,10 @@ sini dengan aturan yang sama, tanpa transisi.
 
 Tidak ada order dan tidak ada transport bursa di modul ini. Satu-satunya
 jaringan adalah pembacaan jam bursa (`ambil_waktu_bursa`), yang selalu bisa
-disuntik pada tes.
+disuntik pada tes. Keluaran hanya memuat hasil pemeriksaan — tidak pernah
+nilai kunci API atau rahasia `.env`.
 """
+import argparse
 import sqlite3
 import time
 
@@ -40,8 +51,10 @@ _KOLOM_BOT_STATE = (
 _KOLOM_PROPOSALS = (
     "id", "ts", "day", "kind", "pair", "amount_idr", "price_ref", "rule",
     "outcome", "note", "qty", "reserve_after", "window_s", "level", "basis",
-    "revisi",
+    "revisi", "client_order_id",
 )
+
+TARGET = ("live", "bayangan")
 
 
 def _buka_ro(db_path):
@@ -141,8 +154,15 @@ def _waktu_bursa():
 
 
 def periksa(*, db_path=None, sekarang=None, baca_izin=None,
-            ambil_waktu_bursa=None):
-    """Jalankan semua pemeriksaan; kembalikan daftar `(ok, nama, pesan)`."""
+            ambil_waktu_bursa=None, target="live"):
+    """Jalankan semua pemeriksaan; kembalikan daftar `(ok, nama, pesan)`.
+
+    `ok` tiga keadaan: `True` lolos, `False` gagal (bisa dievaluasi), `None`
+    tidak bisa dievaluasi. `target` = `"live"` (default) atau `"bayangan"`.
+    """
+    if target not in TARGET:
+        raise ValueError(
+            f"target tidak dikenal: {target!r} (pilih: {', '.join(TARGET)})")
     sekarang = time.time if sekarang is None else sekarang
     baca_izin = _izin_dari_env if baca_izin is None else baca_izin
     ambil_waktu_bursa = (_waktu_bursa if ambil_waktu_bursa is None
@@ -158,26 +178,31 @@ def periksa(*, db_path=None, sekarang=None, baca_izin=None,
         "wajib +07:00 (WIB)"))
 
     conn = None
+    state = None
     try:
         conn = _buka_ro(db_path)
         hasil.append((True, "db", f"terbuka read-only: {db_path}"))
         hasil.extend(_periksa_db(conn))
         state = _baca_state(conn)
     except sqlite3.Error as e:
-        hasil.append((False, "db", f"tidak bisa dibuka read-only: {e}"))
-        state = {}
+        hasil.append((None, "db", f"tidak bisa dibuka read-only: {e}"))
     finally:
         if conn is not None:
             conn.close()
 
-    switch_on = bool(state.get("v1_enabled"))
+    switch_on = None if state is None else bool(state.get("v1_enabled"))
     can_trade, can_withdraw = baca_izin()
-    alasan = safeguards.permissions_ok(can_trade, can_withdraw,
-                                       switch_on=switch_on)
-    hasil.append((
-        alasan is None, "izin kunci",
-        alasan or f"canTrade={can_trade}, canWithdraw={can_withdraw} "
-                  f"(sakelar {'nyala' if switch_on else 'mati'})"))
+    if can_trade is None or can_withdraw is None:
+        hasil.append((
+            None, "izin kunci",
+            "izin API tidak terbaca (canTrade/canWithdraw tidak diketahui)"))
+    else:
+        alasan = safeguards.permissions_ok(
+            can_trade, can_withdraw, switch_on=bool(switch_on))
+        hasil.append((
+            alasan is None, "izin kunci",
+            alasan or f"canTrade={can_trade}, canWithdraw={can_withdraw} "
+                      f"(sakelar {'nyala' if switch_on else 'mati'})"))
 
     try:
         selisih = abs(float(now) - float(ambil_waktu_bursa()))
@@ -186,39 +211,68 @@ def periksa(*, db_path=None, sekarang=None, baca_izin=None,
             f"selisih {selisih:.1f} detik (toleransi "
             f"{TOLERANSI_JAM_DETIK:.0f} detik)"))
     except Exception as e:
-        hasil.append((False, "jam bursa",
-                      f"jam bursa tidak terbaca: {e}"))
+        hasil.append((None, "jam bursa", f"jam bursa tidak terbaca: {e}"))
 
-    hari = state.get("shadow_day", 0)
-    if switch_on:
-        hasil.append((True, "mode",
-                      "sakelar eksekusi NYALA (v1_enabled=1)"))
+    if state is None:
+        hasil.append((None, "mode", "status mode tidak terbaca (bot_state)"))
+    elif target == "bayangan":
+        if switch_on:
+            hasil.append((
+                False, "mode",
+                "sakelar eksekusi NYALA (v1_enabled=1) — bukan target "
+                "bayangan; matikan dulu"))
+        else:
+            hasil.append((
+                True, "mode",
+                f"target bayangan, hari ke-{state.get('shadow_day', 0)}; "
+                f"lantai {main_loop.GO_LIVE_SHADOW_DAYS} hari tidak "
+                "dipersyaratkan untuk bayangan"))
     else:
-        hasil.append((
-            hari >= main_loop.GO_LIVE_SHADOW_DAYS, "mode",
-            f"mode bayangan, hari ke-{hari} dari lantai "
-            f"{main_loop.GO_LIVE_SHADOW_DAYS}"))
+        hari = state.get("shadow_day", 0)
+        if switch_on:
+            hasil.append((True, "mode",
+                          "sakelar eksekusi NYALA (v1_enabled=1)"))
+        else:
+            hasil.append((
+                hari >= main_loop.GO_LIVE_SHADOW_DAYS, "mode",
+                f"mode bayangan, hari ke-{hari} dari lantai "
+                f"{main_loop.GO_LIVE_SHADOW_DAYS}"))
 
-    status, _sisa, catatan = _dca_baca_saja(state, now)
-    hasil.append((status != "rusak", "jendela DCA", catatan))
+    if state is None:
+        hasil.append((None, "jendela DCA",
+                      "tidak bisa dievaluasi: bot_state tidak terbaca"))
+    else:
+        status, _sisa, catatan = _dca_baca_saja(state, now)
+        hasil.append((status != "rusak", "jendela DCA", catatan))
     return hasil
 
 
 def main(*, db_path=None, sekarang=None, baca_izin=None,
-         ambil_waktu_bursa=None):
-    """Cetak hasil preflight dan kembalikan 0 (GO) atau 1 (NO-GO)."""
+         ambil_waktu_bursa=None, target="live"):
+    """Cetak hasil preflight; 0 = GO, 1 = NO-GO, 2 = tidak bisa dievaluasi."""
     hasil = periksa(db_path=db_path, sekarang=sekarang, baca_izin=baca_izin,
-                    ambil_waktu_bursa=ambil_waktu_bursa)
-    print("Preflight go-live (read-only, tidak ada order)")
+                    ambil_waktu_bursa=ambil_waktu_bursa, target=target)
+    print(f"Preflight go-live (read-only, tidak ada order; target: {target})")
+    label = {True: "OK", False: "GAGAL", None: "TAK TERBACA"}
     for ok, nama, pesan in hasil:
-        print(f"  [{'OK' if ok else 'GAGAL'}] {nama}: {pesan}")
-    gagal = [f"{nama}: {pesan}" for ok, nama, pesan in hasil if not ok]
+        print(f"  [{label[ok]}] {nama}: {pesan}")
+    gagal = [f"{nama}: {pesan}" for ok, nama, pesan in hasil if ok is False]
     if gagal:
         print("NO-GO — " + "; ".join(gagal))
         return 1
+    tidak = [f"{nama}: {pesan}" for ok, nama, pesan in hasil if ok is None]
+    if tidak:
+        print("TIDAK BISA DIEVALUASI — " + "; ".join(tidak))
+        return 2
     print("GO — semua pemeriksaan lolos")
     return 0
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    parser = argparse.ArgumentParser(
+        description="Preflight read-only sebelum go-live.")
+    parser.add_argument("--target", choices=TARGET, default="live",
+                        help="live (default) menuntut lantai hari bayangan; "
+                             "bayangan tidak")
+    args = parser.parse_args()
+    raise SystemExit(main(target=args.target))

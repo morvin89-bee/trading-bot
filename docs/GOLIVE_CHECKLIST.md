@@ -33,11 +33,19 @@ Tanggal: 2026-11-08 · Branch: `fix/review-p1`
 ### Preflight read-only (wajib, tepat sebelum menyalakan sakelar)
 
 ```powershell
-python -m preflight
+python -m preflight                  # target live (default)
+python -m preflight --target bayangan
 ```
 
-- [ ] Perintah di atas mencetak `GO — semua pemeriksaan lolos`. `NO-GO`
-      berarti **jangan** menyalakan `v1_enabled`; bereskan alasannya dulu.
+- [ ] Untuk menyalakan `v1_enabled`, jalankan `python -m preflight` (target
+      `live`) dan pastikan mencetak `GO — semua pemeriksaan lolos`.
+- [ ] Untuk sekadar memeriksa "boleh mulai mode bayangan?", jalankan
+      `--target bayangan`: lantai `shadow_day >= 7` **tidak** dipersyaratkan,
+      tetapi sakelar eksekusi harus tetap mati (`v1_enabled = 0`).
+- [ ] Kode keluar menentukan tindakan: `0` = GO; `1` = NO-GO (ada
+      pemeriksaan yang dievaluasi dan gagal — **jangan** nyalakan sakelar,
+      bereskan alasannya dulu); `2` = TIDAK BISA DIEVALUASI (mis. DB tidak
+      terbuka, izin tidak terbaca, jam bursa gagal dibaca — anggap NO-GO).
 - [ ] Pemeriksaan yang dijalankan (semuanya read-only):
       1. offset zona mesin `+07:00` (WIB) — sama dengan penjaga `main()`;
       2. `portfolio.db` terbuka `mode=ro` dan migrasi skema sudah lengkap
@@ -46,13 +54,13 @@ python -m preflight
          (`canWithdraw` harus `False`, `canTrade` cocok dengan sakelar);
       4. selisih jam mesin vs jam bursa ≤ 5 detik;
       5. status mode bayangan: `shadow_day >= 7` (kecuali sakelar sudah
-         nyala);
+         nyala, atau target `bayangan`);
       6. jendela DCA bulan berjalan (tanpa menandai `missed`).
 - [ ] `python -m preflight` **tidak** membuat/mengubah `portfolio.db` dan
       tidak mengirim order. Bukti: `git status` tetap bersih dan baris
       `bot_state` tidak berubah setelah dijalankan.
-- [ ] Bila preflight dijalankan saat `v1_enabled = 1`, hasil `GO` berarti
-      kunci trade sudah terpasang dan jam/zona aman untuk order nyata.
+- [ ] Keluaran preflight hanya memuat hasil pemeriksaan; tidak pernah nilai
+      kunci API atau isi `.env`.
 
 ## 2. Bukti shadow NYATA (bukan hanya tes)
 

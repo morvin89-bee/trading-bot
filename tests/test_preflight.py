@@ -43,7 +43,11 @@ def _periksa(path, monkeypatch, now, **kwargs):
 
 
 def _gagal(hasil):
-    return [nama for ok, nama, _ in hasil if not ok]
+    return [nama for ok, nama, _ in hasil if ok is False]
+
+
+def _tidak_terbaca(hasil):
+    return [nama for ok, nama, _ in hasil if ok is None]
 
 
 def test_semua_lolos_berarti_go(tmp_path, monkeypatch):
@@ -85,14 +89,18 @@ def test_can_withdraw_aktif_no_go(tmp_path, monkeypatch):
     assert "canWithdraw" in pesan
 
 
-def test_izin_tidak_terbaca_no_go(tmp_path, monkeypatch):
+def test_izin_tidak_terbaca_exit_2(tmp_path, monkeypatch):
     now = _now()
     path, conn = _db(tmp_path)
     conn.close()
 
     hasil = _periksa(path, monkeypatch, now, baca_izin=lambda: (None, None))
 
-    assert _gagal(hasil) == ["izin kunci"], hasil
+    assert _tidak_terbaca(hasil) == ["izin kunci"], hasil
+    assert _gagal(hasil) == [], hasil
+    assert preflight.main(db_path=path, sekarang=lambda: now,
+                          baca_izin=lambda: (None, None),
+                          ambil_waktu_bursa=lambda: now) == 2
 
 
 def test_selisih_jam_bursa_besar_no_go(tmp_path, monkeypatch):
@@ -106,7 +114,7 @@ def test_selisih_jam_bursa_besar_no_go(tmp_path, monkeypatch):
     assert _gagal(hasil) == ["jam bursa"], hasil
 
 
-def test_jam_bursa_gagal_dibaca_no_go(tmp_path, monkeypatch):
+def test_jam_bursa_gagal_dibaca_exit_2(tmp_path, monkeypatch):
     now = _now()
     path, conn = _db(tmp_path)
     conn.close()
@@ -116,17 +124,91 @@ def test_jam_bursa_gagal_dibaca_no_go(tmp_path, monkeypatch):
 
     hasil = _periksa(path, monkeypatch, now, ambil_waktu_bursa=rusak)
 
-    assert _gagal(hasil) == ["jam bursa"], hasil
+    assert _tidak_terbaca(hasil) == ["jam bursa"], hasil
+    assert preflight.main(db_path=path, sekarang=lambda: now,
+                          baca_izin=lambda: (False, False),
+                          ambil_waktu_bursa=rusak) == 2
 
 
-def test_db_belum_ada_no_go_dan_tidak_dibuat(tmp_path, monkeypatch):
+def test_db_belum_ada_exit_2_dan_tidak_dibuat(tmp_path, monkeypatch):
     now = _now()
     path = tmp_path / "belum_ada.db"
 
     hasil = _periksa(path, monkeypatch, now)
 
-    assert "db" in _gagal(hasil), hasil
+    assert "db" in _tidak_terbaca(hasil), hasil
+    assert preflight.main(db_path=path, sekarang=lambda: now,
+                          baca_izin=lambda: (False, False),
+                          ambil_waktu_bursa=lambda: now) == 2
     assert not path.exists(), "preflight tidak boleh membuat basis data"
+
+
+def test_gagal_menang_atas_tak_terbaca(tmp_path, monkeypatch):
+    """Ada satu kegagalan yang bisa dievaluasi -> NO-GO (1), bukan 2."""
+    now = _now()
+    path = tmp_path / "belum_ada.db"
+
+    def rusak():
+        raise RuntimeError("jaringan putus")
+
+    kode = preflight.main(db_path=path, sekarang=lambda: now,
+                          baca_izin=lambda: (False, True),
+                          ambil_waktu_bursa=rusak)
+
+    assert kode == 1
+
+
+def test_target_bayangan_tidak_menuntut_hari_bayangan(tmp_path, monkeypatch):
+    now = _now()
+    path, conn = _db(tmp_path, shadow_day=0)
+    conn.close()
+
+    hasil = _periksa(path, monkeypatch, now, target="bayangan")
+    assert _gagal(hasil) == [] and _tidak_terbaca(hasil) == [], hasil
+    assert preflight.main(db_path=path, sekarang=lambda: now,
+                          baca_izin=lambda: (False, False),
+                          ambil_waktu_bursa=lambda: now,
+                          target="bayangan") == 0
+
+    # Target live tetap menuntut lantai hari bayangan (default = live).
+    assert preflight.main(db_path=path, sekarang=lambda: now,
+                          baca_izin=lambda: (False, False),
+                          ambil_waktu_bursa=lambda: now) == 1
+
+
+def test_target_bayangan_menolak_sakelar_eksekusi_nyala(tmp_path, monkeypatch):
+    now = _now()
+    path, conn = _db(tmp_path, shadow_day=0, v1=1)
+    conn.close()
+
+    hasil = _periksa(path, monkeypatch, now, target="bayangan",
+                     baca_izin=lambda: (True, False))
+
+    assert _gagal(hasil) == ["mode"], hasil
+
+
+def test_target_tidak_dikenal_ditolak(tmp_path, monkeypatch):
+    import pytest
+    now = _now()
+    path, conn = _db(tmp_path)
+    conn.close()
+
+    with pytest.raises(ValueError):
+        _periksa(path, monkeypatch, now, target="produksi")
+
+
+def test_keluaran_tidak_memuat_rahasia(tmp_path, monkeypatch, capsys):
+    now = _now()
+    path, conn = _db(tmp_path)
+    conn.close()
+
+    preflight.main(db_path=path, sekarang=lambda: now,
+                   baca_izin=lambda: (False, False),
+                   ambil_waktu_bursa=lambda: now)
+    keluar = capsys.readouterr().out
+    assert "GO" in keluar
+    for terlarang in ("SECRET", "API_KEY", "api_key", "token"):
+        assert terlarang not in keluar, keluar
 
 
 def test_migrasi_bot_state_belum_diterapkan_no_go(tmp_path, monkeypatch):
