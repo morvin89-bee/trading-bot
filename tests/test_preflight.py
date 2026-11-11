@@ -1,11 +1,14 @@
 """Tes preflight read-only — tanpa jaringan, tanpa menulis basis data."""
 import sqlite3
 
+import pytest
+
 import dca_window
 import pair_meta
 import portfolio
 import portfolio_store
 import preflight
+import safeguards
 import shadow_log
 
 
@@ -320,3 +323,102 @@ def test_sakelar_nyala_tidak_menuntut_hari_bayangan(tmp_path, monkeypatch):
     hasil = _periksa(path, monkeypatch, now, baca_izin=lambda: (True, False))
 
     assert _gagal(hasil) == [], hasil
+
+
+# ---------------------------------------------------------------------------
+# Matriks izin x sakelar (butir 1). Tabel hasil yang sama ada di
+# docs/GOLIVE_CHECKLIST.md — ubah keduanya bersamaan.
+# ---------------------------------------------------------------------------
+IZIN = (True, False, None)
+
+
+def _harapan_izin(can_trade, can_withdraw, v1):
+    """Hasil yang diharapkan: "OK" | "GAGAL" | "TAK TERBACA".
+
+    Aturan §6.6 ditulis ulang sebagai tabel, bukan dengan memanggil fungsinya:
+    tes harus gagal bila aturannya berubah diam-diam.
+    """
+    if can_trade is None or can_withdraw is None:
+        return "TAK TERBACA"
+    if can_withdraw:
+        return "GAGAL"
+    return "OK" if can_trade == bool(v1) else "GAGAL"
+
+
+@pytest.mark.parametrize("can_trade", IZIN)
+@pytest.mark.parametrize("can_withdraw", IZIN)
+@pytest.mark.parametrize("v1", (0, 1))
+def test_permissions_ok_matriks_izin_dan_sakelar(can_trade, can_withdraw, v1):
+    # `permissions_ok` tidak punya keadaan TAK TERBACA: ragu = halt.
+    harap = _harapan_izin(can_trade, can_withdraw, v1)
+    alasan = safeguards.permissions_ok(
+        can_trade, can_withdraw, switch_on=bool(v1))
+    assert ("OK" if alasan is None else "GAGAL") == (
+        "OK" if harap == "OK" else "GAGAL"), alasan
+
+
+@pytest.mark.parametrize("target", preflight.TARGET)
+@pytest.mark.parametrize("can_trade", IZIN)
+@pytest.mark.parametrize("can_withdraw", IZIN)
+@pytest.mark.parametrize("v1", (0, 1))
+def test_preflight_matriks_izin_dan_sakelar(tmp_path, monkeypatch, target,
+                                            can_trade, can_withdraw, v1):
+    """Preflight menilai izin TEPAT seperti `permissions_ok` menilai order.
+
+    `shadow_day=7` supaya pemeriksaan `mode` target live tidak ikut gagal;
+    yang diuji di sini hanya izin x sakelar.
+    """
+    now = _now()
+    path, conn = _db(tmp_path, now=now, v1=v1)
+    conn.close()
+
+    hasil = _periksa(path, monkeypatch, now, target=target,
+                     baca_izin=lambda: (can_trade, can_withdraw))
+
+    harap = _harapan_izin(can_trade, can_withdraw, v1)
+    # Target bayangan menolak sakelar yang sudah nyala — satu-satunya
+    # pemeriksaan lain yang boleh gagal pada matriks ini.
+    mode = {"mode"} if (target == "bayangan" and v1) else set()
+    gagal = set(_gagal(hasil))
+    if harap == "TAK TERBACA":
+        assert _tidak_terbaca(hasil) == ["izin kunci"], hasil
+        assert gagal == mode, hasil
+    else:
+        assert _tidak_terbaca(hasil) == [], hasil
+        assert gagal == mode | ({"izin kunci"} if harap == "GAGAL" else set()), (
+            hasil)
+
+
+def test_urutan_golive_preflight_di_tiap_langkah(tmp_path, monkeypatch):
+    """Hasil preflight pada tiap keadaan urutan §0 checklist.
+
+    Keadaan awal: bot mati, kunci baca-saja (`canTrade` False), sakelar 0.
+    Temuan: memasang kunci trade SEBELUM sakelar menyala memaksa preflight
+    GAGAL — itu disengaja (`permissions_ok` menuntut kunci dan sakelar
+    sejalan), jadi urutannya yang harus kunci + sakelar bersamaan.
+    """
+    now = _now()
+    path, conn = _db(tmp_path, now=now)          # shadow_day=7
+    conn.close()
+
+    langkah = [
+        ("awal: kunci baca-saja, sakelar 0", False, 0, set(), set()),
+        ("kunci trade dipasang, sakelar masih 0", True, 0,
+         {"izin kunci"}, {"izin kunci"}),
+        ("kunci trade + sakelar nyala bersamaan", True, 1, set(), {"mode"}),
+        ("dibatalkan: set_shadow_day(0), kunci baca-saja", False, 0,
+         set(), set()),
+    ]
+    for nama, can_trade, v1, gagal_live, gagal_bayangan in langkah:
+        conn = sqlite3.connect(str(path))
+        conn.execute("UPDATE bot_state SET v1_enabled = ? WHERE id = 1",
+                     (v1,))
+        conn.commit()
+        conn.close()
+        izin = lambda ct=can_trade: (ct, False)   # noqa: E731
+        live = _periksa(path, monkeypatch, now, target="live",
+                        baca_izin=izin)
+        bayangan = _periksa(path, monkeypatch, now, target="bayangan",
+                            baca_izin=izin)
+        assert set(_gagal(live)) == gagal_live, (nama, live)
+        assert set(_gagal(bayangan)) == gagal_bayangan, (nama, bayangan)
