@@ -39,6 +39,7 @@ import dca_window
 import indodax_transport
 import main_loop
 import pair_meta
+import portfolio
 import portfolio_store
 import rules
 import safeguards
@@ -116,6 +117,34 @@ def _periksa_meta(conn, now):
                 f"basi/hilang: {', '.join(basi)} "
                 f"(batas {pair_meta.MAX_AGE_S:.0f} detik)")
     return (True, "metadata pair", "segar untuk: " + ", ".join(pairs))
+
+
+def _periksa_di_luar_target(conn):
+    """INFORMASI (bukan syarat GO): pair yang dipegang di luar bobot target.
+
+    Aset di luar `rules.DEFAULT_TARGET` tidak pernah dibeli strategi ini dan
+    (putusan pemilik 2026-11-15, opsi A) tidak pernah diusulkan jual. Bila
+    ada yang dipegang, pemilik perlu tahu — tetapi keadaan itu TIDAK
+    menggagalkan go-live, karena tidak ada keputusan bot yang bergantung
+    padanya. Posisi dibaca dari `trades` (tanpa jaringan, tanpa bursa).
+    """
+    try:
+        trades = [
+            {"id": b[0], "ts": b[1], "pair": b[2], "side": b[3],
+             "qty": b[4], "quote": b[5], "fee": b[6]}
+            for b in conn.execute(
+                "SELECT id, ts, pair, side, qty, quote, fee FROM trades")
+        ]
+    except sqlite3.Error as e:
+        return (None, "di luar target", f"tidak bisa dibaca dari trades: {e}")
+    dipegang = [
+        f"{pair} ({keadaan['qty_bought']:g})"
+        for pair, keadaan in sorted(portfolio._accumulate(trades).items())
+        if keadaan["qty_bought"] > 0 and pair not in rules.DEFAULT_TARGET
+    ]
+    if not dipegang:
+        return (True, "di luar target", "tidak ada posisi di luar target")
+    return (True, "di luar target", "dipegang: " + ", ".join(dipegang))
 
 
 def _baca_state(conn):
@@ -207,6 +236,7 @@ def periksa(*, db_path=None, sekarang=None, baca_izin=None,
         hasil.append((True, "db", f"terbuka read-only: {db_path}"))
         hasil.extend(_periksa_db(conn))
         hasil.append(_periksa_meta(conn, now))
+        hasil.append(_periksa_di_luar_target(conn))
         state = _baca_state(conn)
     except sqlite3.Error as e:
         hasil.append((None, "db", f"tidak bisa dibuka read-only: {e}"))

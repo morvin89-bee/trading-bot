@@ -268,6 +268,36 @@ def test_metadata_pair_di_luar_target_tidak_dituntut(tmp_path, monkeypatch):
     assert "bch_idr" not in pesan
 
 
+def test_pair_di_luar_target_dilaporkan_sebagai_informasi(tmp_path, monkeypatch):
+    """BCH yang dipegang disebut sebagai INFORMASI, bukan alasan NO-GO."""
+    now = _now()
+    path, conn = _db(tmp_path, now=now)
+    conn.execute(
+        "INSERT INTO trades (pair, side, price, qty, quote, fee, ts) "
+        "VALUES ('bch_idr', 'buy', 1000.0, 0.01, 10.0, 0.0, ?)", (now,))
+    conn.commit()
+    conn.close()
+
+    hasil = _periksa(path, monkeypatch, now)
+
+    assert _gagal(hasil) == [], hasil
+    baris = [p for ok, nama, p in hasil if nama == "di luar target"]
+    assert len(baris) == 1, hasil
+    assert "bch_idr" in baris[0]
+
+
+def test_tanpa_posisi_di_luar_target_informasi_jujur(tmp_path, monkeypatch):
+    """Tanpa posisi di luar target, baris informasi tetap ada dan jujur."""
+    now = _now()
+    path, conn = _db(tmp_path, now=now)
+    conn.close()
+
+    hasil = _periksa(path, monkeypatch, now)
+
+    baris = [p for ok, nama, p in hasil if nama == "di luar target"]
+    assert baris == ["tidak ada posisi di luar target"], hasil
+
+
 def test_tabel_audit_sakelar_belum_ada_no_go(tmp_path, monkeypatch):
     """Tanpa `bot_state_audit`, penulisan sakelar resmi akan gagal — NO-GO."""
     now = _now()
