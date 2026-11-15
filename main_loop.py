@@ -167,6 +167,8 @@ _SUDAH_DIBERITAHU_RETRY_HABIS = set()
 _SUDAH_DIBERITAHU_METADATA = set()
 # Tanggal lokal yang status hariannya sudah dikirim ke Telegram.
 _SUDAH_STATUS_HARI = set()
+# Tanggal lokal yang sudah diberi tahu bahwa harga aset di luar target hilang.
+_SUDAH_DIBERITAHU_HARGA = set()
 
 
 def reset_state():
@@ -178,6 +180,7 @@ def reset_state():
     _SUDAH_DIBERITAHU_RETRY_HABIS.clear()
     _SUDAH_DIBERITAHU_METADATA.clear()
     _SUDAH_STATUS_HARI.clear()
+    _SUDAH_DIBERITAHU_HARGA.clear()
     engine.reset_state()
 
 
@@ -448,9 +451,13 @@ def baca_konteks(conn, *, now=None, sinkron=portfolio.sync_trades,
        (`balances` list) yang dipercaya; bentuk lain = `ValueError`, karena
        tanpa bentuk yang dikenal `free` tidak bisa dipastikan (ragu = tidak
        mengambil keputusan).
-    3. `ambil_harga` untuk SEMUA pair di `portfolio.COIN_PAIRS`; satu pun
-       `None` = `ValueError` — tidak ada angka parsial yang menyusup ke
-       denyut (harga hilang = tidak ada keputusan, spec §6.3).
+    3. `ambil_harga` untuk SEMUA pair di `portfolio.COIN_PAIRS`. Pair di
+       `rules.DEFAULT_TARGET` WAJIB punya harga — satu pun `None` =
+       `ValueError`, tidak ada angka parsial yang menyusup ke denyut (harga
+       hilang = tidak ada keputusan, spec §6.3). Pair di luar target (mis.
+       BCH) boleh `None`: tidak ada keputusan order yang memakai nilainya,
+       jadi harga hilang = peringatan + aset disembunyikan (2026-11-15),
+       bukan halt seluruh denyut.
     4. `free_idr` dihitung dari field `free` SAJA (bukan `free + locked`):
        saldo yang terkunci order tidak boleh dianggap tersedia (spec §6.4
        "free sudah bersih"). `reserve_idr = 0.0` — tidak ada konfigurasi
@@ -479,7 +486,8 @@ def baca_konteks(conn, *, now=None, sinkron=portfolio.sync_trades,
             # Hanya cache SEGAR (<= 120 dtk); selain itu harga hilang.
             harga = portfolio.cached_price(pair, now=now)
         prices[pair] = harga
-    hilang = [pair for pair, harga in prices.items() if harga is None]
+    hilang = [pair for pair, harga in prices.items()
+              if harga is None and pair in rules.DEFAULT_TARGET]
     if hilang:
         raise ValueError("harga gagal dibaca: " + ", ".join(sorted(hilang)))
 
@@ -964,6 +972,20 @@ def tick_cycle(
                    and now - terakhir < DCA_RETRY_MIN_INTERVAL_S)}
         ),
     )
+
+    # Harga aset di luar target yang gagal dibaca: beri tahu SEKALI per hari
+    # dan jangan biarkan aset itu tampil dengan nilai palsu. Denyut TIDAK
+    # dihentikan — tidak ada keputusan order (DCA, take-profit, reserve buy,
+    # gerbang) yang memakai nilai aset di luar `DEFAULT_TARGET`.
+    hilang = sorted(pair for pair, harga in ctx.prices.items()
+                    if harga is None and pair not in rules.DEFAULT_TARGET)
+    if hilang:
+        hari_ini = _hari_lokal(now)
+        if hari_ini not in _SUDAH_DIBERITAHU_HARGA:
+            _SUDAH_DIBERITAHU_HARGA.add(hari_ini)
+            telegram.line(
+                "Harga " + ", ".join(hilang) + " tidak terbaca — aset di luar "
+                "target disembunyikan dari tampilan. Denyut tetap berjalan.")
 
     # 1. Rekonsiliasi lebih dulu: buku yang tidak bisa dipercaya tidak boleh
     #    menghasilkan usulan apa pun.

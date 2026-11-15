@@ -53,3 +53,20 @@ def test_missing_price_marks_unrealized_unknown():
     assert h.basis_known is True
     assert h.value_idr == 0.0
     assert h.unrealized_idr is None      # harga tak tersedia -> P&L tak diketahui
+
+
+def test_aset_di_luar_target_tanpa_harga_tidak_ditampilkan():
+    """Nilai 0 untuk BCH yang dipegang menyesatkan: sembunyikan barisnya.
+
+    Hanya aset di luar `DEFAULT_TARGET` (2026-11-15): pair target dengan harga
+    hilang tetap tampil Rp 0 supaya posisi yang seharusnya dilacak tidak
+    lenyap diam-diam.
+    """
+    bch = [dict(pair="bch_idr", side="buy", price=1000.0, qty=1.0,
+                quote=1000.0, fee=0, ts=1)]
+    assert p.compute_holdings(bch, {"bch": 1.0}, {"bch_idr": None}) == []
+
+    btc = [dict(pair="btc_idr", side="buy", price=1000.0, qty=1.0,
+                quote=1000.0, fee=0, ts=1)]
+    tetap = p.compute_holdings(btc, {"btc": 1.0}, {"btc_idr": None})
+    assert len(tetap) == 1 and tetap[0].value_idr == 0.0

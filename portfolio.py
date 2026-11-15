@@ -170,6 +170,11 @@ def compute_holdings(trades, balances, prices, free_balances=None):
             continue
         s = state.get(pair)
         price = prices.get(pair)
+        if price is None and pair not in rules.DEFAULT_TARGET:
+            # Aset di luar target yang harganya tak terbaca disembunyikan
+            # (2026-11-15): baris "Rp 0" untuk koin yang benar-benar dipegang
+            # menyesatkan, dan tidak ada keputusan order yang memakai nilainya.
+            continue
         value = qty * price if price else 0.0
         qty_free = (None if free_balances is None
                     else float(free_balances.get(coin, 0.0)))

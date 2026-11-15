@@ -26,6 +26,8 @@ import dca_window
 import engine
 import main_loop
 import pair_meta
+import portfolio
+import portfolio_store
 import proposal
 import rules
 import shadow_log
@@ -348,6 +350,58 @@ def test_dca_metadata_hilang_tidak_menutup_bulan_dan_tidak_pakai_jatah(
     _satu_siklus(conn, telegram=telegram, now=now + 300, ctx=_ctx_dca())
     assert len([s for s in telegram.lines
                 if "metadata" in s.lower()]) == 1, telegram.lines
+
+
+# --------------------------------------------------------------------------
+# Harga aset di luar target (2026-11-15): usaha terbaik, bukan halt.
+# --------------------------------------------------------------------------
+
+def test_baca_konteks_harga_non_target_hilang_tidak_halt(tmp_path, monkeypatch):
+    """BCH tanpa harga bukan alasan menghentikan pembacaan konteks.
+
+    Hanya pair di `DEFAULT_TARGET` yang wajib punya harga: keputusan order
+    (DCA/TP/gerbang) tidak memakai nilai aset di luar target, jadi harga
+    BCH yang hilang cukup diwarnai `None` — bukan `ValueError` yang mematikan
+    seluruh denyut (termasuk DCA BTC/ETH/SOL).
+    """
+    conn = _fresh_db(tmp_path)
+    portfolio_store.init_db(conn)
+    monkeypatch.setattr(portfolio, "cached_price", lambda pair, *, now: None)
+
+    ctx = main_loop.baca_konteks(
+        conn, now=_ts(), sinkron=lambda c: None,
+        ambil_info=lambda: {"balances": [{"asset": "idr", "free": "1000000"}]},
+        ambil_harga=lambda pair: None if pair == "bch_idr" else 1000.0)
+
+    assert ctx.prices["bch_idr"] is None
+    assert ctx.prices["btc_idr"] == 1000.0
+    # Pair target tetap wajib: harga hilang di sana = berhenti (fail closed).
+    with pytest.raises(ValueError, match="harga gagal dibaca"):
+        main_loop.baca_konteks(
+            conn, now=_ts(), sinkron=lambda c: None,
+            ambil_info=lambda: {"balances": []},
+            ambil_harga=lambda pair: None)
+
+
+def test_harga_bch_hilang_dca_target_tetap_diusulkan(tmp_path):
+    """Harga BCH None -> DCA ketiga pair target tetap diusulkan, satu peringatan."""
+    conn = _fresh_db(tmp_path)
+    telegram = _TelegramPerekam()
+    now = _ts(day=1, hour=9, minute=5)
+    ctx = _ctx_dca()
+    ctx.prices["bch_idr"] = None
+
+    keluar = _satu_siklus(conn, telegram=telegram, now=now, ctx=ctx)
+
+    assert keluar == "proposed"
+    assert {p.pair for p in telegram.konfirmasi} == {
+        "btc_idr", "eth_idr", "sol_idr"}
+    peringatan = [s for s in telegram.lines if "bch_idr" in s]
+    assert len(peringatan) == 1, telegram.lines
+
+    # Denyut berikutnya hari yang sama: peringatan tidak diulang.
+    _satu_siklus(conn, telegram=telegram, now=now + 300, ctx=ctx)
+    assert len([s for s in telegram.lines if "bch_idr" in s]) == 1, telegram.lines
 
 
 def test_dca_minimum_satu_pair_tidak_membatalkan_pair_lain(tmp_path,
