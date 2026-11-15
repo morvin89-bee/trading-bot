@@ -3107,3 +3107,68 @@ def test_banner_dicetak_ulang_setelah_status_berubah(tmp_path, capsys):
     assert keluar == 0
     assert keluaran.count("berjalan dalam mode bayangan") == 2, (
         "status bayangan -> v1 -> bayangan = banner dicetak di tiap keadaan")
+
+
+# --------------------------------------------------------------------------
+# Status harian lewat Telegram (review 2026-11-15): mode, hari bayangan,
+# metadata, DCA bulan ini, commit — sekali per hari, tanpa rahasia.
+# --------------------------------------------------------------------------
+
+def test_status_harian_lewat_telegram_sekali_per_hari(tmp_path):
+    """Satu pesan status per hari lokal, dikirim setelah poll pertama sukses."""
+    conn = _fresh_db(tmp_path)
+    telegram = _TelegramPerekam()
+
+    keluar = main_loop.main(
+        ["--siklus", "3"], conn=conn, telegram=telegram,
+        fetch=_FetchPerekam([]), jam=lambda: _ts(hour=12),
+        tidur=lambda s: None)
+
+    assert keluar == 0
+    status = [s for s in telegram.lines if s.startswith("Status bot")]
+    assert len(status) == 1, telegram.lines
+    isi = status[0]
+    assert "BAYANGAN" in isi
+    assert any(b.startswith("- hari bayangan: ") for b in isi.splitlines()), isi
+    assert "metadata pair:" in isi
+    assert "DCA bulan ini:" in isi
+    assert "commit:" in isi
+    # Rahasia tidak boleh ikut: token tiruan ini satu-satunya penanda.
+    assert "token-uji" not in isi
+
+
+def test_status_harian_memperingatkan_sakelar_nyala_izin_tidak_cocok(tmp_path):
+    """Sakelar nyala + kunci tanpa izin trade = peringatan jelas, bukan diam."""
+    conn = _fresh_db(tmp_path)
+    main_loop.set_shadow_day(conn, main_loop.GO_LIVE_SHADOW_DAYS)
+    main_loop.aktifkan_live(conn)   # live manual: tombol manusia
+    telegram = _TelegramPerekam()
+
+    keluar = main_loop.main(
+        ["--siklus", "1"], conn=conn, telegram=telegram,
+        fetch=_FetchPerekam([]),
+        transport_factory=lambda: _TransportPerekam(can_trade=False),
+        jam=lambda: _ts(hour=12), tidur=lambda s: None)
+
+    assert keluar == 0
+    status = [s for s in telegram.lines if s.startswith("Status bot")]
+    assert len(status) == 1, telegram.lines
+    assert "EKSEKUSI" in status[0]
+    assert "PERINGATAN" in status[0]
+    assert "tidak bisa trading" in status[0]
+
+
+def test_commit_singkat_dibaca_dari_git_tanpa_subprocess(tmp_path):
+    """Hash commit dibaca dari berkas `.git`, bukan subprocess/ jaringan."""
+    git = tmp_path / ".git"
+    (git / "refs" / "heads").mkdir(parents=True)
+    (git / "HEAD").write_text("ref: refs/heads/uji\n", encoding="ascii")
+    (git / "refs" / "heads" / "uji").write_text(
+        "abcdef0123456789abcdef0123456789abcdef01\n", encoding="ascii")
+
+    assert main_loop._commit_singkat(str(tmp_path)) == "abcdef0"
+
+
+def test_commit_singkat_tidak_diketahui_bila_git_tidak_ada(tmp_path):
+    """Tanpa `.git` status tetap dikirim: ditulis jujur, bukan dikarang."""
+    assert main_loop._commit_singkat(str(tmp_path)) == "tidak diketahui"

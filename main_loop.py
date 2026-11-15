@@ -165,6 +165,8 @@ _SUDAH_DIBERITAHU_DCA_GAGAL = set()
 _SUDAH_DIBERITAHU_RETRY_HABIS = set()
 # Tanggal lokal yang sudah diberi tahu bahwa metadata pair basi/hilang.
 _SUDAH_DIBERITAHU_METADATA = set()
+# Tanggal lokal yang status hariannya sudah dikirim ke Telegram.
+_SUDAH_STATUS_HARI = set()
 
 
 def reset_state():
@@ -175,6 +177,7 @@ def reset_state():
     _SUDAH_DIBERITAHU_DCA_GAGAL.clear()
     _SUDAH_DIBERITAHU_RETRY_HABIS.clear()
     _SUDAH_DIBERITAHU_METADATA.clear()
+    _SUDAH_STATUS_HARI.clear()
     engine.reset_state()
 
 
@@ -274,6 +277,87 @@ def aktifkan_live(conn, *, now=None):
 def _hari_lokal(now_ts):
     """Tanggal lokal "YYYY-MM-DD" — satu-satunya bentuk yang dibaca log bayangan."""
     return time.strftime("%Y-%m-%d", time.localtime(now_ts))
+
+
+def _commit_singkat(akar=None):
+    """Hash commit pendek dari berkas `.git` — tanpa subprocess, tanpa jaringan.
+
+    Status harian menyebut versi kode yang benar-benar berjalan; membaca
+    `.git/HEAD` (dan `packed-refs` bila ref-nya sudah dipadatkan) cukup untuk
+    itu. Gagal membaca = "tidak diketahui", bukan tebakan.
+    """
+    akar = os.path.dirname(os.path.abspath(__file__)) if akar is None else akar
+    try:
+        with open(os.path.join(akar, ".git", "HEAD"), encoding="ascii") as f:
+            isi = f.read().strip()
+        if not isi.startswith("ref: "):
+            return isi[:7]                 # HEAD terlepas (detached)
+        ref = isi[len("ref: "):]
+        try:
+            with open(os.path.join(akar, ".git", *ref.split("/")),
+                      encoding="ascii") as f:
+                return f.read().strip()[:7]
+        except OSError:
+            with open(os.path.join(akar, ".git", "packed-refs"),
+                      encoding="ascii") as f:
+                for baris in f:
+                    if baris.rstrip().endswith(" " + ref):
+                        return baris.split()[0][:7]
+        return "tidak diketahui"
+    except OSError:
+        return "tidak diketahui"
+
+
+def status_ringkas(conn, *, now, shadow, transport=None, commit=None):
+    """Teks status untuk Telegram: mode, hari bayangan, metadata, DCA, commit.
+
+    Tanpa rahasia: hanya mode/angka/status dan hash commit — tidak ada token,
+    chat id, atau kunci API. `transport=None` berarti izin kunci tidak bisa
+    dibaca; itu ditulis apa adanya, bukan ditebak.
+
+    Peringatan ditambahkan HANYA bila sakelar nyala dan kunci tidak cocok
+    (`safeguards.permissions_ok`), karena itulah keadaan yang membuat
+    eksekusi mustahil jalan sementara bot terlihat "hidup".
+    """
+    keadaan = load_state(conn)
+    baris = conn.execute(
+        "SELECT dca_status FROM bot_state WHERE id = 1").fetchone()
+    if keadaan["last_dca_date"] != dca_window._bulan(now):
+        dca = "belum ada jendela bulan ini"
+    else:
+        dca = {
+            "awaiting": "menunggu jawaban Anda",
+            "confirmed": "dikonfirmasi",
+            "missed": "terlewat (missed)",
+            "batal": "dibatalkan",
+        }.get(baris[0], f"status tak dikenal: {baris[0]!r}")
+
+    umur = pair_meta.umur_tertua(conn, now=now)
+    if umur is None:
+        meta = "belum ada"
+    elif umur > pair_meta.MAX_AGE_S:
+        meta = f"BASI ({umur / 3600:.1f} jam)"
+    else:
+        meta = f"segar ({umur / 60:.0f} menit)"
+
+    teks = [
+        f"Status bot — mode {'BAYANGAN' if shadow else 'EKSEKUSI'}",
+        f"- hari bayangan: {keadaan['shadow_day']}/{GO_LIVE_SHADOW_DAYS}",
+        f"- metadata pair: {meta}",
+        f"- DCA bulan ini: {dca}",
+        f"- commit: {commit or 'tidak diketahui'}",
+    ]
+    if not shadow:
+        if transport is None:
+            teks.append(
+                "PERINGATAN: sakelar EKSEKUSI NYALA tetapi tidak ada "
+                "transport — eksekusi tidak bisa jalan.")
+        else:
+            alasan = safeguards.permissions_ok(
+                transport.can_trade, transport.can_withdraw, switch_on=True)
+            if alasan is not None:
+                teks.append(f"PERINGATAN: {alasan}")
+    return "\n".join(teks)
 
 
 def _tabel_ada(conn, nama):
@@ -1152,6 +1236,8 @@ def main(argv=None, *, conn=None, db_path=None, telegram=None,
 
         siklus = 0
         denyut_terakhir = None
+        # Versi kode yang benar-benar berjalan, untuk status harian.
+        commit = _commit_singkat()
         # Tanpa pembaca (konteks disuntik pemanggil) konteks selalu dianggap
         # sah; dengan pembaca, status inilah yang menahan polling sampai
         # bacaan pasar berikutnya berhasil — tidak ada keputusan di atas data
@@ -1185,6 +1271,26 @@ def main(argv=None, *, conn=None, db_path=None, telegram=None,
             print(f"Bot siap: polling Telegram aktif — {mode}.")
             if not telegram.line(f"Bot semi-otomatis berjalan — {mode}."):
                 print("Pesan sapa awal tidak terkirim — polling tetap jalan.")
+            _status_harian()
+
+        def _status_harian():
+            """Status sekali per hari lokal — setelah poll pertama sukses.
+
+            Isinya mode, hari bayangan, kesegaran metadata, status DCA bulan
+            ini, dan commit yang berjalan. Dedupe per tanggal lokal (penanda
+            di memori): restart pada hari yang sama tidak mengirim ulang.
+            Sebelum poll pertama sukses tidak ada klaim apa pun (M2).
+            """
+            if not sapa_terkirim:
+                return
+            hari = _hari_lokal(sekarang)
+            if hari in _SUDAH_STATUS_HARI:
+                return
+            _SUDAH_STATUS_HARI.add(hari)
+            if not telegram.line(status_ringkas(
+                    conn, now=sekarang, shadow=shadow, transport=transport,
+                    commit=commit)):
+                print("Status harian tidak terkirim — polling tetap jalan.")
 
         while args.siklus is None or siklus < args.siklus:
             sekarang = jam()
