@@ -24,6 +24,79 @@ Python yang dipakai bot dan dashboard:
 
 ---
 
+## Cara otomatis (satu alat, satu kali jalan)
+
+`tools/matikan_sakelar.py` menjalankan urutan **b → c → d → e → f** di atas
+dengan pengaman yang sama, lalu berhenti total pada kegagalan pertama.
+Tanpa argumen alat ini **DRY-RUN**: hanya mencetak rencana dan memeriksa
+prasyarat (admin, cabang/commit, DB ada, daftar proses) — tidak ada tugas,
+proses, DB, atau sakelar yang disentuh.
+
+Yang **tidak** dilakukan alat ini dan tetap manual: langkah a2 (membaca isi
+`bot_state`/`proposals`), b2 (mematikan dashboard — opsional), f3 (membaca
+`v1_loop.log`/`errors.log`), dan semua keputusan di g/h.
+
+### 1. Dry-run dulu
+
+```powershell
+Set-Location "C:\Users\KakiTangan\trading-bot"
+python tools\matikan_sakelar.py
+```
+
+Periksa keluarannya: cabang/commit, daftar PID yang akan dimatikan, tujuan
+cadangan, dan rencana tiap fase. Tidak ada yang berubah.
+
+### 2. Jalankan sungguhan (PowerShell Administrator)
+
+```powershell
+# (PowerShell Administrator)
+Set-Location "C:\Users\KakiTangan\trading-bot"
+python tools\matikan_sakelar.py --jalankan
+```
+
+- Tiap fase meminta Anda mengetik **LANJUT**. Mengetik apa pun selain itu =
+  berhenti saat itu juga, tanpa perubahan pada fase tersebut.
+- `--ya` melewati semua konfirmasi (hanya bila Anda sudah yakin).
+- `--tunggu-menit 30` mengubah batas tunggu preflight (bawaan 20 menit).
+- `--db` dan `--cadangan-dir` hanya bila letaknya bukan bawaan.
+- Log: `logs/matikan_sakelar_<tanggal-jam>.log` (di luar git, tanpa rahasia).
+- Kode keluar: `0` = preflight GO; `1` = berhenti atau NO-GO.
+
+Bila gagal **setelah** fase c, alat sengaja membiarkan bot MATI dan tugas
+tetap nonaktif. Cadangan tidak dipulihkan otomatis (cadangan memuat
+`v1_enabled = 1`); langkah pemulihan dicetak di layar dan di log.
+
+### 3. Yang tetap Anda lakukan manual sesudahnya
+
+- [ ] Cek riwayat order di Indodax: tidak ada order/buy/sell yang tidak Anda
+      kenali (tanda bahaya g).
+- [ ] Baca Telegram: tidak ada pesan "order dikirim/dieksekusi" yang tidak
+      Anda setujui; pesan sapa/status bot harus menyebut **mode bayangan**.
+- [ ] Baca `v1_loop.log`/`errors.log` (f3) bila preflight NO-GO.
+- [ ] Bila ingin DB benar-benar diam saat dicadangkan, jalankan b2
+      (`IndodaxDashboard`) **sebelum** alat ini — alat hanya menyentuh
+      `IndodaxV1Shadow`.
+
+### 4. Uji manual alat (bagian Windows nyata tidak bisa diuji otomatis)
+
+Tes otomatis menutup logika fase dengan pelaksana palsu. Yang harus Anda
+buktikan sekali di mesin ini:
+
+1. Jalankan tanpa Administrator → berhenti di fase a dengan pesan
+   "bukan PowerShell Administrator".
+2. Dry-run sebagai Administrator saat bot hidup → daftar PID tampil,
+   `v1_enabled` masih 1 (cek a2), tidak ada berkas cadangan baru.
+3. `--jalankan`, lalu ketik selain LANJUT di fase b → berhenti; task masih
+   `Ready`/`Running` (`Get-ScheduledTask -TaskName IndodaxV1Shadow`).
+4. Jalan penuh → `IndodaxV1Shadow` `Disabled`, tidak ada `pythonw.exe`
+   `main_loop.py`, cadangan ada di `Documents\bot-backup`, `v1_enabled = 0`,
+   preflight GO.
+5. Uji "masih hidup": saat fase c berjalan, hidupkan lagi
+   `python main_loop.py` dari jendela lain → alat harus BERHENTI dengan
+   "proses bot masih hidup", tugas tetap nonaktif, sakelar tidak disentuh.
+
+---
+
 ## a. Pemeriksaan awal
 
 ### a1. `[OPENCODE-AMAN]` Siapa yang berjalan
