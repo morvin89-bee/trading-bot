@@ -209,6 +209,22 @@ def test_ensure_bot_state_membuat_tabel_audit_sakelar(tmp_path):
     assert {"ts", "kolom", "nilai_lama", "nilai_baru", "sumber"} <= kolom
 
 
+def test_ensure_bot_state_menambah_kolom_status_dan_sapa(tmp_path):
+    """DB lama dimigrasikan idempoten: kolom status/sapa ditambah sekali."""
+    conn = _fresh_db(tmp_path)
+    conn.execute(
+        "CREATE TABLE bot_state (id INTEGER PRIMARY KEY CHECK (id = 1), "
+        "last_dca_date TEXT, v1_enabled INTEGER NOT NULL DEFAULT 0, "
+        "shadow_day INTEGER NOT NULL DEFAULT 0)")
+    conn.commit()
+
+    dca_window.ensure_bot_state(conn)
+    dca_window.ensure_bot_state(conn)      # panggilan kedua: tidak error
+
+    kolom = {b[1] for b in conn.execute("PRAGMA table_info(bot_state)")}
+    assert {"status_terakhir_hari", "sapa_terakhir_ts"} <= kolom
+
+
 def test_mark_missed_records_once_even_if_called_twice(tmp_path):
     conn = _fresh_db(tmp_path)
     dca_window.mark_pending(conn, _ts(hour=9, minute=0))  # gerbang T-13.6: butuh jendela

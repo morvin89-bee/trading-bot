@@ -647,7 +647,7 @@ def test_kolom_penanda_hari_ditambahkan_idempoten():
     assert _kolom(conn, "bot_state") == [
         "id", "last_dca_date", "v1_enabled", "shadow_day",
         "dca_sent_ts", "dca_status", "shadow_checked_day",
-        "telegram_offset",
+        "telegram_offset", "status_terakhir_hari", "sapa_terakhir_ts",
     ]
     baris = conn.execute("SELECT * FROM bot_state WHERE id = 1").fetchone()
     assert baris["shadow_day"] == 4
@@ -3210,6 +3210,77 @@ def test_status_harian_memperingatkan_sakelar_nyala_izin_tidak_cocok(tmp_path):
     assert "EKSEKUSI" in status[0]
     assert "PERINGATAN" in status[0]
     assert "tidak bisa trading" in status[0]
+
+
+def test_status_harian_tidak_diulang_setelah_restart_hari_yang_sama(tmp_path):
+    """Dedupe status disimpan di `bot_state`, bukan hanya di memori proses.
+
+    Restart (proses baru, memori kosong) pada hari lokal yang sama tidak
+    boleh mengirim ulang status — kalau penandanya hanya di memori, setiap
+    crash-loop mengirim satu pesan status lagi.
+    """
+    conn = _fresh_db(tmp_path)
+    jam = lambda: _ts(hour=12)                     # noqa: E731
+    args = ["--siklus", "1"]
+
+    pertama = _TelegramPerekam()
+    assert main_loop.main(
+        args, conn=conn, telegram=pertama, fetch=_FetchPerekam([]),
+        jam=jam, tidur=lambda s: None) == 0
+    assert any(s.startswith("Status bot") for s in pertama.lines)
+
+    kedua = _TelegramPerekam()
+    assert main_loop.main(
+        args, conn=conn, telegram=kedua, fetch=_FetchPerekam([]),
+        jam=jam, tidur=lambda s: None) == 0
+
+    assert [s for s in kedua.lines if s.startswith("Status bot")] == [], (
+        kedua.lines)
+
+
+def test_status_harian_dikirim_lagi_besoknya(tmp_path):
+    """Tanggal di `bot_state` basi = status baru; hari sama = diam."""
+    conn = _fresh_db(tmp_path)
+    args = ["--siklus", "1"]
+
+    main_loop.main(args, conn=conn, telegram=_TelegramPerekam(),
+                   fetch=_FetchPerekam([]),
+                   jam=lambda: _ts(day=10, hour=12), tidur=lambda s: None)
+
+    besok = _TelegramPerekam()
+    main_loop.main(args, conn=conn, telegram=besok, fetch=_FetchPerekam([]),
+                   jam=lambda: _ts(day=11, hour=12), tidur=lambda s: None)
+
+    assert len([s for s in besok.lines if s.startswith("Status bot")]) == 1, (
+        besok.lines)
+
+
+def test_sapa_awal_maksimal_sekali_per_jam_setelah_crash_loop(tmp_path):
+    """Crash-loop (proses mati-hidup) tidak boleh mengirim sapa tiap restart."""
+    conn = _fresh_db(tmp_path)
+    jam = [_ts(hour=12)]
+    args = ["--siklus", "1"]
+
+    main_loop.main(args, conn=conn, telegram=_TelegramPerekam(),
+                   fetch=_FetchPerekam([]), jam=lambda: jam[0],
+                   tidur=lambda s: None)
+
+    jam[0] += 600                      # restart 10 menit kemudian
+    cepat = _TelegramPerekam()
+    main_loop.main(args, conn=conn, telegram=cepat, fetch=_FetchPerekam([]),
+                   jam=lambda: jam[0], tidur=lambda s: None)
+    assert not any("semi-otomatis berjalan" in s for s in cepat.lines), (
+        cepat.lines)
+
+    jam[0] += 3600                     # 70 menit sejak sapa pertama
+    lambat = _TelegramPerekam()
+    main_loop.main(args, conn=conn, telegram=lambat, fetch=_FetchPerekam([]),
+                   jam=lambda: jam[0], tidur=lambda s: None)
+    assert any("semi-otomatis berjalan" in s for s in lambat.lines), (
+        lambat.lines)
+    # Status harian tetap tidak diulang: hari lokalnya masih sama.
+    assert not any(s.startswith("Status bot") for s in lambat.lines), (
+        lambat.lines)
 
 
 def test_commit_singkat_dibaca_dari_git_tanpa_subprocess(tmp_path):

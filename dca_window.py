@@ -99,7 +99,9 @@ def ensure_bot_state(conn):
             dca_sent_ts REAL,
             dca_status TEXT,
             shadow_checked_day TEXT,
-            telegram_offset INTEGER NOT NULL DEFAULT 0
+            telegram_offset INTEGER NOT NULL DEFAULT 0,
+            status_terakhir_hari TEXT,
+            sapa_terakhir_ts REAL
         )
         """
     )
@@ -123,6 +125,13 @@ def ensure_bot_state(conn):
             "ALTER TABLE bot_state ADD COLUMN telegram_offset "
             "INTEGER NOT NULL DEFAULT 0"
         )
+    # Penanda status harian dan sapa awal disimpan di DB, bukan di memori:
+    # restart/crash-loop tidak boleh mengirim ulang pesan yang sama.
+    if "status_terakhir_hari" not in kolom:
+        conn.execute(
+            "ALTER TABLE bot_state ADD COLUMN status_terakhir_hari TEXT")
+    if "sapa_terakhir_ts" not in kolom:
+        conn.execute("ALTER TABLE bot_state ADD COLUMN sapa_terakhir_ts REAL")
     conn.execute("INSERT OR IGNORE INTO bot_state (id) VALUES (1)")
     # Jejak audit sakelar: siapa mengubah `v1_enabled`/`shadow_day`, kapan,
     # dan dari nilai berapa ke berapa. Ditulis `set_shadow_day` dan

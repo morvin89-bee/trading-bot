@@ -51,7 +51,8 @@ TOLERANSI_JAM_DETIK = 5.0
 _TABEL_WAJIB = ("trades", "bot_state", "bot_state_audit", "proposals")
 _KOLOM_BOT_STATE = (
     "last_dca_date", "v1_enabled", "shadow_day", "dca_sent_ts", "dca_status",
-    "shadow_checked_day", "telegram_offset",
+    "shadow_checked_day", "telegram_offset", "status_terakhir_hari",
+    "sapa_terakhir_ts",
 )
 _KOLOM_PROPOSALS = (
     "id", "ts", "day", "kind", "pair", "amount_idr", "price_ref", "rule",

@@ -113,6 +113,11 @@ DCA_JAM_TERAKHIR = 21
 # setelah pesan diterima (rancangan periode shadow, keputusan "dua irama").
 POLL_GAP_S = 15
 
+# Jeda minimum antar sapa awal ("Bot semi-otomatis berjalan") untuk proses
+# yang berbeda. Crash-loop (proses mati-hidup tiap beberapa detik) tidak boleh
+# mengirim pesan sapa tiap restart; penandanya disimpan di `bot_state`.
+SAPA_MIN_INTERVAL_S = 3600
+
 # Cetak ulang log kegagalan: tiap ke-N percobaan GAGAL BERTURUT-TURUT
 # (I1 review 2026-10-18). Baris pertama tetap muncul di percobaan pertama.
 # Tanpa syarat ini kegagalan permanen menyisakan SATU baris lalu sunyi
@@ -165,8 +170,6 @@ _SUDAH_DIBERITAHU_DCA_GAGAL = set()
 _SUDAH_DIBERITAHU_RETRY_HABIS = set()
 # Tanggal lokal yang sudah diberi tahu bahwa metadata pair basi/hilang.
 _SUDAH_DIBERITAHU_METADATA = set()
-# Tanggal lokal yang status hariannya sudah dikirim ke Telegram.
-_SUDAH_STATUS_HARI = set()
 # Tanggal lokal yang sudah diberi tahu bahwa harga aset di luar target hilang.
 _SUDAH_DIBERITAHU_HARGA = set()
 
@@ -179,7 +182,6 @@ def reset_state():
     _SUDAH_DIBERITAHU_DCA_GAGAL.clear()
     _SUDAH_DIBERITAHU_RETRY_HABIS.clear()
     _SUDAH_DIBERITAHU_METADATA.clear()
-    _SUDAH_STATUS_HARI.clear()
     _SUDAH_DIBERITAHU_HARGA.clear()
     engine.reset_state()
 
@@ -570,6 +572,28 @@ def _simpan_offset(conn, offset):
     dca_window.ensure_bot_state(conn)
     conn.execute(
         "UPDATE bot_state SET telegram_offset = ? WHERE id = 1", (offset,)
+    )
+    conn.commit()
+
+
+def _sapa_boleh(conn, now):
+    """True bila sapa awal terakhir sudah lewat `SAPA_MIN_INTERVAL_S`.
+
+    Penanda disimpan di `bot_state` (bukan memori): crash-loop yang memulai
+    proses baru tiap beberapa detik tidak boleh mengirim sapa tiap restart.
+    """
+    dca_window.ensure_bot_state(conn)
+    terakhir = conn.execute(
+        "SELECT sapa_terakhir_ts FROM bot_state WHERE id = 1"
+    ).fetchone()[0]
+    return terakhir is None or now - terakhir >= SAPA_MIN_INTERVAL_S
+
+
+def _catat_sapa(conn, now):
+    """Catat waktu sapa awal dikirim (pembatas anti crash-loop)."""
+    dca_window.ensure_bot_state(conn)
+    conn.execute(
+        "UPDATE bot_state SET sapa_terakhir_ts = ? WHERE id = 1", (now,)
     )
     conn.commit()
 
@@ -1288,27 +1312,39 @@ def main(argv=None, *, conn=None, db_path=None, telegram=None,
             if fetch is None or sapa_terkirim:
                 return
             sapa_terkirim = True
-            mode = ("mode bayangan, tanpa order yang bisa dikirim" if shadow
-                    else "eksekusi menyala — pantau dengan teliti")
-            print(f"Bot siap: polling Telegram aktif — {mode}.")
-            if not telegram.line(f"Bot semi-otomatis berjalan — {mode}."):
-                print("Pesan sapa awal tidak terkirim — polling tetap jalan.")
+            if _sapa_boleh(conn, sekarang):
+                _catat_sapa(conn, sekarang)
+                mode = ("mode bayangan, tanpa order yang bisa dikirim" if shadow
+                        else "eksekusi menyala — pantau dengan teliti")
+                print(f"Bot siap: polling Telegram aktif — {mode}.")
+                if not telegram.line(f"Bot semi-otomatis berjalan — {mode}."):
+                    print("Pesan sapa awal tidak terkirim — polling tetap jalan.")
             _status_harian()
 
         def _status_harian():
             """Status sekali per hari lokal — setelah poll pertama sukses.
 
             Isinya mode, hari bayangan, kesegaran metadata, status DCA bulan
-            ini, dan commit yang berjalan. Dedupe per tanggal lokal (penanda
-            di memori): restart pada hari yang sama tidak mengirim ulang.
+            ini, dan commit yang berjalan. Dedupe per tanggal lokal yang
+            DISIMPAN DI `bot_state.status_terakhir_hari`: restart pada hari
+            yang sama tidak mengirim ulang (penanda memori akan hilang tiap
+            proses). Tanggal ditulis SEBELUM kirim: satu percobaan per hari,
+            bukan satu percobaan tiap denyut saat Telegram sedang mati.
             Sebelum poll pertama sukses tidak ada klaim apa pun (M2).
             """
             if not sapa_terkirim:
                 return
             hari = _hari_lokal(sekarang)
-            if hari in _SUDAH_STATUS_HARI:
+            dca_window.ensure_bot_state(conn)
+            terakhir = conn.execute(
+                "SELECT status_terakhir_hari FROM bot_state WHERE id = 1"
+            ).fetchone()[0]
+            if terakhir == hari:
                 return
-            _SUDAH_STATUS_HARI.add(hari)
+            conn.execute(
+                "UPDATE bot_state SET status_terakhir_hari = ? WHERE id = 1",
+                (hari,))
+            conn.commit()
             if not telegram.line(status_ringkas(
                     conn, now=sekarang, shadow=shadow, transport=transport,
                     commit=commit)):
@@ -1451,6 +1487,11 @@ def main(argv=None, *, conn=None, db_path=None, telegram=None,
                             gagal_denyut = False
                             gagal_denyut_coba = 0
                             _sapa_awal()
+                            # Status harian juga dicek di tiap denyut SUKSES:
+                            # proses yang berjalan berhari-hari harus mengirim
+                            # status baru saat tanggal lokalnya berganti
+                            # (dedupe tanggal di `bot_state`).
+                            _status_harian()
                             # Hanya denyut SUKSES yang memperbarui penanda: bila
                             # gagal, denyut berikutnya adalah percobaan ulang
                             # (15 dtk kemudian), bukan tidur 300 dtk.
