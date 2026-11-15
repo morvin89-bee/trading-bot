@@ -39,8 +39,8 @@ import dca_window
 import indodax_transport
 import main_loop
 import pair_meta
-import portfolio
 import portfolio_store
+import rules
 import safeguards
 
 # Selisih jam mesin vs bursa yang masih dianggap aman. `_v2_get` mengirim
@@ -100,12 +100,15 @@ def _periksa_db(conn):
 
 
 def _periksa_meta(conn, now):
-    """Metadata pair semua koin yang dilacak masih segar (read-only).
+    """Metadata pair yang DIPAKAI strategi masih segar (read-only).
 
     Engine membulatkan qty dari metadata ini; hilang/basi berarti order
     dihalt. Preflight harus menolak GO pada keadaan yang pasti halt itu.
+    Hanya pair di `rules.DEFAULT_TARGET` yang dituntut (putusan pemilik
+    2026-11-15, opsi A): pair di luar target tidak pernah menghasilkan
+    usulan, jadi metadatanya tidak boleh memblokir go-live.
     """
-    pairs = sorted(portfolio.COIN_PAIRS.values())
+    pairs = sorted(p for p in rules.DEFAULT_TARGET if p != "IDR")
     basi = [pair for pair in pairs
             if pair_meta._get(conn, pair, now=now) is None]
     if basi:

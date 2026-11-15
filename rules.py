@@ -148,11 +148,21 @@ def take_profit_actions(holdings, thresholds=((50, 25), (100, 25)),
     `max_order` = atap nominal per order (dari `safeguards.MAX_ORDER_IDR`);
     `None` = tanpa potong. Kelebihan dilaporkan lewat `sisa_qty`, tidak
     dibuang diam-diam.
+
+    Hanya pair di `DEFAULT_TARGET` yang diusulkan (putusan pemilik
+    2026-11-15, opsi A): aset di luar bobot target tidak pernah dibeli
+    strategi ini, jadi take-profit tidak boleh menjualnya.
     """
     if sudah is None:
         sudah = {}
     actions = []
     for h in holdings:
+        # Putusan pemilik 2026-11-15 (A): hanya aset yang ada di bobot target
+        # yang boleh diusulkan jual. Aset di luar target (mis. BCH) tidak
+        # pernah dibeli strategi ini, jadi menjualnya bukan keputusan yang
+        # diminta — ia tetap tampil di dashboard.
+        if h.pair not in DEFAULT_TARGET:
+            continue
         if not h.basis_known or not h.avg_cost or not h.price:
             continue
         gain_pct = (h.price * (1 - fee_pct) - h.avg_cost) / h.avg_cost * 100

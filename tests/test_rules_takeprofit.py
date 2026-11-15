@@ -121,3 +121,16 @@ def test_sell_dipotong_ke_atap_dan_sisa_dilaporkan():
     assert a[0].qty == pytest.approx(275_000 / 1600)
     assert a[0].sisa_qty == pytest.approx(250 - 275_000 / 1600)
     assert "sisa" in a[0].reason.lower()
+
+
+def test_bch_di_luar_target_tidak_pernah_diusulkan():
+    """Putusan pemilik 2026-11-15 (A): take-profit hanya untuk pair target.
+
+    BCH dipegang di luar bobot `DEFAULT_TARGET`; tanpa filter ini bot bisa
+    menjual aset yang tidak pernah ia beli, dan preflight menuntut metadata
+    pair yang tidak dipakai strategi.
+    """
+    h = Holding("bch_idr", "bch", 1.0, 1000.0, 2100.0, 2100.0, 1000.0,
+                1100.0, True)                    # net +109,6%: dulu memicu SELL
+    assert rules.take_profit_actions([h]) == []
+    assert rules.rebalance_actions([h], idr_reserve=0.0) == []

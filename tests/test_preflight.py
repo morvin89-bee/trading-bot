@@ -249,6 +249,25 @@ def test_metadata_pair_hilang_no_go(tmp_path, monkeypatch):
     assert _gagal(hasil) == ["metadata pair"], hasil
 
 
+def test_metadata_pair_di_luar_target_tidak_dituntut(tmp_path, monkeypatch):
+    """BCH dipegang tetapi bukan pair target: metadatanya bukan syarat GO.
+
+    Putusan pemilik 2026-11-15 (A): preflight hanya menuntut metadata pair
+    yang benar-benar dipakai strategi. BCH tetap tampil di dashboard.
+    """
+    now = _now()
+    path, conn = _db(tmp_path, now=now)
+    conn.execute("DELETE FROM pair_meta WHERE pair = 'bch_idr'")
+    conn.commit()
+    conn.close()
+
+    hasil = _periksa(path, monkeypatch, now)
+
+    assert _gagal(hasil) == [], hasil
+    pesan = next(p for ok, nama, p in hasil if nama == "metadata pair")
+    assert "bch_idr" not in pesan
+
+
 def test_tabel_audit_sakelar_belum_ada_no_go(tmp_path, monkeypatch):
     """Tanpa `bot_state_audit`, penulisan sakelar resmi akan gagal — NO-GO."""
     now = _now()
