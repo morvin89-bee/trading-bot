@@ -200,7 +200,7 @@ def load_state(conn):
     }
 
 
-def set_shadow_day(conn, day):
+def set_shadow_day(conn, day, *, now=None):
     """TETAPKAN `shadow_day` ke `day` — sifatnya menetapkan, bukan menambah.
 
     Panggilan kedua dengan angka lain MENGGANTI, bukan menambah: fungsi ini
@@ -212,8 +212,16 @@ def set_shadow_day(conn, day):
     `aktifkan_live`. Satu-satunya pengaruh pada sakelar: MEMATIKAN, bila
     `day < 7` (reset penolakan harus tetap mematikan eksekusi — keselamatan
     ini tidak boleh hilang).
+
+    Setiap perubahan kolom sakelar dicatat ke `bot_state_audit` dalam
+    transaksi yang sama. `now` boleh disuntikkan; bawaan `time.time()` hanya
+    untuk pemanggil lama (tes wajib menyuntik).
     """
     dca_window.ensure_bot_state(conn)
+    if now is None:
+        now = time.time()
+    lama = tuple(conn.execute(
+        "SELECT v1_enabled, shadow_day FROM bot_state WHERE id = 1").fetchone())
     if int(day) < GO_LIVE_SHADOW_DAYS:
         conn.execute(
             "UPDATE bot_state SET shadow_day = ?, v1_enabled = 0 WHERE id = 1",
@@ -223,10 +231,14 @@ def set_shadow_day(conn, day):
         conn.execute(
             "UPDATE bot_state SET shadow_day = ? WHERE id = 1", (int(day),)
         )
+    baru = tuple(conn.execute(
+        "SELECT v1_enabled, shadow_day FROM bot_state WHERE id = 1").fetchone())
+    dca_window.catat_audit_sakelar(
+        conn, ts=now, sumber="set_shadow_day", lama=lama, baru=baru)
     conn.commit()
 
 
-def aktifkan_live(conn):
+def aktifkan_live(conn, *, now=None):
     """NYALAKAN sakelar eksekusi — SATU-SATUNYA jalan ke `v1_enabled = 1`.
 
     Syarat keras: `shadow_day >= GO_LIVE_SHADOW_DAYS`. Di bawah lantai 7,
@@ -236,14 +248,22 @@ def aktifkan_live(conn):
     Sengaja terpisah dari `set_shadow_day`: menghitung hari adalah mesin
     (otomatis), menyalakan eksekusi adalah manusia (sadar). Dua hal ini tidak
     boleh lagi menjadi satu baris — di situlah keputusan go-live hidup.
+
+    Penolakan tidak dicatat ke `bot_state_audit`: tidak ada perubahan.
     """
     dca_window.ensure_bot_state(conn)
+    if now is None:
+        now = time.time()
     baris = conn.execute(
-        "SELECT shadow_day FROM bot_state WHERE id = 1"
+        "SELECT shadow_day, v1_enabled FROM bot_state WHERE id = 1"
     ).fetchone()
     if int(baris[0]) < GO_LIVE_SHADOW_DAYS:
         return False
+    lama = (baris[1], baris[0])
     conn.execute("UPDATE bot_state SET v1_enabled = 1 WHERE id = 1")
+    dca_window.catat_audit_sakelar(
+        conn, ts=now, sumber="aktifkan_live",
+        lama=lama, baru=(1, int(baris[0])))
     # Memori TP dipisah per mode: penjualan simulasi tidak boleh menghalangi
     # penjualan nyata. Baris live (bila ada) dipertahankan.
     shadow_log.hapus_take_profit_mode(conn, "shadow")
@@ -295,7 +315,7 @@ def apply_shadow_gate(conn, *, now=None):
         ditolak = shadow_log.rejected_count(conn, hari_ini)
 
     if ditolak > 0:
-        set_shadow_day(conn, 0)
+        set_shadow_day(conn, 0, now=now)
         return
 
     dca_window.ensure_bot_state(conn)
@@ -306,7 +326,7 @@ def apply_shadow_gate(conn, *, now=None):
         return   # hari ini sudah dihitung — denyut berikutnya tidak menambah
     # Mesin MENGHITUNG hari saja. Menyalakan `v1_enabled` di luar fungsi ini —
     # itu pekerjaan `aktifkan_live`, yang dipanggil manusia (live manual).
-    set_shadow_day(conn, int(baris[0]) + 1)
+    set_shadow_day(conn, int(baris[0]) + 1, now=now)
     conn.execute(
         "UPDATE bot_state SET shadow_checked_day = ? WHERE id = 1", (hari_ini,)
     )

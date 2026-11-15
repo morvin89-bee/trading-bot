@@ -196,6 +196,19 @@ def test_ensure_bot_state_idempotent(tmp_path):
     assert sesudah[1] == "awaiting"
 
 
+def test_ensure_bot_state_membuat_tabel_audit_sakelar(tmp_path):
+    """Jejak audit sakelar satu tabel, dibuat idempoten bersama `bot_state`.
+
+    Tanpa tabel ini `set_shadow_day`/`aktifkan_live` tidak punya tempat
+    menulis siapa mengubah sakelar dan kapan.
+    """
+    conn = _fresh_db(tmp_path)
+    dca_window.ensure_bot_state(conn)
+    dca_window.ensure_bot_state(conn)   # panggilan kedua: tidak error
+    kolom = {b[1] for b in conn.execute("PRAGMA table_info(bot_state_audit)")}
+    assert {"ts", "kolom", "nilai_lama", "nilai_baru", "sumber"} <= kolom
+
+
 def test_mark_missed_records_once_even_if_called_twice(tmp_path):
     conn = _fresh_db(tmp_path)
     dca_window.mark_pending(conn, _ts(hour=9, minute=0))  # gerbang T-13.6: butuh jendela

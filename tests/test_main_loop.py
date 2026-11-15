@@ -457,6 +457,65 @@ def test_set_shadow_day_di_bawah_7_tetap_mematikan_sakelar(tmp_path):
     assert main_loop.load_state(conn)["v1_enabled"] is False
 
 
+def test_audit_sakelar_mencatat_perubahan_shadow_day(tmp_path):
+    """`set_shadow_day` meninggalkan satu baris audit per kolom yang berubah."""
+    conn = _fresh_db(tmp_path)
+    now = _ts(day=1, hour=9, minute=0)
+
+    main_loop.set_shadow_day(conn, 7, now=now)
+    main_loop.set_shadow_day(conn, 0, now=now + 60)
+
+    baris = conn.execute(
+        "SELECT ts, kolom, nilai_lama, nilai_baru, sumber FROM bot_state_audit "
+        "ORDER BY id").fetchall()
+    assert [(b["kolom"], b["nilai_lama"], b["nilai_baru"], b["sumber"])
+            for b in baris] == [
+        ("shadow_day", "0", "7", "set_shadow_day"),
+        ("shadow_day", "7", "0", "set_shadow_day"),
+    ]
+    assert baris[0]["ts"] == now
+    assert baris[1]["ts"] == now + 60
+
+
+def test_audit_sakelar_tidak_menulis_baris_bila_nilai_sama(tmp_path):
+    """Menulis nilai yang sama bukan perubahan: jangan mengotori jejak."""
+    conn = _fresh_db(tmp_path)
+    main_loop.set_shadow_day(conn, 3, now=_ts())
+    main_loop.set_shadow_day(conn, 3, now=_ts() + 60)
+    jumlah = conn.execute("SELECT COUNT(*) FROM bot_state_audit").fetchone()[0]
+    assert jumlah == 1
+
+
+def test_audit_sakelar_mencatat_sakelar_nyala_dan_mati(tmp_path):
+    """`aktifkan_live` mencatat 0->1; reset penolakan mencatat 1->0."""
+    conn = _fresh_db(tmp_path)
+    now = _ts()
+    main_loop.set_shadow_day(conn, 7, now=now)
+    assert main_loop.aktifkan_live(conn, now=now + 10) is True
+    main_loop.set_shadow_day(conn, 0, now=now + 20)
+
+    baris = conn.execute(
+        "SELECT kolom, nilai_lama, nilai_baru, sumber FROM bot_state_audit "
+        "ORDER BY id").fetchall()
+    assert [tuple(b) for b in baris] == [
+        ("shadow_day", "0", "7", "set_shadow_day"),
+        ("v1_enabled", "0", "1", "aktifkan_live"),
+        ("v1_enabled", "1", "0", "set_shadow_day"),
+        ("shadow_day", "7", "0", "set_shadow_day"),
+    ]
+
+
+def test_audit_sakelar_tidak_mencatat_penolakan_aktifkan_live(tmp_path):
+    """Penolakan (`shadow_day < 7`) tidak menyentuh sakelar = tanpa baris."""
+    conn = _fresh_db(tmp_path)
+    main_loop.set_shadow_day(conn, 6, now=_ts())
+    assert main_loop.aktifkan_live(conn, now=_ts() + 10) is False
+    jumlah = conn.execute(
+        "SELECT COUNT(*) FROM bot_state_audit WHERE kolom = 'v1_enabled'"
+    ).fetchone()[0]
+    assert jumlah == 0
+
+
 def test_sambutan_batas_hari_naik_kelas(tmp_path):
     """Hari-7 membuka JENDELA; sakelar menyala HANYA lewat `aktifkan_live`.
 
@@ -490,12 +549,17 @@ def test_ambang_naik_kelas_adalah_konstanta_yang_dinamai(tmp_path):
 
 
 def test_load_state_membaca_bot_state_yang_sama(tmp_path):
-    """`load_state` WAJIB memakai tabel `dca_window`, tidak membuat yang kedua."""
+    """`load_state` WAJIB memakai tabel `dca_window`, tidak membuat yang kedua.
+
+    Sejak audit sakelar (2026-11-15) modul yang sama juga memiliki
+    `bot_state_audit`; yang dipin di sini adalah TIDAK ADA tabel state kedua
+    (mis. `bot_state_2`/`state`) dan `bot_state` tetap satu-satunya sumber.
+    """
     conn = _fresh_db(tmp_path)
     main_loop.load_state(conn)
     main_loop.set_shadow_day(conn, 4)
     main_loop.apply_shadow_gate(conn, now=_ts(hour=12))
-    assert _nama_tabel(conn) == {"bot_state"}
+    assert _nama_tabel(conn) == {"bot_state", "bot_state_audit"}
     # Nilai yang ditulis dca_window harus terbaca lewat load_state.
     dca_window.mark_pending(conn, _ts(hour=9))
     assert main_loop.load_state(conn)["last_dca_date"] == time.strftime(

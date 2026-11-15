@@ -249,6 +249,21 @@ def test_metadata_pair_hilang_no_go(tmp_path, monkeypatch):
     assert _gagal(hasil) == ["metadata pair"], hasil
 
 
+def test_tabel_audit_sakelar_belum_ada_no_go(tmp_path, monkeypatch):
+    """Tanpa `bot_state_audit`, penulisan sakelar resmi akan gagal — NO-GO."""
+    now = _now()
+    path, conn = _db(tmp_path, now=now)
+    conn.execute("DROP TABLE bot_state_audit")
+    conn.commit()
+    conn.close()
+
+    hasil = _periksa(path, monkeypatch, now)
+
+    assert "db" in _gagal(hasil), hasil
+    pesan = [p for ok, nama, p in hasil if nama == "db"]
+    assert any("bot_state_audit" in p for p in pesan), pesan
+
+
 def test_migrasi_bot_state_belum_diterapkan_no_go(tmp_path, monkeypatch):
     now = _now()
     path = tmp_path / "lama.db"

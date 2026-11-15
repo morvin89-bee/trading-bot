@@ -47,7 +47,7 @@ import safeguards
 # recvWindow 15 detik; 5 detik menyisakan ruang untuk latensi jaringan.
 TOLERANSI_JAM_DETIK = 5.0
 
-_TABEL_WAJIB = ("trades", "bot_state", "proposals")
+_TABEL_WAJIB = ("trades", "bot_state", "bot_state_audit", "proposals")
 _KOLOM_BOT_STATE = (
     "last_dca_date", "v1_enabled", "shadow_day", "dca_sent_ts", "dca_status",
     "shadow_checked_day", "telegram_offset",

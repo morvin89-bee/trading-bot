@@ -124,7 +124,46 @@ def ensure_bot_state(conn):
             "INTEGER NOT NULL DEFAULT 0"
         )
     conn.execute("INSERT OR IGNORE INTO bot_state (id) VALUES (1)")
+    # Jejak audit sakelar: siapa mengubah `v1_enabled`/`shadow_day`, kapan,
+    # dan dari nilai berapa ke berapa. Ditulis `set_shadow_day` dan
+    # `aktifkan_live` dalam transaksi yang SAMA dengan update-nya, supaya
+    # tidak pernah ada perubahan sakelar tanpa jejak. Dibuat di sini karena
+    # `bot_state` adalah milik modul ini (satu modul, satu skema).
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS bot_state_audit (
+            id INTEGER PRIMARY KEY,
+            ts REAL NOT NULL,
+            kolom TEXT NOT NULL,
+            nilai_lama TEXT,
+            nilai_baru TEXT,
+            sumber TEXT NOT NULL
+        )
+        """
+    )
     conn.commit()
+
+
+def catat_audit_sakelar(conn, *, ts, sumber, lama, baru):
+    """Catat perubahan kolom sakelar — satu baris per kolom yang BERUBAH.
+
+    `lama`/`baru` = tuple `(v1_enabled, shadow_day)` SEBELUM/SESUDAH update.
+    Nilai yang tidak berubah tidak dicatat: jejak audit adalah daftar
+    perubahan, bukan log setiap panggilan.
+
+    CATATAN TRANSAKSI: fungsi ini TIDAK commit. Pemanggil wajib menulis
+    update sakelar dan baris audit ini lalu commit sekali, supaya keduanya
+    tidak bisa terpisah.
+    """
+    for kolom, a, b in zip(("v1_enabled", "shadow_day"), lama, baru):
+        if a == b:
+            continue
+        conn.execute(
+            "INSERT INTO bot_state_audit "
+            "(ts, kolom, nilai_lama, nilai_baru, sumber) VALUES (?, ?, ?, ?, ?)",
+            (ts, kolom, None if a is None else str(a),
+             None if b is None else str(b), sumber),
+        )
 
 
 def _bulan(ts):
