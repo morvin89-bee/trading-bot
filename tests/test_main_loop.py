@@ -3283,6 +3283,34 @@ def test_sapa_awal_maksimal_sekali_per_jam_setelah_crash_loop(tmp_path):
         lambat.lines)
 
 
+def test_commit_status_dibaca_sekali_saat_start(tmp_path, monkeypatch):
+    """Hash commit dibaca sekali saat start, disimpan di modul.
+
+    Membaca ulang tiap pesan status hanya menambah I/O; nilainya tidak
+    berubah selama proses hidup. Tes ini memalsukan pembaca agar MELEDAK bila
+    dipanggil lagi setelah modul dimuat.
+    """
+    conn = _fresh_db(tmp_path)
+    telegram = _TelegramPerekam()
+
+    def ledakan(*args, **kwargs):
+        raise AssertionError("_commit_singkat dipanggil ulang setelah start")
+
+    monkeypatch.setattr(main_loop, "_commit_singkat", ledakan)
+
+    assert main_loop.main(
+        ["--siklus", "1"], conn=conn, telegram=telegram,
+        fetch=_FetchPerekam([]), jam=lambda: _ts(hour=12),
+        tidur=lambda s: None) == 0
+
+    status = [s for s in telegram.lines if s.startswith("Status bot")]
+    assert len(status) == 1, telegram.lines
+    assert f"commit: {main_loop._COMMIT}" in status[0], status[0]
+    # `status_ringkas` tanpa `commit` eksplisit memakai nilai modul itu juga.
+    teks = main_loop.status_ringkas(conn, now=_ts(hour=12), shadow=True)
+    assert f"commit: {main_loop._COMMIT}" in teks, teks
+
+
 def test_commit_singkat_dibaca_dari_git_tanpa_subprocess(tmp_path):
     """Hash commit dibaca dari berkas `.git`, bukan subprocess/ jaringan."""
     git = tmp_path / ".git"

@@ -313,6 +313,12 @@ def _commit_singkat(akar=None):
         return "tidak diketahui"
 
 
+# Hash commit proses ini: dibaca SEKALI saat modul dimuat (start), lalu
+# dipakai semua pesan status. Nilainya tidak berubah selama proses hidup;
+# membaca ulang tiap pesan hanya menambah I/O tanpa menambah kebenaran.
+_COMMIT = _commit_singkat()
+
+
 def status_ringkas(conn, *, now, shadow, transport=None, commit=None):
     """Teks status untuk Telegram: mode, hari bayangan, metadata, DCA, commit.
 
@@ -350,7 +356,7 @@ def status_ringkas(conn, *, now, shadow, transport=None, commit=None):
         f"- hari bayangan: {keadaan['shadow_day']}/{GO_LIVE_SHADOW_DAYS}",
         f"- metadata pair: {meta}",
         f"- DCA bulan ini: {dca}",
-        f"- commit: {commit or 'tidak diketahui'}",
+        f"- commit: {commit or _COMMIT}",
     ]
     if not shadow:
         if transport is None:
@@ -1282,8 +1288,6 @@ def main(argv=None, *, conn=None, db_path=None, telegram=None,
 
         siklus = 0
         denyut_terakhir = None
-        # Versi kode yang benar-benar berjalan, untuk status harian.
-        commit = _commit_singkat()
         # Tanpa pembaca (konteks disuntik pemanggil) konteks selalu dianggap
         # sah; dengan pembaca, status inilah yang menahan polling sampai
         # bacaan pasar berikutnya berhasil — tidak ada keputusan di atas data
@@ -1346,8 +1350,8 @@ def main(argv=None, *, conn=None, db_path=None, telegram=None,
                 (hari,))
             conn.commit()
             if not telegram.line(status_ringkas(
-                    conn, now=sekarang, shadow=shadow, transport=transport,
-                    commit=commit)):
+                    conn, now=sekarang, shadow=shadow,
+                    transport=transport)):
                 print("Status harian tidak terkirim — polling tetap jalan.")
 
         while args.siklus is None or siklus < args.siklus:
