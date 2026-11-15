@@ -884,43 +884,13 @@ def tick_cycle(
             )
             return "halted"
 
-    # 2. Izin bursa dibaca ulang tepat sebelum ada keputusan (spec §6.6).
-    #    Tanpa transport tidak ada kunci yang bisa dibaca — dan tanpa kunci
-    #    tidak ada order yang bisa jalan.
-    if transport is not None:
-        izin = safeguards.permissions_ok(
-            transport.can_trade, transport.can_withdraw, switch_on=not shadow
-        )
-        if izin is not None:
-            telegram.line(izin)
-            return "halted"
-
-    # 3. Polling Telegram — wajib, bukan pelengkap (F6).
-    diulang = _polling(conn, ctx, now=now, telegram=telegram,
-                       transport=transport, shadow=shadow, verdict=verdict,
-                       fetch=fetch, baca_harga=baca_harga,
-                       pembaca_konteks=pembaca_konteks)
-
-    # 4. Pengingat pasif DCA, maksimal satu pesan per slot jam (T-13.1).
-    if dca_window.should_remind(conn, now):
-        slot = (time.strftime("%Y-%m-%d", time.localtime(now)),
-                time.localtime(now).tm_hour)
-        if slot not in _SLOT_PENGINGAT:
-            _SLOT_PENGINGAT.add(slot)
-            sisa = dca_window.dca_state(conn, now)[1] / 3600.0
-            telegram.line(
-                "Pengingat: konfirmasi DCA bulan ini belum dijawab. "
-                f"Sisa waktu {sisa:.1f} jam — tekan Setuju atau Batal bulan ini."
-            )
-
-    # 5. Satu tick engine — DILEWATI kalau `/ulang` sudah mengusulkan pada
-    #    siklus ini. Usulan ulang memakai aksi dan `now` yang sama persis
-    #    dengan tick ini, jadi `proposal.new_proposal` akan menghasilkan id
-    #    kembar dan `shadow_log` menimpanya (atau gagal IntegrityError).
-    #    Metadata pair disegarkan maksimal sekali sehari; percobaan gagal
-    #    dibatasi `pair_meta.RETRY_S`. Kegagalan tidak boleh hilang diam-diam:
-    #    dicatat (rahasia disamarkan) dan pengguna diberi tahu SEKALI per hari
-    #    hanya bila cache benar-benar basi — engine lalu halt (fail closed).
+    # 2. Metadata pair disegarkan SEBELUM halt izin. Cache ini hanya dibaca
+    #    (tidak membuka jalan order apa pun), dan halt izin yang menahan
+    #    seluruh denyut tidak boleh ikut membekukan metadata: bot yang
+    #    berhenti karena kunci/izin akan menemukan cache basi selamanya
+    #    sesudah izin dibereskan (kejadian 2026-11-12). Percobaan gagal
+    #    dibatasi `pair_meta.RETRY_S`; kegagalan dicatat dan pengguna
+    #    diberitahu SEKALI per hari hanya bila cache benar-benar basi.
     try:
         pair_meta.refresh(conn, now=now)
     except Exception as e:
@@ -934,6 +904,41 @@ def tick_cycle(
                 "Metadata pair (presisi qty / minimum bursa) basi atau "
                 "belum tersedia — order baru ditahan sampai penyegaran "
                 "berhasil. Periksa koneksi ke indodax.com.")
+
+    # 3. Izin bursa dibaca ulang tepat sebelum ada keputusan (spec §6.6).
+    #    Tanpa transport tidak ada kunci yang bisa dibaca — dan tanpa kunci
+    #    tidak ada order yang bisa jalan.
+    if transport is not None:
+        izin = safeguards.permissions_ok(
+            transport.can_trade, transport.can_withdraw, switch_on=not shadow
+        )
+        if izin is not None:
+            telegram.line(izin)
+            return "halted"
+
+    # 4. Polling Telegram — wajib, bukan pelengkap (F6).
+    diulang = _polling(conn, ctx, now=now, telegram=telegram,
+                       transport=transport, shadow=shadow, verdict=verdict,
+                       fetch=fetch, baca_harga=baca_harga,
+                       pembaca_konteks=pembaca_konteks)
+
+    # 5. Pengingat pasif DCA, maksimal satu pesan per slot jam (T-13.1).
+    if dca_window.should_remind(conn, now):
+        slot = (time.strftime("%Y-%m-%d", time.localtime(now)),
+                time.localtime(now).tm_hour)
+        if slot not in _SLOT_PENGINGAT:
+            _SLOT_PENGINGAT.add(slot)
+            sisa = dca_window.dca_state(conn, now)[1] / 3600.0
+            telegram.line(
+                "Pengingat: konfirmasi DCA bulan ini belum dijawab. "
+                f"Sisa waktu {sisa:.1f} jam — tekan Setuju atau Batal bulan ini."
+            )
+
+    # 6. Satu tick engine — DILEWATI kalau `/ulang` sudah mengusulkan pada
+    #    siklus ini. Usulan ulang memakai aksi dan `now` yang sama persis
+    #    dengan tick ini, jadi `proposal.new_proposal` akan menghasilkan id
+    #    kembar dan `shadow_log` menimpanya (atau gagal IntegrityError).
+    #    Metadata sudah disegarkan di langkah 2 — di sini engine hanya membaca.
     try:
         usulan = [] if diulang else engine.tick(
             conn, ctx, now=now, telegram=telegram, shadow=shadow,
@@ -969,7 +974,7 @@ def tick_cycle(
                                baru_skip=hasil_catat == "skip")
     _beritahu_retry_habis(conn, now, telegram, terkirim_dca, gagal_dca)
 
-    # 6. Sakelar mode bayangan.
+    # 7. Sakelar mode bayangan.
     apply_shadow_gate(conn, now=now)
 
     return "proposed" if usulan else "kosong"

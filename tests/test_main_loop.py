@@ -746,6 +746,34 @@ def test_izin_tarik_dana_menghentikan_tick_sebelum_usulan(tmp_path):
     assert transport.posted == []
 
 
+def test_halt_izin_tetap_menyegarkan_metadata_tanpa_order(tmp_path, monkeypatch):
+    """Halt izin tidak boleh membekukan metadata: refresh tetap jalan, nol order.
+
+    Kejadian nyata 2026-11-12: sakelar nyala + kunci tanpa izin trade membuat
+    tick berhenti di langkah izin SEBELUM `pair_meta.refresh`, sehingga cache
+    metadata membasi selamanya dan bot tidak bisa pulih sendiri setelah
+    izin/sakelar dibereskan. Penyegaran metadata hanya menulis cache; ia tidak
+    boleh membuka jalan order apa pun.
+    """
+    conn = _fresh_db(tmp_path)
+    transport = _TransportPerekam(can_trade=False, can_withdraw=False)
+    telegram = _TelegramPerekam()
+    panggilan = []
+
+    monkeypatch.setattr(pair_meta, "refresh",
+                        lambda conn, *, now, fetch=None: panggilan.append(now))
+    monkeypatch.setattr(pair_meta, "umur_tertua", lambda conn, *, now: 0.0)
+
+    keluar = _satu_siklus(conn, telegram=telegram, transport=transport,
+                          shadow=False)
+
+    assert keluar == "halted"
+    assert len(panggilan) == 1, "metadata wajib disegarkan walau tick halt"
+    assert transport.posted == []
+    assert transport.queried == []
+    assert telegram.konfirmasi == []
+
+
 def test_value_error_dari_engine_dianggap_berhenti_dan_diam(tmp_path, monkeypatch):
     """ValueError (provenance hilang) = halt SEPI, tanpa diulang."""
     conn = _fresh_db(tmp_path)
