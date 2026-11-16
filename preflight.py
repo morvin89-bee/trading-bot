@@ -55,7 +55,7 @@ _TABEL_WAJIB = ("trades", "bot_state", "bot_state_audit", "proposals")
 _KOLOM_BOT_STATE = (
     "last_dca_date", "v1_enabled", "shadow_day", "dca_sent_ts", "dca_status",
     "shadow_checked_day", "telegram_offset", "status_terakhir_hari",
-    "sapa_terakhir_ts",
+    "sapa_terakhir_ts", "denyut_ok_ts", "galat_terakhir",
 )
 _KOLOM_PROPOSALS = (
     "id", "ts", "day", "kind", "pair", "amount_idr", "price_ref", "rule",
@@ -156,7 +156,8 @@ def _baca_state(conn):
     try:
         baris = conn.execute(
             "SELECT v1_enabled, shadow_day, last_dca_date, dca_sent_ts, "
-            "dca_status FROM bot_state WHERE id = 1").fetchone()
+            "dca_status, denyut_ok_ts, galat_terakhir "
+            "FROM bot_state WHERE id = 1").fetchone()
     except sqlite3.OperationalError:
         return {}
     if baris is None:
@@ -164,8 +165,42 @@ def _baca_state(conn):
     return {
         "v1_enabled": bool(baris[0]), "shadow_day": int(baris[1] or 0),
         "last_dca_date": baris[2], "dca_sent_ts": baris[3],
-        "dca_status": baris[4],
+        "dca_status": baris[4], "denyut_ok_ts": baris[5],
+        "galat_terakhir": baris[6],
     }
+
+
+def _periksa_denyut(state, now):
+    """Denyut penuh terakhir: basi > `main_loop.DENYUT_BASI_S` = GAGAL.
+
+    Kejadian 2026-11-16: token Telegram mati sejak 07.00, bot tidak pernah
+    menyelesaikan satu denyut pun, tetapi preflight tetap menjawab GO karena
+    tidak ada yang memeriksa "kapan terakhir bot benar-benar bekerja?".
+
+    Di luar jam aktif (jam tenang/DND) denyut memang tidak diharapkan, jadi
+    umur yang besar di sana BUKAN kegagalan — kecuali belum pernah sukses
+    sama sekali.
+    """
+    ts = state.get("denyut_ok_ts")
+    galat = state.get("galat_terakhir")
+    if ts is None:
+        if galat:
+            return (False, "denyut terakhir",
+                    f"belum pernah sukses; galat terakhir: {galat}")
+        return (None, "denyut terakhir",
+                "belum ada denyut sukses yang tercatat")
+    umur = float(now) - float(ts)
+    if not main_loop.should_run_habitual(now):
+        return (True, "denyut terakhir",
+                f"terakhir {umur / 60:.0f} menit lalu; di luar jam aktif "
+                "(jam tenang), denyut tidak diharapkan")
+    if umur > main_loop.DENYUT_BASI_S:
+        sebab = f"; galat terakhir: {galat}" if galat else ""
+        return (False, "denyut terakhir",
+                f"basi: terakhir sukses {umur / 60:.0f} menit lalu "
+                f"(batas {main_loop.DENYUT_BASI_S / 60:.0f} menit){sebab}")
+    return (True, "denyut terakhir",
+            f"terakhir sukses {umur / 60:.0f} menit lalu")
 
 
 def _dca_baca_saja(state, now):
@@ -329,6 +364,12 @@ def periksa(*, db_path=None, sekarang=None, baca_izin=None,
 
     hasil.append(_cek_dua_keadaan("Telegram", cek_telegram))
     hasil.append(_cek_dua_keadaan("DNS/koneksi indodax", cek_dns))
+
+    if state is None:
+        hasil.append((None, "denyut terakhir",
+                      "tidak bisa dievaluasi: bot_state tidak terbaca"))
+    else:
+        hasil.append(_periksa_denyut(state, now))
 
     if state is None:
         hasil.append((None, "mode", "status mode tidak terbaca (bot_state)"))

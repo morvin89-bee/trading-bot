@@ -648,6 +648,7 @@ def test_kolom_penanda_hari_ditambahkan_idempoten():
         "id", "last_dca_date", "v1_enabled", "shadow_day",
         "dca_sent_ts", "dca_status", "shadow_checked_day",
         "telegram_offset", "status_terakhir_hari", "sapa_terakhir_ts",
+        "denyut_ok_ts", "galat_terakhir",
     ]
     baris = conn.execute("SELECT * FROM bot_state WHERE id = 1").fetchone()
     assert baris["shadow_day"] == 4

@@ -131,3 +131,64 @@ def test_rekap_kode_asing_berakhiran_rejected_jadi_peringatan(monkeypatch):
 
     assert panggilan["warning"], "penolakan asing harus memicu peringatan"
     assert not panggilan["success"], "penolakan tidak boleh tampil hijau"
+
+
+# --------------------------------------------------------------------------
+# 2026-11-16 — "denyut terakhir": bot yang berjam-jam gagal tidak boleh
+# tampak normal di dashboard.
+# --------------------------------------------------------------------------
+
+def _pasang_kartu(monkeypatch):
+    """Rekam `st.metric`/`st.error` untuk jalur kartu status."""
+    panggilan = {"error": [], "metric": []}
+
+    class _Kolom:
+        def metric(self, label, value):
+            panggilan["metric"].append((label, value))
+
+    monkeypatch.setattr(tab.st, "columns",
+                        lambda n: tuple(_Kolom() for _ in range(n)))
+    monkeypatch.setattr(tab.st, "error",
+                        lambda teks="", **k: panggilan["error"].append(teks))
+    monkeypatch.setattr(tab.st, "caption", lambda teks="", **k: None)
+    return panggilan
+
+
+def _conn_state(denyut_ts, galat=None):
+    class _Hasil:
+        def fetchone(self):
+            return (3, 0, "2026-11-15", "none", denyut_ts, galat)
+
+    class _Conn:
+        def execute(self, *a, **k):
+            return _Hasil()
+
+    return _Conn()
+
+
+def test_status_denyut_segar_dan_basi():
+    assert tab.status_denyut(None, now=1_000.0)[1] is True
+    assert tab.status_denyut(1_000.0, now=1_000.0 + 60)[1] is False
+    teks, basi = tab.status_denyut(1_000.0, now=1_000.0 + 16 * 60)
+    assert basi is True
+    assert "basi" in teks
+
+
+def test_kartu_status_banner_merah_bila_denyut_basi(monkeypatch):
+    """RED: hari ini dashboard tidak punya konsep "denyut terakhir"."""
+    panggilan = _pasang_kartu(monkeypatch)
+
+    tab._kartu_status(_conn_state(1_000.0), now=1_000.0 + 20 * 60)
+
+    assert panggilan["error"], "denyut basi harus memunculkan banner merah"
+    assert any("denyut" in t.lower() for t in panggilan["error"])
+    assert any("denyut terakhir" in label.lower()
+               for label, _v in panggilan["metric"])
+
+
+def test_kartu_status_tanpa_banner_bila_denyut_segar(monkeypatch):
+    panggilan = _pasang_kartu(monkeypatch)
+
+    tab._kartu_status(_conn_state(1_000.0), now=1_000.0 + 60)
+
+    assert not panggilan["error"]

@@ -94,6 +94,23 @@ def _detik_ke_waktu(ts):
     return time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(ts))
 
 
+def status_denyut(ts, *, now):
+    """`(teks, basi)` untuk "denyut terakhir" — basi > `DENYUT_BASI_S`.
+
+    Kejadian 2026-11-16: bot gagal berjam-jam (401 tiap poll) dan dashboard
+    tetap tampak normal karena tidak ada satu angka pun yang menjawab "kapan
+    terakhir bot benar-benar bekerja?". Di luar jam aktif (jam tenang) denyut
+    memang tidak diharapkan, jadi umur besar di sana bukan "basi".
+    """
+    if ts is None:
+        return "belum pernah", True
+    umur = float(now) - float(ts)
+    teks = f"{umur / 60:.0f} menit lalu"
+    if umur > main_loop.DENYUT_BASI_S and main_loop.should_run_habitual(now):
+        return f"{teks} — basi", True
+    return teks, False
+
+
 def render():
     st.subheader("Periode Bayangan (Shadow) — G5")
     st.warning(_READ_ONLY)
@@ -108,20 +125,37 @@ def render():
         conn.close()
 
 
-def _kartu_status(conn):
-    baris = conn.execute(
-        "SELECT shadow_day, v1_enabled, shadow_checked_day, dca_status "
-        "FROM bot_state WHERE id = 1").fetchone()
+def _kartu_status(conn, now=None):
+    now = time.time() if now is None else now
+    try:
+        baris = conn.execute(
+            "SELECT shadow_day, v1_enabled, shadow_checked_day, dca_status, "
+            "denyut_ok_ts, galat_terakhir FROM bot_state WHERE id = 1"
+        ).fetchone()
+    except sqlite3.OperationalError as e:
+        if basis_data_kosong(str(e)):
+            st.info("Skema bot_state belum dimigrasikan — jalankan bot sekali.")
+            return
+        raise
     if baris is None:
         st.info("Belum ada catatan periode shadow.")
         return
-    shadow_day, v1_enabled, diperiksa, dca_status = baris
+    (shadow_day, v1_enabled, diperiksa, dca_status, denyut_ts,
+     galat) = baris
 
-    col1, col2, col3 = st.columns(3)
+    col1, col2, col3, col4 = st.columns(4)
     col1.metric("Hari ke-", f"{shadow_day} dari {HARI_TARGET}")
     col2.metric("Sisa menuju syarat", f"{sisa_hari(shadow_day)} hari")
     col3.metric("Sakelar eksekusi", status_sakelar(v1_enabled))
+    teks_denyut, basi = status_denyut(denyut_ts, now=now)
+    col4.metric("Denyut terakhir", teks_denyut)
 
+    if basi:
+        sebab = f" Galat terakhir: {galat}" if galat else ""
+        st.error(
+            f"Denyut terakhir {teks_denyut} — bot mungkin tidak berjalan atau "
+            f"Telegram gagal terus.{sebab}"
+        )
     if v1_enabled:
         st.error(
             "Sakelar eksekusi MENYALAH. Tanpa pabrik transport order tetap "

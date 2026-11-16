@@ -29,8 +29,11 @@ def _now(day=1, hour=9):
         (kini.tm_year, kini.tm_mon, day, hour, 0, 0, 0, 0, -1)))
 
 
+_SEKARANG = object()   # penanda "denyut_ts = now" pada `_db`
+
+
 def _db(tmp_path, *, now, shadow_day=7, v1=0, dca_status=None, dca_ts=None,
-        meta_ts=None):
+        meta_ts=None, denyut_ts=_SEKARANG):
     """Basis data lengkap seperti setelah bot berjalan sekali (bukan migrasi)."""
     path = tmp_path / "portfolio.db"
     conn = portfolio_store.connect(str(path))
@@ -45,8 +48,9 @@ def _db(tmp_path, *, now, shadow_day=7, v1=0, dca_status=None, dca_ts=None,
             "min_base_idr, min_traded, fee_pct, fetched_ts) "
             "VALUES (?, '1e-08', 10000.0, 0.0, 0.002, ?)", (pair, ts))
     conn.execute(
-        "UPDATE bot_state SET shadow_day = ?, v1_enabled = ? WHERE id = 1",
-        (shadow_day, v1))
+        "UPDATE bot_state SET shadow_day = ?, v1_enabled = ?, "
+        "denyut_ok_ts = ? WHERE id = 1",
+        (shadow_day, v1, now if denyut_ts is _SEKARANG else denyut_ts))
     if dca_status is not None:
         conn.execute(
             "UPDATE bot_state SET last_dca_date = ?, dca_status = ?, "

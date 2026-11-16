@@ -77,6 +77,10 @@ def ensure_bot_state(conn):
     menyala dalam hitungan jam, bukan 7 hari (spec §9).
     `telegram_offset` (INTEGER, default 0) adalah posisi `getUpdates` terakhir:
     tanpa kolom ini restart membuat update lama diproses ulang.
+    `denyut_ok_ts` (REAL) dan `galat_terakhir` (TEXT) adalah kerja 2026-11-16:
+    kapan terakhir satu denyut penuh berhasil, dan galat terakhir yang
+    menggagalkannya — tanpa keduanya bot bisa mati berjam-jam tanpa jejak
+    yang terbaca di dashboard maupun preflight.
     `total_disetor` dan
     `reserve_buy_enabled` TIDAK disimpan di sini (R-G): yang pertama sudah
     tersedia dari snapshots.contributions_idr, yang kedua berisiko ganda dengan
@@ -101,7 +105,9 @@ def ensure_bot_state(conn):
             shadow_checked_day TEXT,
             telegram_offset INTEGER NOT NULL DEFAULT 0,
             status_terakhir_hari TEXT,
-            sapa_terakhir_ts REAL
+            sapa_terakhir_ts REAL,
+            denyut_ok_ts REAL,
+            galat_terakhir TEXT
         )
         """
     )
@@ -132,6 +138,13 @@ def ensure_bot_state(conn):
             "ALTER TABLE bot_state ADD COLUMN status_terakhir_hari TEXT")
     if "sapa_terakhir_ts" not in kolom:
         conn.execute("ALTER TABLE bot_state ADD COLUMN sapa_terakhir_ts REAL")
+    # "Kapan terakhir bot benar-benar bekerja?" (2026-11-16): tanpa dua kolom
+    # ini, bot bisa gagal berjam-jam dan tidak ada satu angka pun yang
+    # menjawabnya — dashboard tampak normal, preflight tetap GO.
+    if "denyut_ok_ts" not in kolom:
+        conn.execute("ALTER TABLE bot_state ADD COLUMN denyut_ok_ts REAL")
+    if "galat_terakhir" not in kolom:
+        conn.execute("ALTER TABLE bot_state ADD COLUMN galat_terakhir TEXT")
     conn.execute("INSERT OR IGNORE INTO bot_state (id) VALUES (1)")
     # Jejak audit sakelar: siapa mengubah `v1_enabled`/`shadow_day`, kapan,
     # dan dari nilai berapa ke berapa. Ditulis `set_shadow_day` dan

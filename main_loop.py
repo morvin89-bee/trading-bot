@@ -112,6 +112,31 @@ def _catat_galat_telegram(e, now):
     setattr(e, "_telegram_dicatat", True)
 
 
+def _catat_denyut(conn, *, now, galat=None):
+    """Catat denyut penuh terakhir yang SUKSES (atau galatnya) di `bot_state`.
+
+    Tanpa dua kolom ini, bot bisa gagal berjam-jam dan tidak ada satu angka
+    pun yang menjawab "kapan terakhir bot benar-benar bekerja?" — dashboard
+    tampak normal, preflight tetap GO (kejadian 2026-11-16).
+
+    Denyut yang berjalan saat Telegram masih dalam backoff TIDAK dihitung
+    sukses: operator tidak bisa menyetujui apa pun, jadi mencatat "sehat"
+    hanya akan menyembunyikan cacat yang sedang berlangsung.
+    """
+    dca_window.ensure_bot_state(conn)
+    if galat is None:
+        if now < _BACKOFF_TELEGRAM["sampai"]:
+            return
+        conn.execute(
+            "UPDATE bot_state SET denyut_ok_ts = ?, galat_terakhir = NULL "
+            "WHERE id = 1", (now,))
+    else:
+        conn.execute(
+            "UPDATE bot_state SET galat_terakhir = ? WHERE id = 1",
+            (_samarkan_pesan_galat(galat)[:200],))
+    conn.commit()
+
+
 class _CetakBerjam:
     """Bungkus stdout: setiap baris keluar dengan cap waktu WIB.
 
@@ -146,6 +171,12 @@ class _CetakBerjam:
 
 # Denyut jantung: lima menit (plan:1116).
 HEARTBEAT_S = 300
+
+# Umur maksimum "denyut terakhir sukses" sebelum dashboard/preflight
+# menganggap bot mati atau macet (2026-11-16). Tiga kali denyut jantung:
+# satu denyut terlewat bukan berita, tiga kali berturut-turut berarti bot
+# tidak bekerja dan tidak ada yang tahu.
+DENYUT_BASI_S = 900
 
 # Batas percobaan kirim konfirmasi DCA per pair per bulan, TERMASUK yang
 # pertama. Gangguan Telegram sementara diulang, tetapi tidak tanpa batas:
@@ -1544,11 +1575,12 @@ def _main(argv=None, *, conn=None, db_path=None, telegram=None,
                             gagal_polling = False
                             gagal_polling_coba = 0
                             _sapa_awal()
-                    except Exception:
+                    except Exception as e:
                         # Sebabnya sudah dicetak `_catat_galat_telegram`
                         # (sekali per jenis per jam); di sini cukup keadaan.
                         gagal_polling_coba += 1
                         gagal_polling = True
+                        _catat_denyut(conn, now=sekarang, galat=e)
                 if denyut_penuh or promosi:
                     if pembaca_konteks is None:
                         konteks_baik = True
@@ -1579,6 +1611,7 @@ def _main(argv=None, *, conn=None, db_path=None, telegram=None,
                                 )
                                 print(_pesan_gagal)
                                 _catat_denyut_dilewatkan(_pesan_gagal)
+                            _catat_denyut(conn, now=sekarang, galat=e)
                     if konteks_baik:
                         try:
                             tick_cycle(conn, now=sekarang, telegram=telegram,
@@ -1605,6 +1638,7 @@ def _main(argv=None, *, conn=None, db_path=None, telegram=None,
                                 if not getattr(e, "_telegram_dicatat", False):
                                     print(_pesan_gagal)
                                 _catat_denyut_dilewatkan(_pesan_gagal)
+                            _catat_denyut(conn, now=sekarang, galat=e)
                         else:
                             if gagal_denyut:
                                 print(
@@ -1612,6 +1646,7 @@ def _main(argv=None, *, conn=None, db_path=None, telegram=None,
                             gagal_denyut = False
                             gagal_denyut_coba = 0
                             _sapa_awal()
+                            _catat_denyut(conn, now=sekarang)
                             # Status harian juga dicek di tiap denyut SUKSES:
                             # proses yang berjalan berhari-hari harus mengirim
                             # status baru saat tanggal lokalnya berganti
@@ -1648,6 +1683,7 @@ def _main(argv=None, *, conn=None, db_path=None, telegram=None,
                                 gagal_polling_coba % ULANG_LOG_KEGAGALAN == 0):
                             gagal_polling = True
                             print(f"Polling Telegram gagal — dilewati: {_samarkan_pesan_galat(e)}")
+                        _catat_denyut(conn, now=sekarang, galat=e)
             # Tidur selalu, termasuk di luar jam aktif: hitungan denyut harus tetap
             # berjalan supaya perubahan jam lokal langsung diikuti.
             tidur(POLL_GAP_S)
