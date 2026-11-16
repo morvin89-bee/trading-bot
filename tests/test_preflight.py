@@ -12,6 +12,15 @@ import safeguards
 import shadow_log
 
 
+@pytest.fixture(autouse=True)
+def _cek_jaringan_palsu(monkeypatch):
+    """Default preflight (getMe & DNS) tidak boleh menyentuh jaringan di tes."""
+    monkeypatch.setattr(preflight, "_telegram_get_me",
+                        lambda: (True, "bot @uji menjawab getMe"))
+    monkeypatch.setattr(preflight, "_dns_indodax",
+                        lambda: (True, "DNS ok, port 443 tersambung"))
+
+
 def _now(day=1, hour=9):
     """Epoch dari tanggal/jam WIB (mesin uji = WIB, pola tests/test_dca_window)."""
     import time
@@ -52,6 +61,8 @@ def _periksa(path, monkeypatch, now, **kwargs):
                         lambda _n: 7 * 3600)
     kwargs.setdefault("baca_izin", lambda: (False, False))
     kwargs.setdefault("ambil_waktu_bursa", lambda: now)
+    kwargs.setdefault("cek_telegram", lambda: (True, "bot @uji menjawab getMe"))
+    kwargs.setdefault("cek_dns", lambda: (True, "DNS ok, port 443 tersambung"))
     return preflight.periksa(db_path=path, sekarang=lambda: now, **kwargs)
 
 

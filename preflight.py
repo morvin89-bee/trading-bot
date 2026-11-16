@@ -10,7 +10,9 @@ Pemeriksaan yang menentukan GO/NO-GO, semuanya TANPA menulis apa pun:
    dengan sakelar) — dinilai `safeguards.permissions_ok`;
 5. selisih jam mesin dengan jam bursa masih di bawah toleransi;
 6. status mode bayangan (hari ke-N) terhadap lantai `GO_LIVE_SHADOW_DAYS`;
-7. jendela DCA bulan berjalan.
+7. jendela DCA bulan berjalan;
+8. token Telegram hidup (`getMe` baca-saja, tanpa mengirim pesan);
+9. DNS + port 443 `indodax.com` tersambung (tanpa kunci API).
 
 `--target live` (default) menuntut lantai hari bayangan. `--target bayangan`
 memeriksa "boleh mulai mode bayangan?": lantai hari TIDAK dipersyaratkan,
@@ -32,6 +34,7 @@ disuntik pada tes. Keluaran hanya memuat hasil pemeriksaan — tidak pernah
 nilai kunci API atau rahasia `.env`.
 """
 import argparse
+import socket
 import sqlite3
 import time
 
@@ -206,12 +209,66 @@ def _waktu_bursa():
     return float(resp.json()["server_time"]) / 1000.0
 
 
+def _telegram_get_me():
+    """`getMe` baca-saja: token hidup dan bot menjawab. Token tidak dicetak.
+
+    Hanya membaca identitas bot — tidak mengirim pesan dan tidak menyentuh
+    `getUpdates`, jadi antrian update tidak pernah terganggu.
+    """
+    import requests
+
+    token = main_loop._env("TELEGRAM_TOKEN")
+    if not token:
+        return (False, "TELEGRAM_TOKEN belum diisi di .env")
+    resp = requests.get(f"https://api.telegram.org/bot{token}/getMe",
+                        timeout=10)
+    resp.raise_for_status()
+    data = resp.json()
+    if not data.get("ok"):
+        return (False, f"Telegram menolak: {data.get('error_code')} "
+                       f"{data.get('description')}")
+    hasil = data.get("result") or {}
+    return (True, f"bot @{hasil.get('username')} menjawab getMe")
+
+
+def _dns_indodax():
+    """DNS + port 443 `indodax.com` — baca-saja, tanpa kunci API.
+
+    Kegagalan DNS/port = GAGAL (bisa dievaluasi), bukan TAK TERBACA.
+    """
+    try:
+        socket.getaddrinfo("indodax.com", 443)
+    except OSError as e:
+        return (False, f"DNS gagal: {e}")
+    try:
+        with socket.create_connection(("indodax.com", 443), timeout=5):
+            pass
+    except OSError as e:
+        return (False, f"port 443 indodax.com tidak tersambung: {e}")
+    return (True, "DNS ok, port 443 indodax.com tersambung")
+
+
+def _cek_dua_keadaan(nama, cek):
+    """Jalankan `cek()` -> `(ok, pesan)`; eksepsi = TAK TERBACA (bukan lolos).
+
+    Pesan galat disamarkan: galat `requests` menyisipkan URL ber-token.
+    """
+    try:
+        ok, pesan = cek()
+    except Exception as e:
+        return (None, nama,
+                f"tidak terbaca: {main_loop._samarkan_pesan_galat(e)}")
+    return (bool(ok), nama, str(pesan))
+
+
 def periksa(*, db_path=None, sekarang=None, baca_izin=None,
-            ambil_waktu_bursa=None, target="live"):
+            ambil_waktu_bursa=None, target="live", cek_telegram=None,
+            cek_dns=None):
     """Jalankan semua pemeriksaan; kembalikan daftar `(ok, nama, pesan)`.
 
     `ok` tiga keadaan: `True` lolos, `False` gagal (bisa dievaluasi), `None`
     tidak bisa dievaluasi. `target` = `"live"` (default) atau `"bayangan"`.
+    `cek_telegram`/`cek_dns` disuntik supaya tes tidak menyentuh jaringan.
     """
     if target not in TARGET:
         raise ValueError(
@@ -220,6 +277,8 @@ def periksa(*, db_path=None, sekarang=None, baca_izin=None,
     baca_izin = _izin_dari_env if baca_izin is None else baca_izin
     ambil_waktu_bursa = (_waktu_bursa if ambil_waktu_bursa is None
                          else ambil_waktu_bursa)
+    cek_telegram = _telegram_get_me if cek_telegram is None else cek_telegram
+    cek_dns = _dns_indodax if cek_dns is None else cek_dns
     db_path = portfolio_store.DB_FILE if db_path is None else db_path
     now = sekarang()
     hasil = []
@@ -268,6 +327,9 @@ def periksa(*, db_path=None, sekarang=None, baca_izin=None,
     except Exception as e:
         hasil.append((None, "jam bursa", f"jam bursa tidak terbaca: {e}"))
 
+    hasil.append(_cek_dua_keadaan("Telegram", cek_telegram))
+    hasil.append(_cek_dua_keadaan("DNS/koneksi indodax", cek_dns))
+
     if state is None:
         hasil.append((None, "mode", "status mode tidak terbaca (bot_state)"))
     elif target == "bayangan":
@@ -303,10 +365,12 @@ def periksa(*, db_path=None, sekarang=None, baca_izin=None,
 
 
 def main(*, db_path=None, sekarang=None, baca_izin=None,
-         ambil_waktu_bursa=None, target="live"):
+         ambil_waktu_bursa=None, target="live", cek_telegram=None,
+         cek_dns=None):
     """Cetak hasil preflight; 0 = GO, 1 = NO-GO, 2 = tidak bisa dievaluasi."""
     hasil = periksa(db_path=db_path, sekarang=sekarang, baca_izin=baca_izin,
-                    ambil_waktu_bursa=ambil_waktu_bursa, target=target)
+                    ambil_waktu_bursa=ambil_waktu_bursa, target=target,
+                    cek_telegram=cek_telegram, cek_dns=cek_dns)
     print(f"Preflight go-live (read-only, tidak ada order; target: {target})")
     label = {True: "OK", False: "GAGAL", None: "TAK TERBACA"}
     for ok, nama, pesan in hasil:
