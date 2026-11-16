@@ -105,18 +105,23 @@ def _v1_call(method, **params):
     diam-diam mengembalikan ``None``.
     """
     key, secret = _creds()
-    data = {"method": method, "timestamp": int(time.time() * 1000)}
-    data.update(params)
-    body = urllib.parse.urlencode(data)
-    sign = hmac.new(secret.encode(), body.encode(), hashlib.sha512).hexdigest()
-    req = urllib.request.Request(
-        V1_URL, data=body.encode(),
-        headers={"Key": key, "Sign": sign, "User-Agent": UA})
     max_tries = 3
     delay = 1.0
     import random
     galat = "tidak ada percobaan"
     for attempt in range(1, max_tries + 1):
+        # Timestamp dan tanda tangan dihitung PER PERCOBAAN. Cacat 2026-11-16:
+        # keduanya dibekukan di depan loop, jadi percobaan ketiga membawa
+        # timestamp berumur ~3-4 detik dan bisa ditolak "Invalid timestamp ...
+        # outside of the recvWindow" sebelum permintaannya sampai.
+        data = {"method": method, "timestamp": int(time.time() * 1000)}
+        data.update(params)
+        body = urllib.parse.urlencode(data)
+        sign = hmac.new(secret.encode(), body.encode(),
+                        hashlib.sha512).hexdigest()
+        req = urllib.request.Request(
+            V1_URL, data=body.encode(),
+            headers={"Key": key, "Sign": sign, "User-Agent": UA})
         try:
             with urllib.request.urlopen(req, timeout=30) as r:
                 return json.loads(r.read().decode())
