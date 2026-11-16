@@ -16,6 +16,21 @@
 ' dan ulangan dicatat jujur ke v1_loop.log.
 Const TERMINAL = "C:\Users\KakiTangan\trading-bot"
 logfile = TERMINAL & "\v1_loop.log"
+
+' Rotasi sederhana (2026-11-16): batas ukuran v1_loop.log. Dilakukan DI SINI,
+' sebelum python diluncurkan - selama bot hidup, cmd menahan berkas append
+' sehingga rename ditolak Windows ("being used by another process"). Satu
+' berkas lama disimpan (v1_loop.log.1), sisanya dibuang.
+Const LOG_MAKS_BYTE = 5242880
+Set fsoR = CreateObject("Scripting.FileSystemObject")
+If fsoR.FileExists(logfile) Then
+    If fsoR.GetFile(logfile).Size > LOG_MAKS_BYTE Then
+        On Error Resume Next
+        If fsoR.FileExists(logfile & ".1") Then fsoR.DeleteFile logfile & ".1", True
+        fsoR.MoveFile logfile, logfile & ".1"
+        On Error GoTo 0
+    End If
+End If
 ' pythonw dipanggil dengan jalur ABSOLUT (M4 review): `pythonw` telanjang
 ' bergantung PATH konteks task — bila PATH-nya kosong, cmd error 9009 dan
 ' seluruh ulangan terbakar percuma.

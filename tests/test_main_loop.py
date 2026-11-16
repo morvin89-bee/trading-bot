@@ -1349,7 +1349,8 @@ def test_main_di_nyalakan_setelah_7_hari_memanggil_pabrik_transport(
 
 def test_main_tidak_pernah_membangun_transport_bfisik():
     """R-2: tidak ada kelas transport pun di repo; main tidak mengarangnya."""
-    sumber = inspect.getsource(main_loop.main)
+    # `main` kini pembungkus cap waktu; logikanya di `_main`.
+    sumber = inspect.getsource(main_loop._main)
     assert "IndodaxTransport" not in sumber
     assert "Transport(" not in sumber
     # Satu-satunya jalan ke transport adalah argumen yang disuntik pemanggil.
@@ -2787,9 +2788,13 @@ def test_blokinisialisasi_memuat_jalur_produksi():
     assert "pembaca_konteks=baca_konteks" in sumber_modul
     assert "baca_harga=portfolio.fetch_price" in sumber_modul
 
-    sumber_main = inspect.getsource(main_loop.main)
+    sumber_main = inspect.getsource(main_loop._main)
     assert "live_fetch" not in sumber_main
     assert "pembaca_konteks=None" in sumber_main    # parameter default, bukan bacaan produksi
+    # Pembungkus `main` hanya menambah cap waktu, tidak menyentuh jaringan.
+    sumber_bungkus = inspect.getsource(main_loop.main)
+    assert "live_fetch" not in sumber_bungkus
+    assert "_CetakBerjam" in sumber_bungkus
 
 
 # --------------------------------------------------------------------------

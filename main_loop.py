@@ -43,6 +43,7 @@ import dataclasses
 import logging
 import os
 import re
+import sys
 import time
 import types
 
@@ -86,6 +87,38 @@ def _catat_denyut_dilewatkan(pesan):
     per hari untuk kejujuran hitungan periode shadow G5.
     """
     logging.warning("%s", _samarkan_pesan_galat(pesan))
+
+
+class _CetakBerjam:
+    """Bungkus stdout: setiap baris keluar dengan cap waktu WIB.
+
+    `cmd >>` di `run_v1_hidden.vbs`/`run_v1.bat` menulis stdout mentah tanpa
+    cap waktu, sehingga baris `v1_loop.log` tidak bisa dihitung per hari.
+    Cap ditambahkan di satu tempat ini, sebelum tulisan keluar. Mesin wajib
+    +07:00 (`main()` menolak start bila bukan), jadi `localtime` = WIB.
+    """
+
+    def __init__(self, aliran, jam):
+        self._aliran = aliran
+        self._jam = jam
+        self._awal_baris = True
+
+    def write(self, teks):
+        for bagian in teks.splitlines(keepends=True):
+            if self._awal_baris and bagian.strip():
+                cap = time.strftime("%Y-%m-%d %H:%M:%S",
+                                    time.localtime(self._jam()))
+                self._aliran.write(f"{cap} WIB ")
+            self._aliran.write(bagian)
+            self._awal_baris = bagian.endswith("\n")
+        return len(teks)
+
+    def flush(self):
+        self._aliran.flush()
+
+    def __getattr__(self, nama):
+        """Teruskan atribut lain (`encoding`, `isatty`, ...) ke aliran asli."""
+        return getattr(self._aliran, nama)
 
 
 # Denyut jantung: lima menit (plan:1116).
@@ -1197,9 +1230,30 @@ def _kunci_satu_instance(jalur=None):
     return handle
 
 
-def main(argv=None, *, conn=None, db_path=None, telegram=None,
-         transport_factory=None, ctx=None, fetch=None, jam=None, tidur=None,
-         pembaca_konteks=None, baca_harga=None):
+def main(argv=None, **kwargs):
+    """Jalankan loop dengan stdout bercap waktu WIB (isi `v1_loop.log`).
+
+    Pembungkus tipis: `_main` tetap seluruh logika. Yang ditambahkan hanya cap
+    waktu per baris dan pemulihan `sys.stdout` apa pun hasilnya.
+
+    `jam_cetak` (opsional) = sumber waktu cap log, bawaan `time.time`.
+    Dipisah dari `jam` supaya pencatatan tidak memakan jam yang disuntik tes.
+    """
+    jam_cetak = kwargs.pop("jam_cetak", time.time)
+    asli = sys.stdout
+    sys.stdout = _CetakBerjam(asli, jam_cetak)
+    try:
+        return _main(argv, **kwargs)
+    finally:
+        try:
+            sys.stdout.flush()
+        finally:
+            sys.stdout = asli
+
+
+def _main(argv=None, *, conn=None, db_path=None, telegram=None,
+          transport_factory=None, ctx=None, fetch=None, jam=None, tidur=None,
+          pembaca_konteks=None, baca_harga=None):
     """Jalankan loop. 0 = berhenti wajar, 1 = gagal (konsisten `scheduler.py`).
 
     `transport_factory` adalah satu-satunya jalan yang MUNGKIN menyentuh
