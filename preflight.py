@@ -257,11 +257,15 @@ def _telegram_get_me():
         return (False, "TELEGRAM_TOKEN belum diisi di .env")
     resp = requests.get(f"https://api.telegram.org/bot{token}/getMe",
                         timeout=10)
-    resp.raise_for_status()
+    # Badan JSON dibaca LEBIH DULU: Telegram menjawab 401/403 dengan
+    # `{"ok": false, "error_code": ..., "description": ...}`, jadi
+    # `raise_for_status()` di depan mengubah jawaban yang jelas menjadi
+    # "tidak terbaca" (cacat 2026-11-16).
     data = resp.json()
     if not data.get("ok"):
         return (False, f"Telegram menolak: {data.get('error_code')} "
                        f"{data.get('description')}")
+    resp.raise_for_status()
     hasil = data.get("result") or {}
     return (True, f"bot @{hasil.get('username')} menjawab getMe")
 
