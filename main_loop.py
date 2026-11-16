@@ -151,6 +151,13 @@ POLL_GAP_S = 15
 # mengirim pesan sapa tiap restart; penandanya disimpan di `bot_state`.
 SAPA_MIN_INTERVAL_S = 3600
 
+# Ulangan kirim sapa awal (2026-11-16): satu percobaan per proses terlalu
+# rapuh — `v1_loop.log` 2026-11-07..13 mencatat lima "Pesan sapa awal tidak
+# terkirim" beruntun. Batasnya jumlah DAN waktu (3 x 5 dtk = 10 dtk), lalu
+# polling jalan terus tanpa menunggu Telegram pulih.
+SAPA_ULANG_MAKS = 3
+SAPA_JEDA_ULANG_S = 5
+
 # Cetak ulang log kegagalan: tiap ke-N percobaan GAGAL BERTURUT-TURUT
 # (I1 review 2026-10-18). Baris pertama tetap muncul di percobaan pertama.
 # Tanpa syarat ini kegagalan permanen menyisakan SATU baris lalu sunyi
@@ -1375,8 +1382,17 @@ def _main(argv=None, *, conn=None, db_path=None, telegram=None,
                 mode = ("mode bayangan, tanpa order yang bisa dikirim" if shadow
                         else "eksekusi menyala — pantau dengan teliti")
                 print(f"Bot siap: polling Telegram aktif — {mode}.")
-                if not telegram.line(f"Bot semi-otomatis berjalan — {mode}."):
-                    print("Pesan sapa awal tidak terkirim — polling tetap jalan.")
+                pesan = f"Bot semi-otomatis berjalan — {mode}."
+                terkirim = False
+                for percobaan in range(1, SAPA_ULANG_MAKS + 1):
+                    if telegram.line(pesan):
+                        terkirim = True
+                        break
+                    if percobaan < SAPA_ULANG_MAKS:
+                        tidur(SAPA_JEDA_ULANG_S)
+                if not terkirim:
+                    print(f"Pesan sapa awal tidak terkirim setelah "
+                          f"{SAPA_ULANG_MAKS} percobaan — polling tetap jalan.")
             _status_harian()
 
         def _status_harian():
