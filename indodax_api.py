@@ -20,6 +20,7 @@ import hashlib
 import hmac
 import json
 import os
+import socket
 import time
 import urllib.error
 import urllib.parse
@@ -57,6 +58,11 @@ def _creds():
 
 
 def _http_error(e):
+    """Pesan galat HTTP dari badan balasan — HANYA untuk `HTTPError`.
+
+    `HTTPError` adalah satu-satunya eksepsi `urllib` yang punya `.read()`;
+    memanggilnya pada `URLError` menutupi sebab asli (lihat `_galat_jaringan`).
+    """
     body = e.read().decode(errors="replace")
     try:
         err = json.loads(body)
@@ -66,10 +72,37 @@ def _http_error(e):
     return f"HTTP {e.code}: {msg}"
 
 
+def _galat_jaringan(e):
+    """Sebab ASLI galat jaringan dalam satu baris pendek, tanpa rahasia.
+
+    Cacat nyata 2026-11-11 (`errors.log`): `_http_error` dipanggil untuk
+    SETIAP eksepsi, jadi `URLError` (DNS gagal, koneksi diputus, timeout)
+    berakhir sebagai `"'URLError' object has no attribute 'read'"` — pesan
+    yang terbaca operator tentang `read`, bukan tentang jaringan yang mati.
+    Klasifikasi di sini menyebut DNS/reset/timeout apa adanya.
+    """
+    if isinstance(e, urllib.error.HTTPError):
+        return _http_error(e)
+    alasan = getattr(e, "reason", None) or e
+    if isinstance(alasan, socket.gaierror):
+        return "DNS gagal: nama host tidak ditemukan"
+    if isinstance(alasan, (socket.timeout, TimeoutError)):
+        return "timeout: bursa tidak menjawab"
+    if isinstance(alasan, ConnectionResetError) or getattr(
+            alasan, "winerror", None) == 10054:
+        return "koneksi diputus bursa (reset)"
+    if isinstance(alasan, ConnectionRefusedError):
+        return "koneksi ditolak"
+    return f"jaringan: {alasan}"
+
+
 def _v1_call(method, **params):
     """TAPI v1 POST with HMAC‑SHA512.
     Implements up to 3 retries with exponential back‑off (+ jitter).
-    Returns ``None`` on total failure so caller can halt or use cached price.
+    Melempar ``RuntimeError`` dengan sebab asli setelah semua percobaan gagal:
+    pemanggil menangkapnya (`my_trades`/`account_info`) atau membungkusnya
+    menjadi `SubmissionUncertain` (`executor.submit_once`) — tidak pernah
+    diam-diam mengembalikan ``None``.
     """
     key, secret = _creds()
     data = {"method": method, "timestamp": int(time.time() * 1000)}
@@ -82,16 +115,17 @@ def _v1_call(method, **params):
     max_tries = 3
     delay = 1.0
     import random
+    galat = "tidak ada percobaan"
     for attempt in range(1, max_tries + 1):
         try:
             with urllib.request.urlopen(req, timeout=30) as r:
                 return json.loads(r.read().decode())
         except Exception as e:
-            _http_error(e)  # log via helper
+            galat = _galat_jaringan(e)
             if attempt < max_tries:
                 time.sleep(delay + random.random() * 0.5)
                 delay *= 2
-    return None
+    raise RuntimeError(f"v1 {galat}")
 
 
 def _v2_get(path, params=None):
@@ -119,6 +153,8 @@ def _v2_get(path, params=None):
             return json.loads(r.read().decode())
     except urllib.error.HTTPError as e:
         raise RuntimeError(f"v2 {_http_error(e)}")
+    except urllib.error.URLError as e:
+        raise RuntimeError(f"v2 {_galat_jaringan(e)}")
 
 
 def _parse_date(ds):
