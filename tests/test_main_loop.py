@@ -3005,9 +3005,14 @@ def test_pemulihan_denyut_dicetak_setelah_gagal(tmp_path, monkeypatch, capsys):
     assert "Denyut penuh sudah pulih" in keluaran
 
 
-def test_kegagalan_polling_dicetak_ulang_setiap_20_percobaan(tmp_path, capsys):
-    """Kegagalan permanen: baris pertama + cetak ulang ke-20 — bukan SUNYI
-    selamanya setelah satu baris, dan bukan banjir 5.760 baris per hari."""
+def test_kegagalan_polling_dicetak_ulang_sekali_per_jam(tmp_path, capsys):
+    """Kegagalan permanen: satu baris per jenis per jam — bukan SUNYI
+    selamanya setelah satu baris, dan bukan banjir 5.760 baris per hari.
+
+    Perubahan 2026-11-16: dulu dicetak ulang tiap 20 percobaan tanpa
+    menyebut sebabnya; kini `_catat_galat_telegram` mencetak satu baris
+    berisi sebab, sekali per jenis per jam.
+    """
     conn = _fresh_db(tmp_path)
     panggilan = {"n": 0}
 
@@ -3017,13 +3022,20 @@ def test_kegagalan_polling_dicetak_ulang_setiap_20_percobaan(tmp_path, capsys):
             return {"result": []}          # denyut pertama sehat
         raise ConnectionError("jaringan putus")
 
+    jam = [_ts(hour=12)]
+    bangun = [0]
+
+    def tidur(s):
+        bangun[0] += 1
+        jam[0] += 3600 if bangun[0] == 10 else s
+
     keluar = main_loop.main(
         ["--siklus", "21"], conn=conn, telegram=_TelegramPerekam(),
-        fetch=fetch, jam=lambda: _ts(hour=12), tidur=lambda s: None)
+        fetch=fetch, jam=lambda: jam[0], tidur=tidur)
 
     keluaran = capsys.readouterr().out
     assert keluar == 0
-    # 20 kegagalan berturut-turut (bangun 2..21): cetak di percobaan 1 dan 20.
+    # Jam 12: satu baris. Jam 13: satu baris lagi — total dua.
     assert keluaran.count("Polling Telegram gagal") == 2
 
 

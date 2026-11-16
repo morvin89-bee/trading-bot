@@ -2,6 +2,7 @@
 and simple line notifications.
 """
 
+import re
 from typing import Optional
 
 import requests
@@ -12,6 +13,43 @@ import proposal
 BUTTON_SETUJU = "setuju"
 BUTTON_TUNDA = "tunda"
 BUTTON_BATAL = "batal"
+
+# Keterangan singkat per kode balasan Telegram — saran perbaikan, bukan angka
+# telanjang. Tanpa token/chat id: baris ini masuk `v1_loop.log` yang dibaca
+# operator dan bisa ikut tersalin ke mana-mana.
+_GALAT_TELEGRAM = {
+    "401": "TELEGRAM_TOKEN ditolak (401) — periksa .env",
+    "403": "bot diblokir atau dikeluarkan dari chat (403) — periksa "
+           "TELEGRAM_CHAT_ID",
+    "409": "getUpdates bentrok (409) — ada proses lain memakai token yang sama",
+    "400": "permintaan ditolak Telegram (400) — periksa format pesan",
+    "429": "Telegram membatasi laju (429) — tunggu, jangan ulang cepat",
+}
+
+
+def klasifikasi_galat(e):
+    """`(jenis, keterangan)` untuk satu galat Telegram; keterangan tanpa token.
+
+    `jenis` = "401"/"403"/"409"/"400"/"429" (kode balasan), "jaringan" (tidak
+    sampai ke Telegram), atau "lain". Kode dibaca dari `response.status_code`
+    (`requests.HTTPError`), `.code` (`urllib`), atau teks galat — `live_fetch`
+    melempar `RuntimeError("Telegram menolak: 401 ...")` untuk `ok: false`.
+
+    `keterangan` = `None` untuk "lain": pemanggil yang menyamarkan pesannya
+    (`main_loop._samarkan_pesan_galat`) karena galat mentah bisa memuat URL
+    ber-token.
+    """
+    kode = getattr(getattr(e, "response", None), "status_code", None)
+    if kode is None:
+        kode = getattr(e, "code", None)
+    if kode is None:
+        cocok = re.search(r"\b(400|401|403|409|429)\b", str(e))
+        kode = cocok.group(1) if cocok else None
+    if kode is not None and str(kode) in _GALAT_TELEGRAM:
+        return str(kode), _GALAT_TELEGRAM[str(kode)]
+    if isinstance(e, OSError):   # ConnectionError/TimeoutError requests = OSError
+        return "jaringan", "jaringan Telegram gagal — periksa koneksi internet"
+    return "lain", None
 
 
 def get_updates(token: str, *, offset: int = 0, fetch=None) -> tuple[list[dict], int]:

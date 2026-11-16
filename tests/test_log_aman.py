@@ -82,7 +82,9 @@ def test_token_polling_tidak_dicetak_ke_log(tmp_path, monkeypatch, capsys):
     assert keluar == 0
     assert "Polling Telegram gagal" in keluaran
     assert "123456789" not in keluaran
-    assert "bot<disamarkan>" in keluaran
+    # Klasifikasi 2026-11-16 menyebut jenisnya (jaringan), bukan URL mentah:
+    # token tidak tercetak dan sebabnya tetap terbaca.
+    assert "jaringan Telegram gagal" in keluaran
 
 
 def test_token_denyut_penuh_tidak_dicetak_ke_log(tmp_path, monkeypatch,

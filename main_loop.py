@@ -89,6 +89,29 @@ def _catat_denyut_dilewatkan(pesan):
     logging.warning("%s", _samarkan_pesan_galat(pesan))
 
 
+def _catat_galat_telegram(e, now):
+    """Satu baris jelas per JENIS galat Telegram per jam; tanpa token/chat id.
+
+    Cacat 2026-11-16: token mati mencetak `401 Client Error ...` di setiap
+    denyut (51 baris/5 jam) tanpa menyebut sebabnya. Klasifikasi
+    (`telegram_gate.klasifikasi_galat`) mengubahnya menjadi satu baris yang
+    bisa ditindaklanjuti, dibatasi sekali per jenis per jam.
+
+    Galat autentikasi (401/403) juga memasang backoff `TELEGRAM_BACKOFF_401_S`:
+    token salah tidak akan sembuh karena dicoba lagi 12 kali sejam.
+    """
+    jenis, keterangan = telegram_gate.klasifikasi_galat(e)
+    if jenis in ("401", "403"):
+        _BACKOFF_TELEGRAM["sampai"] = now + TELEGRAM_BACKOFF_401_S
+    jam = int(now // 3600)
+    if _TERAKHIR_LOG_TELEGRAM.get(jenis) != jam:
+        _TERAKHIR_LOG_TELEGRAM[jenis] = jam
+        sebab = keterangan or _samarkan_pesan_galat(e)
+        print(f"Polling Telegram gagal — {sebab}")
+    # Penanda: penjaga denyut tidak perlu mencetak galat yang sama lagi.
+    setattr(e, "_telegram_dicatat", True)
+
+
 class _CetakBerjam:
     """Bungkus stdout: setiap baris keluar dengan cap waktu WIB.
 
@@ -158,6 +181,12 @@ SAPA_MIN_INTERVAL_S = 3600
 SAPA_ULANG_MAKS = 3
 SAPA_JEDA_ULANG_S = 5
 
+# Backoff galat autentikasi Telegram (2026-11-16): token mati membuat bot
+# memukul `getUpdates` tiap denyut (51 kali dalam 5 jam di `errors.log`)
+# tanpa satu pun hasil. 401/403 berarti token/chat salah — mengulang tiap
+# lima menit tidak akan menolong, jadi percobaan dibatasi satu per 10 menit.
+TELEGRAM_BACKOFF_401_S = 600
+
 # Cetak ulang log kegagalan: tiap ke-N percobaan GAGAL BERTURUT-TURUT
 # (I1 review 2026-10-18). Baris pertama tetap muncul di percobaan pertama.
 # Tanpa syarat ini kegagalan permanen menyisakan SATU baris lalu sunyi
@@ -212,6 +241,10 @@ _SUDAH_DIBERITAHU_RETRY_HABIS = set()
 _SUDAH_DIBERITAHU_METADATA = set()
 # Tanggal lokal yang sudah diberi tahu bahwa harga aset di luar target hilang.
 _SUDAH_DIBERITAHU_HARGA = set()
+# Satu baris per JENIS galat Telegram per jam: token mati tidak boleh
+# menghasilkan 12 baris/jam yang sama, dan tidak boleh sunyi sama sekali.
+_TERAKHIR_LOG_TELEGRAM = {}
+_BACKOFF_TELEGRAM = {"sampai": 0.0}
 
 
 def reset_state():
@@ -223,6 +256,8 @@ def reset_state():
     _SUDAH_DIBERITAHU_RETRY_HABIS.clear()
     _SUDAH_DIBERITAHU_METADATA.clear()
     _SUDAH_DIBERITAHU_HARGA.clear()
+    _TERAKHIR_LOG_TELEGRAM.clear()
+    _BACKOFF_TELEGRAM["sampai"] = 0.0
     engine.reset_state()
 
 
@@ -872,19 +907,30 @@ def _jawab(conn, ctx, aksi, id_usulan, *, now, telegram, transport,
     return hasil
 
 
-def _ambil_update(telegram, fetch):
+def _ambil_update(telegram, fetch, *, now):
     """Ambil batch `getUpdates` TANPA memajukan offset Telegram.
 
     Pemanggil yang memutuskan kapan offset boleh maju: batch yang hanya
     DIPERIKSA (promosi `/ulang`, lihat `main`) tidak boleh mengonsumsi
     antrian — `tick_cycle` akan mengambil batch yang sama lagi dengan
     offset lama dan memprosesnya di denyut yang segar.
+
+    Mengembalikan `None` bila sedang backoff galat autentikasi: API tidak
+    disentuh sama sekali (2026-11-16). Galat yang benar-benar terjadi dicatat
+    sekali per jenis per jam oleh `_catat_galat_telegram`, lalu dilempar
+    kembali — "gagal" tidak boleh menyamar menjadi "tanpa update".
     """
-    return telegram_gate.get_updates(
-        getattr(telegram, "token", ""),
-        offset=_OFFSET_TELEGRAM["offset"],
-        fetch=fetch,
-    )
+    if now < _BACKOFF_TELEGRAM["sampai"]:
+        return None
+    try:
+        return telegram_gate.get_updates(
+            getattr(telegram, "token", ""),
+            offset=_OFFSET_TELEGRAM["offset"],
+            fetch=fetch,
+        )
+    except Exception as e:
+        _catat_galat_telegram(e, now)
+        raise
 
 
 def _ada_perintah_ulang(updates):
@@ -984,7 +1030,10 @@ def _polling(conn, ctx, *, now, telegram, transport, shadow, verdict, fetch,
     """
     if fetch is None:
         return False
-    updates, offset_baru = _ambil_update(telegram, fetch)
+    ambil = _ambil_update(telegram, fetch, now=now)
+    if ambil is None:      # backoff galat autentikasi: tidak ada yang dibaca
+        return False
+    updates, offset_baru = ambil
     _simpan_offset(conn, offset_baru)
     return _proses_batch(conn, ctx, updates, now=now, telegram=telegram,
                          transport=transport, shadow=shadow, verdict=verdict,
@@ -1486,20 +1535,20 @@ def _main(argv=None, *, conn=None, db_path=None, telegram=None,
                 if (not denyut_penuh and konteks_baik
                         and transport is None and fetch is not None):
                     try:
-                        ambil = _ambil_update(telegram, fetch)
-                        promosi = _ada_perintah_ulang(ambil[0])
-                        if gagal_polling:
-                            print(
-                                "Polling Telegram sudah pulih — jalan kembali.")
-                        gagal_polling = False
-                        gagal_polling_coba = 0
-                        _sapa_awal()
-                    except Exception as e:
+                        ambil = _ambil_update(telegram, fetch, now=sekarang)
+                        if ambil is not None:
+                            promosi = _ada_perintah_ulang(ambil[0])
+                            if gagal_polling:
+                                print(
+                                    "Polling Telegram sudah pulih — jalan kembali.")
+                            gagal_polling = False
+                            gagal_polling_coba = 0
+                            _sapa_awal()
+                    except Exception:
+                        # Sebabnya sudah dicetak `_catat_galat_telegram`
+                        # (sekali per jenis per jam); di sini cukup keadaan.
                         gagal_polling_coba += 1
-                        if (not gagal_polling or
-                                gagal_polling_coba % ULANG_LOG_KEGAGALAN == 0):
-                            gagal_polling = True
-                            print(f"Polling Telegram gagal — dilewati: {_samarkan_pesan_galat(e)}")
+                        gagal_polling = True
                 if denyut_penuh or promosi:
                     if pembaca_konteks is None:
                         konteks_baik = True
@@ -1552,7 +1601,9 @@ def _main(argv=None, *, conn=None, db_path=None, telegram=None,
                                     f"Denyut penuh gagal — dilewati, dicoba "
                                     f"lagi: {_samarkan_pesan_galat(e)}"
                                 )
-                                print(_pesan_gagal)
+                                # Galat Telegram sudah punya barisnya sendiri.
+                                if not getattr(e, "_telegram_dicatat", False):
+                                    print(_pesan_gagal)
                                 _catat_denyut_dilewatkan(_pesan_gagal)
                         else:
                             if gagal_denyut:
