@@ -5,6 +5,7 @@ menggabungkannya dengan catatan lokal (`portfolio.db`), lalu menghitung
 kepemilikan dan harga rata-rata. Tidak ada fungsi yang bisa mengirim order.
 """
 import json
+import os
 import time
 from dataclasses import dataclass
 
@@ -22,6 +23,33 @@ COIN_PAIRS = {
     "sol": "sol_idr",
     "bch": "bch_idr",
 }
+
+RESERVE_ENV = "RESERVE_IDR"
+
+
+def reserve_idr(env=None):
+    """Cadangan IDR yang tidak boleh dibelanjakan beli-saat-turun.
+
+    Dibaca dari `RESERVE_IDR` (environment dulu, lalu `.env`). Tidak diset =
+    0.0: reserve buy tidak pernah diusulkan — perilaku yang sama seperti
+    sebelum kunci ini ada. Nilai tidak terbaca atau negatif mengangkat
+    `ValueError`: cadangan yang salah baca akan membelanjakan uang yang
+    seharusnya disimpan, jadi lebih baik berhenti terang-terangan.
+    """
+    if env is None:
+        env = indodax_api._load_env()
+    mentah = (os.environ.get(RESERVE_ENV) or env.get(RESERVE_ENV) or "").strip()
+    if not mentah:
+        return 0.0
+    # "Rp" dibuang, titik = pemisah ribuan gaya Indonesia ("25.000").
+    bersih = mentah.lower().removeprefix("rp").replace(".", "").replace(" ", "")
+    try:
+        nilai = float(bersih)
+    except ValueError:
+        raise ValueError(f"RESERVE_IDR tidak terbaca: {mentah!r}") from None
+    if nilai < 0:
+        raise ValueError(f"RESERVE_IDR negatif: {mentah!r}")
+    return nilai
 
 
 def parse_balances(info):
@@ -350,6 +378,9 @@ def refresh(conn, online=True):
     # disarankan "jual 50%" padahal hanya 25%).
     seen = set()
     actions = []
+    # Cadangan yang sama dengan yang dipakai bot (`baca_konteks`): alert tidak
+    # boleh menyarankan belanja lebih besar dari yang akan diusulkan bot.
+    cadangan = reserve_idr()
     sudah = shadow_log.take_profit_state(
         conn, {h.pair for h in holdings})
     for a in (rules.take_profit_actions(
@@ -358,7 +389,7 @@ def refresh(conn, online=True):
               + rules.rebalance_actions(
                   holdings, idr_reserve=idr, sudah=sudah,
                   max_order=safeguards.MAX_ORDER_IDR)
-              + rules.reserve_buy_actions(holdings, idr_reserve=idr)):
+              + rules.reserve_buy_actions(holdings, idr_reserve=cadangan)):
         key = (a.kind, a.pair)
         if key in seen:
             continue

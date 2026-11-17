@@ -574,9 +574,9 @@ def baca_konteks(conn, *, now=None, sinkron=portfolio.sync_trades,
        bukan halt seluruh denyut.
     4. `free_idr` dihitung dari field `free` SAJA (bukan `free + locked`):
        saldo yang terkunci order tidak boleh dianggap tersedia (spec §6.4
-       "free sudah bersih"). `reserve_idr = 0.0` — tidak ada konfigurasi
-       cadangan terkunci di repo; mengarang angkanya akan membuat pesan
-       berbohong.
+       "free sudah bersih"). `reserve_idr` dari `portfolio.reserve_idr()`
+       (`RESERVE_IDR` di `.env`); tidak diset = 0.0, dan reserve buy memang
+       tidak pernah diusulkan tanpa angka itu.
     5. `today_counts` / `last_fill_ts` / `held_pairs_24h` diturunkan dari
        riwayat `trades` dengan WAKTU LOKAL (`time.localtime`) — bukan isi
        yang dikarang, bukan `utcnow`.
@@ -640,7 +640,7 @@ def baca_konteks(conn, *, now=None, sinkron=portfolio.sync_trades,
 
     return engine.Context(
         holdings=holdings, prices=prices, free_idr=free_idr,
-        reserve_idr=0.0, today_counts=today_counts,
+        reserve_idr=portfolio.reserve_idr(), today_counts=today_counts,
         last_fill_ts=last_fill_ts, held_pairs_24h=held_pairs_24h,
     )
 

@@ -2357,10 +2357,11 @@ def test_dca_konfirmasi_menghasilkan_satuan_order_end_to_end(tmp_path):
 # Pembaca pasar produksi — baca_konteks (periode shadow)
 # --------------------------------------------------------------------------
 
-def test_baca_konteks_mengisi_konteks_penuh(tmp_path):
+def test_baca_konteks_mengisi_konteks_penuh(tmp_path, monkeypatch):
     import portfolio
     import portfolio_store
 
+    monkeypatch.setattr(portfolio, "reserve_idr", lambda: 0.0)
     conn = _fresh_db(tmp_path)
     portfolio_store.init_db(conn)
 
@@ -2403,6 +2404,23 @@ def test_baca_konteks_mengisi_konteks_penuh(tmp_path):
     assert ctx.today_counts == {"eth_idr": 1, "btc_idr": 1}
     assert ctx.last_fill_ts["eth_idr"] == now - 100
     assert ctx.held_pairs_24h == {"eth_idr", "btc_idr"}
+
+
+def test_baca_konteks_memakai_cadangan_dari_env(tmp_path, monkeypatch):
+    """`RESERVE_IDR` harus sampai ke Context, bukan tetap 0.0."""
+    import portfolio_store
+
+    monkeypatch.setattr(portfolio, "reserve_idr", lambda: 25000.0)
+    conn = _fresh_db(tmp_path)
+    portfolio_store.init_db(conn)
+    info = {"balances": [{"asset": "idr", "free": "100000", "locked": "0"}]}
+
+    ctx = main_loop.baca_konteks(
+        conn, now=_ts(hour=12), sinkron=lambda c: None,
+        ambil_info=lambda: info, ambil_harga=lambda pair: 1000.0)
+
+    assert ctx.free_idr == 100000.0
+    assert ctx.reserve_idr == 25000.0
 
 
 def test_baca_konteks_harga_satu_pair_gagal_mengangkat(tmp_path):

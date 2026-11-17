@@ -85,7 +85,7 @@ dengan firewall yang benar. Dashboard Streamlit sekarang ada di
 | Berkas | Cara pindah | Catatan |
 |---|---|---|
 | `portfolio.db` | Salin manual | **Satu-satunya sumber kebenaran** untuk kontribusi setoran dan harga rata-rata koin. Tanpa ini, seluruh riwayang lenyap dan semua posisi jadi "hasil pasar". |
-| `.env` | Salin tempel, hati-hati | Berisi `INDODAX_KEY`, `INDODAX_SECRET`, `TELEGRAM_TOKEN`, `TELEGRAM_CHAT_ID`. **Jangan lewat git. Jangan lewat chat. Jangan lewat email.** |
+| `.env` | Salin tempel, hati-hati | Berisi `INDODAX_KEY`, `INDODAX_SECRET`, `TELEGRAM_TOKEN`, `TELEGRAM_CHAT_ID`, dan opsional `RESERVE_IDR` (cadangan yang tidak boleh dipakai beli-saat-turun; tidak diset = fitur itu mati). **Jangan lewat git. Jangan lewat chat. Jangan lewat email.** |
 | Seluruh kode `.py` | Lewat git | Repo bersih di `ce0047f`. Pastikan commit yang sama dipakai di VPS. |
 
 ### 1.2 Boleh ditinggal
