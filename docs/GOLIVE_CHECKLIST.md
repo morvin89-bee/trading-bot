@@ -124,7 +124,9 @@ python -m preflight --target bayangan
       3. metadata pair (`pair_meta`) untuk semua koin yang dilacak masih segar
          — hilang/basi = NO-GO karena engine pasti halt;
       4. izin kunci dari `.env` lolos `safeguards.permissions_ok`
-         (`canWithdraw` harus `False`, `canTrade` cocok dengan sakelar);
+         (`canWithdraw` harus `False`, `canTrade` cocok dengan sakelar)
+         **dan** sama dengan `canTrade`/`canWithdraw` yang dilaporkan bursa
+         (`account_info()`): beda = GAGAL, tidak terbaca = TAK TERBACA;
       5. selisih jam mesin vs jam bursa ≤ 5 detik;
       6. status mode bayangan: `shadow_day >= 7` (kecuali sakelar sudah
          nyala, atau target `bayangan`);
@@ -230,6 +232,10 @@ sendiri harus sudah dibatasi.
       dari yang dibutuhkan mode itu. `permissions_ok` menuntut `canTrade`
       sama dengan sakelar, jadi kunci trade saat sakelar mati (dan
       sebaliknya) = halt.
+- [ ] `python -m preflight` mengonfirmasi deklarasi `.env` **sama** dengan
+      `canTrade`/`canWithdraw` yang dilaporkan bursa. Kunci trade yang
+      terpasang saat mode bayangan = NO-GO sejak 2026-11-19, bukan lagi
+      lolos diam-diam.
 
 ## 4. Lingkungan
 

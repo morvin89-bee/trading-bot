@@ -108,7 +108,9 @@ def test_preflight_denyut_segar_lolos(tmp_path, monkeypatch):
 
     hasil = preflight.periksa(
         db_path=path, sekarang=lambda: now,
-        baca_izin=lambda: (False, False), ambil_waktu_bursa=lambda: now,
+        baca_izin=lambda: (False, False),
+        baca_izin_bursa=lambda: (False, False),
+        ambil_waktu_bursa=lambda: now,
         cek_telegram=lambda: (True, "ok"), cek_dns=lambda: (True, "ok"))
 
     assert _baris(hasil)["denyut terakhir"][0] is True
@@ -122,7 +124,9 @@ def test_preflight_denyut_basi_jadi_gagal(tmp_path, monkeypatch):
 
     hasil = preflight.periksa(
         db_path=path, sekarang=lambda: now,
-        baca_izin=lambda: (False, False), ambil_waktu_bursa=lambda: now,
+        baca_izin=lambda: (False, False),
+        baca_izin_bursa=lambda: (False, False),
+        ambil_waktu_bursa=lambda: now,
         cek_telegram=lambda: (True, "ok"), cek_dns=lambda: (True, "ok"))
 
     ok, pesan = _baris(hasil)["denyut terakhir"]
@@ -137,7 +141,9 @@ def test_preflight_denyut_belum_pernah_tak_terbaca(tmp_path, monkeypatch):
 
     hasil = preflight.periksa(
         db_path=path, sekarang=lambda: now,
-        baca_izin=lambda: (False, False), ambil_waktu_bursa=lambda: now,
+        baca_izin=lambda: (False, False),
+        baca_izin_bursa=lambda: (False, False),
+        ambil_waktu_bursa=lambda: now,
         cek_telegram=lambda: (True, "ok"), cek_dns=lambda: (True, "ok"))
 
     assert _baris(hasil)["denyut terakhir"][0] is None

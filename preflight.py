@@ -6,8 +6,9 @@ Pemeriksaan yang menentukan GO/NO-GO, semuanya TANPA menulis apa pun:
 2. basis data bisa dibuka `mode=ro` dan skemanya sudah dimigrasikan;
 3. metadata pair (`pair_meta`) untuk semua koin yang dilacak masih segar —
    engine membulatkan qty dari metadata ini dan halt bila hilang/basi;
-4. izin kunci API dari `.env` (`canWithdraw` harus False, `canTrade` cocok
-   dengan sakelar) — dinilai `safeguards.permissions_ok`;
+4. izin kunci API: deklarasi `.env` (`canWithdraw` harus False, `canTrade`
+   cocok dengan sakelar — dinilai `safeguards.permissions_ok`) harus SAMA
+   dengan `canTrade`/`canWithdraw` yang dilaporkan bursa;
 5. selisih jam mesin dengan jam bursa masih di bawah toleransi;
 6. status mode bayangan (hari ke-N) terhadap lantai `GO_LIVE_SHADOW_DAYS`;
 7. jendela DCA bulan berjalan;
@@ -28,10 +29,10 @@ Basis data dibuka `file:...?mode=ro`: tidak ada `CREATE`, `ALTER`, atau
 "awaiting lewat 24 jam" menulis `mark_missed`; jendela dihitung ulang di
 sini dengan aturan yang sama, tanpa transisi.
 
-Tidak ada order dan tidak ada transport bursa di modul ini. Satu-satunya
-jaringan adalah pembacaan jam bursa (`ambil_waktu_bursa`), yang selalu bisa
-disuntik pada tes. Keluaran hanya memuat hasil pemeriksaan — tidak pernah
-nilai kunci API atau rahasia `.env`.
+Tidak ada order dan tidak ada transport bursa di modul ini. Jaringan hanya
+baca-saja: jam bursa, `getMe` Telegram, DNS, dan `account_info()` untuk izin
+kunci — semuanya bisa disuntik pada tes. Keluaran hanya memuat hasil
+pemeriksaan, tidak pernah nilai kunci API atau rahasia `.env`.
 """
 import argparse
 import socket
@@ -39,6 +40,7 @@ import sqlite3
 import time
 
 import dca_window
+import indodax_api
 import indodax_transport
 import main_loop
 import pair_meta
@@ -234,15 +236,51 @@ def _izin_dari_env():
     """Izin kunci dari deklarasi `.env` — bukan hasil tanya bursa.
 
     Bursa v2 sebenarnya mengembalikan `canTrade`/`canWithdraw` di
-    `account_info()`; belum ada kode yang mencocokkan keduanya, jadi nilai di
-    sini hanya menggemakan apa yang ditulis manusia.
+    `account_info()`; `_izin_bursa` yang membandingkannya.
     """
     return (indodax_transport._env_bool("INDODAX_CAN_TRADE"),
             indodax_transport._env_bool("INDODAX_CAN_WITHDRAW"))
 
 
+def _izin_bursa():
+    """Izin kunci yang SEBENARNYA menurut bursa (`account_info`)."""
+    info = indodax_api.account_info()
+    isi = info.get("return") or info      # v1 membungkus di dalam "return"
+    return (isi.get("canTrade"), isi.get("canWithdraw"))
+
+
+def _periksa_izin_bursa(baca_izin_bursa, can_trade, can_withdraw):
+    """Deklarasi `.env` harus sama dengan izin kunci yang dilaporkan bursa.
+
+    Cacat 2026-11-19: preflight hanya menggemakan `.env`, jadi kunci trade
+    bisa terpasang selama mode bayangan tanpa satu pun pemeriksaan
+    menyadarinya. Beda sekecil apa pun = GAGAL; tidak terbaca = TIDAK BISA
+    DIEVALUASI (ragu berarti jangan GO).
+    """
+    try:
+        trade, withdraw = baca_izin_bursa()
+    except Exception as e:
+        return (None, "izin kunci (bursa)",
+                f"tidak terbaca: {main_loop._samarkan_pesan_galat(e)}")
+    if trade is None or withdraw is None:
+        # v1 `getInfo` tidak melaporkan izin: ragu = jangan GO.
+        return (None, "izin kunci (bursa)",
+                "bursa tidak melaporkan canTrade/canWithdraw")
+    beda = [f"{nama}: bursa={nyata}, .env={deklarasi}"
+            for nama, nyata, deklarasi in (
+                ("canTrade", bool(trade), bool(can_trade)),
+                ("canWithdraw", bool(withdraw), bool(can_withdraw)))
+            if nyata != deklarasi]
+    if beda:
+        return (False, "izin kunci (bursa)",
+                "; ".join(beda) + " — samakan .env dengan izin kunci sebenarnya")
+    return (True, "izin kunci (bursa)",
+            f"cocok dengan deklarasi: canTrade={bool(trade)}, "
+            f"canWithdraw={bool(withdraw)}")
+
+
 def _waktu_bursa():
-    """Jam server Indodax dalam epoch detik (satu-satunya jaringan di sini)."""
+    """Jam server Indodax dalam epoch detik (baca-saja, tanpa kunci)."""
     import requests
     resp = requests.get("https://indodax.com/api/server_time", timeout=10)
     resp.raise_for_status()
@@ -306,19 +344,22 @@ def _cek_dua_keadaan(nama, cek):
 
 
 def periksa(*, db_path=None, sekarang=None, baca_izin=None,
-            ambil_waktu_bursa=None, target="live", cek_telegram=None,
-            cek_dns=None):
+            baca_izin_bursa=None, ambil_waktu_bursa=None, target="live",
+            cek_telegram=None, cek_dns=None):
     """Jalankan semua pemeriksaan; kembalikan daftar `(ok, nama, pesan)`.
 
     `ok` tiga keadaan: `True` lolos, `False` gagal (bisa dievaluasi), `None`
     tidak bisa dievaluasi. `target` = `"live"` (default) atau `"bayangan"`.
-    `cek_telegram`/`cek_dns` disuntik supaya tes tidak menyentuh jaringan.
+    `cek_telegram`/`cek_dns`/`baca_izin_bursa` disuntik supaya tes tidak
+    menyentuh jaringan.
     """
     if target not in TARGET:
         raise ValueError(
             f"target tidak dikenal: {target!r} (pilih: {', '.join(TARGET)})")
     sekarang = time.time if sekarang is None else sekarang
     baca_izin = _izin_dari_env if baca_izin is None else baca_izin
+    baca_izin_bursa = (_izin_bursa if baca_izin_bursa is None
+                       else baca_izin_bursa)
     ambil_waktu_bursa = (_waktu_bursa if ambil_waktu_bursa is None
                          else ambil_waktu_bursa)
     cek_telegram = _telegram_get_me if cek_telegram is None else cek_telegram
@@ -361,6 +402,8 @@ def periksa(*, db_path=None, sekarang=None, baca_izin=None,
             alasan is None, "izin kunci",
             alasan or f"canTrade={can_trade}, canWithdraw={can_withdraw} "
                       f"(sakelar {'nyala' if switch_on else 'mati'})"))
+        hasil.append(_periksa_izin_bursa(
+            baca_izin_bursa, can_trade, can_withdraw))
 
     try:
         selisih = abs(float(now) - float(ambil_waktu_bursa()))
@@ -415,10 +458,11 @@ def periksa(*, db_path=None, sekarang=None, baca_izin=None,
 
 
 def main(*, db_path=None, sekarang=None, baca_izin=None,
-         ambil_waktu_bursa=None, target="live", cek_telegram=None,
-         cek_dns=None):
+         baca_izin_bursa=None, ambil_waktu_bursa=None, target="live",
+         cek_telegram=None, cek_dns=None):
     """Cetak hasil preflight; 0 = GO, 1 = NO-GO, 2 = tidak bisa dievaluasi."""
     hasil = periksa(db_path=db_path, sekarang=sekarang, baca_izin=baca_izin,
+                    baca_izin_bursa=baca_izin_bursa,
                     ambil_waktu_bursa=ambil_waktu_bursa, target=target,
                     cek_telegram=cek_telegram, cek_dns=cek_dns)
     print(f"Preflight go-live (read-only, tidak ada order; target: {target})")

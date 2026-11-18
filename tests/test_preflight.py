@@ -14,11 +14,12 @@ import shadow_log
 
 @pytest.fixture(autouse=True)
 def _cek_jaringan_palsu(monkeypatch):
-    """Default preflight (getMe & DNS) tidak boleh menyentuh jaringan di tes."""
+    """Default preflight (getMe, DNS, izin bursa) tidak menyentuh jaringan."""
     monkeypatch.setattr(preflight, "_telegram_get_me",
                         lambda: (True, "bot @uji menjawab getMe"))
     monkeypatch.setattr(preflight, "_dns_indodax",
                         lambda: (True, "DNS ok, port 443 tersambung"))
+    monkeypatch.setattr(preflight, "_izin_bursa", lambda: (False, False))
 
 
 def _now(day=1, hour=9):
@@ -64,6 +65,9 @@ def _periksa(path, monkeypatch, now, **kwargs):
     monkeypatch.setattr(preflight.main_loop, "_offset_zona_lokal",
                         lambda _n: 7 * 3600)
     kwargs.setdefault("baca_izin", lambda: (False, False))
+    # Default: bursa melaporkan izin yang sama dengan deklarasi, supaya tes
+    # yang bukan tentang izin tidak ikut gagal.
+    kwargs.setdefault("baca_izin_bursa", kwargs["baca_izin"])
     kwargs.setdefault("ambil_waktu_bursa", lambda: now)
     kwargs.setdefault("cek_telegram", lambda: (True, "bot @uji menjawab getMe"))
     kwargs.setdefault("cek_dns", lambda: (True, "DNS ok, port 443 tersambung"))
@@ -86,6 +90,8 @@ def test_semua_lolos_berarti_go(tmp_path, monkeypatch):
     hasil = _periksa(path, monkeypatch, now)
 
     assert _gagal(hasil) == [], hasil
+    pesan = next(p for ok, n, p in hasil if n == "izin kunci (bursa)")
+    assert "cocok" in pesan, pesan
     assert preflight.main(db_path=path, sekarang=lambda: now,
                           baca_izin=lambda: (False, False),
                           ambil_waktu_bursa=lambda: now) == 0
@@ -128,6 +134,47 @@ def test_izin_tidak_terbaca_exit_2(tmp_path, monkeypatch):
     assert _gagal(hasil) == [], hasil
     assert preflight.main(db_path=path, sekarang=lambda: now,
                           baca_izin=lambda: (None, None),
+                          ambil_waktu_bursa=lambda: now) == 2
+
+
+def test_izin_bursa_beda_dari_deklarasi_no_go(tmp_path, monkeypatch):
+    """Cacat 2026-11-19: kunci trade terpasang padahal `.env` bilang baca-saja.
+
+    Preflight lama hanya menggemakan `.env`, jadi keadaan ini lolos GO.
+    """
+    now = _now()
+    path, conn = _db(tmp_path, now=now)
+    conn.close()
+    monkeypatch.setattr(preflight, "_izin_bursa", lambda: (True, True))
+
+    hasil = _periksa(path, monkeypatch, now, baca_izin=lambda: (False, False),
+                     baca_izin_bursa=lambda: (True, True))
+
+    assert _gagal(hasil) == ["izin kunci (bursa)"], hasil
+    pesan = next(p for ok, n, p in hasil if n == "izin kunci (bursa)")
+    assert "canTrade" in pesan and "canWithdraw" in pesan, pesan
+    # `main` memakai `_izin_bursa` sebagai bawaan: wiring-nya ikut diuji.
+    assert preflight.main(db_path=path, sekarang=lambda: now,
+                          baca_izin=lambda: (False, False),
+                          ambil_waktu_bursa=lambda: now) == 1
+
+
+def test_izin_bursa_tidak_terbaca_exit_2(tmp_path, monkeypatch):
+    """Bursa tidak menjawab = TAK TERBACA, bukan lolos (ragu = jangan GO)."""
+    now = _now()
+    path, conn = _db(tmp_path, now=now)
+    conn.close()
+
+    def rusak():
+        raise RuntimeError("jaringan putus")
+
+    hasil = _periksa(path, monkeypatch, now, baca_izin_bursa=rusak)
+
+    assert _tidak_terbaca(hasil) == ["izin kunci (bursa)"], hasil
+    assert _gagal(hasil) == [], hasil
+    assert preflight.main(db_path=path, sekarang=lambda: now,
+                          baca_izin=lambda: (False, False),
+                          baca_izin_bursa=rusak,
                           ambil_waktu_bursa=lambda: now) == 2
 
 
