@@ -231,7 +231,12 @@ def _dca_baca_saja(state, now):
 
 
 def _izin_dari_env():
-    """Izin kunci dari deklarasi `.env` — Indodax tidak mengeksposnya."""
+    """Izin kunci dari deklarasi `.env` — bukan hasil tanya bursa.
+
+    Bursa v2 sebenarnya mengembalikan `canTrade`/`canWithdraw` di
+    `account_info()`; belum ada kode yang mencocokkan keduanya, jadi nilai di
+    sini hanya menggemakan apa yang ditulis manusia.
+    """
     return (indodax_transport._env_bool("INDODAX_CAN_TRADE"),
             indodax_transport._env_bool("INDODAX_CAN_WITHDRAW"))
 
